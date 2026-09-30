@@ -487,6 +487,50 @@ def test_n_plus_one_ignores_a_batched_query_grouped_in_memory() -> None:
     assert _n_plus_one_lines(source) == []
 
 
+# (source, EQ-007 lines). All valid Python. Reviewer probe cases, 2026-09-30.
+_LOOP_BODY_CASES = [
+    # Comments, continuations and string contents never end a Python suite.
+    ("async def f(ids, db):\n    for item in ids:\n# comment\n        await db.execute(item)\n", [2]),
+    ("async def f(ids, db):\n    for item in ids:\n    # comment\n        await db.execute(item)\n", [2]),
+    ("async def f(ids, db):\n    for item in ids:\n        statement = (\n\"SELECT 1\"\n        )\n        await db.execute(statement)\n", [2]),
+    ("async def f(ids, db):\n    for item in ids:\n        statement = \"\"\"SELECT\n1\n\"\"\"\n        await db.execute(statement)\n", [2]),
+    ("async def f(ids, db):\n    for item in ids:\n        await db.execute(\n            item\n        )\n", [2]),
+    ("async def f(ids, db):\n    for item in ids:\n\n        if item:\n            await db.execute(item)\n", [2]),
+    ("async def f(ids, db):\n    for item in ids:\n        await db.execute(item)\n", [2]),
+    # Text that only looks like a loop is not one, in any case, and never crashes the scan.
+    ('"""Pseudocode:\nFOR item in ids:\n    await db.execute(item)\n"""\n', []),
+    ('"""Pseudocode:\nFor item in ids:\n    await db.execute(item)\n"""\n', []),
+    # ...even beside a real loop elsewhere in the same file: only the real loop is reported.
+    ('"""Pseudocode:\nFOR item in ids:\n    await db.execute(item)\n"""\nasync def f(ids, db):\n    for item in ids:\n        await db.execute(item)\n', [6]),
+    # One await after the loop ends is not a per-item call, and neither is the else suite,
+    # which runs once.
+    ("async def f(ids, db):\n    for item in ids:\n        str(item)\n    await db.commit()\n", []),
+    ("async def f(ids, db):\n    for item in ids:\n        str(item)\n    else:\n        await db.commit()\n", []),
+    # Unchanged window: an await more than 800 chars into the body stays unreported, as before.
+    ("async def f(ids, db):\n    for item in ids:\n" + "        pad = 1  # " + "x" * 800 + "\n        await db.execute(item)\n", []),
+    # Unchanged pre-existing miss: the DB name is not on the await's own line.
+    ("async def f(ids, db):\n    for item in ids:\n        await (\n            db.execute(item)\n        )\n", []),
+]
+
+
+def test_n_plus_one_loop_bodies_come_from_the_parser_not_indentation() -> None:
+    for source, expected in _LOOP_BODY_CASES:
+        compile(source, "<fixture>", "exec")  # valid Python; compiled, never run
+        assert _n_plus_one_lines(source) == expected, source
+
+
+def test_n_plus_one_on_unparsable_source_keeps_the_legacy_matcher() -> None:
+    # A syntax error must neither crash the scan nor hide what the old rule reported.
+    source = "async def f(ids, db):\n    for item in ids:\n        str(item)\n    await db.commit()\n    )\n"
+    try:
+        compile(source, "<fixture>", "exec")
+    except SyntaxError:
+        pass
+    else:
+        raise AssertionError("fixture must be invalid Python")
+    assert _n_plus_one_lines(source) == [2]
+
+
 def test_workflow_secret_labels_not_flagged_as_hardcoded_secrets() -> None:
     files = {
         ".github/workflows/security-review.yml": (

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 import re
 from typing import Iterable, Optional
+import warnings
 
 from .eng_quality_helpers import (
     index_to_line,
@@ -35,38 +37,60 @@ _PY_DB_AWAIT_LINE_RE = re.compile(
 _PY_LOOP_BODY_WINDOW = 800
 
 
+# The pre-AST matcher, kept verbatim for source Python cannot parse.
+_PY_LEGACY_N_PLUS_ONE_RE = re.compile(
+    r"^\s*for\s+.+:\s*$[\s\S]{0,800}?\n\s+await\s+.*\b(db|session|cursor|query|execute|fetch)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
 def _python_loops_awaiting_db(content: str) -> list[int]:
     """Match offsets of for-lines whose OWN body awaits a likely DB call.
 
-    The body is the run of lines indented deeper than the for-line (blank lines
-    included). An await after the loop ends, such as one commit once the loop is
-    done, is not a per-item call and does not count.
+    Loop bodies come from Python's parser, never from indentation, so comments,
+    continuation lines and string contents cannot end a body early, and text that
+    only looks like a loop (a docstring, say) is not one. An await after the loop
+    ends, such as one commit once the loop is done, is not a per-item call.
+    What counts as a DB await (a physical line starting with `await` and naming
+    db/session/...), the 800-char window, the reported offset and the non-overlap
+    after a hit are all unchanged. Source that does not parse keeps the legacy
+    matcher, so it can never crash the scan or report less than before.
     """
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # e.g. SyntaxWarning for "\d"; not a scan result
+            tree = ast.parse(content)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return [m.start() for m in _PY_LEGACY_N_PLUS_ONE_RE.finditer(content)]
+    loops = {node.lineno: node for node in ast.walk(tree) if isinstance(node, ast.For)}
+    lines = content.split("\n")
+    line_starts = [0]
+    for line in lines[:-1]:
+        line_starts.append(line_starts[-1] + len(line) + 1)
+
     offsets: list[int] = []
     consumed = 0
     for m in _PY_FOR_LINE_RE.finditer(content):
         if m.start() < consumed:
             continue
-        prefix = m.group(0)[: m.group(0).index("for")]
-        indent = len(prefix.rsplit("\n", 1)[-1].expandtabs())
-        for_line_end = content.find("\n", m.start() + len(prefix))
-        if for_line_end == -1:
-            continue
-        line_start = for_line_end + 1
-        while line_start < len(content) and line_start - for_line_end <= _PY_LOOP_BODY_WINDOW + 1:
-            line_end = content.find("\n", line_start)
-            if line_end == -1:
-                line_end = len(content)
-            line = content[line_start:line_end]
-            if line.strip():
-                expanded = line.expandtabs()
-                if len(expanded) - len(expanded.lstrip()) <= indent:
-                    break  # the loop body ended before any per-item await
-                if _PY_DB_AWAIT_LINE_RE.match(line):
-                    offsets.append(m.start())
-                    consumed = line_end
-                    break
-            line_start = line_end + 1
+        keyword = m.start() + len(m.group(0)) - len(m.group(0).lstrip())
+        loop = loops.get(content.count("\n", 0, keyword) + 1)
+        if loop is None:
+            continue  # the text only looks like a loop
+        for_line_end = content.find("\n", keyword)
+        hit_line = None
+        for statement in loop.body:
+            for node in ast.walk(statement):
+                if not isinstance(node, ast.Await):
+                    continue
+                line_no = node.lineno
+                if line_starts[line_no - 1] - for_line_end > _PY_LOOP_BODY_WINDOW + 1:
+                    continue
+                if _PY_DB_AWAIT_LINE_RE.match(lines[line_no - 1]) and (hit_line is None or line_no < hit_line):
+                    hit_line = line_no
+        if hit_line is not None:
+            offsets.append(m.start())
+            consumed = line_starts[hit_line - 1] + len(lines[hit_line - 1])
     return offsets
 
 
