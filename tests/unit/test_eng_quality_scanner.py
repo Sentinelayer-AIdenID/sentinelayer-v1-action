@@ -429,6 +429,64 @@ def test_httpx_module_case_matching_preserves_existing_behavior() -> None:
     ]
 
 
+def _n_plus_one_lines(source: str) -> list[int]:
+    scanner = EngQualityScanner(tech_stack=["FastAPI", "Python"])
+    findings = scanner.scan({"src/service.py": source})
+    return [f.line_start for f in findings if f.pattern_id == "EQ-007"]
+
+
+def test_n_plus_one_still_flags_awaits_inside_the_loop_body() -> None:
+    # Deep in the body, after a blank line and a nested block, and inside a
+    # nested loop: every per-item await is still a finding, reported at the
+    # outer for-line exactly as before.
+    source = (
+        "async def f(ids, db):\n"
+        "    for item_id in ids:\n"
+        "        if item_id:\n"
+        "            label = str(item_id)\n"
+        "\n"
+        "            await db.execute(\"SELECT 1\", {\"id\": label})\n"
+        "    return None\n"
+        "\n"
+        "async def g(groups, session):\n"
+        "    for group in groups:\n"
+        "        for member in group:\n"
+        "            await session.get(member)\n"
+    )
+    assert _n_plus_one_lines(source) == [2, 10]
+
+
+def test_n_plus_one_ignores_an_await_after_the_loop_ends() -> None:
+    # One query, an in-memory loop, then ONE commit after the loop: not N+1.
+    source = (
+        "async def list_rows(self):\n"
+        "    rows = (await self.db.scalars(stmt)).all()\n"
+        "    for row in rows:\n"
+        "        self._expire_if_due(row, now)\n"
+        "    result = {\"rows\": [view(r) for r in rows]}\n"
+        "    await self.db.commit()\n"
+        "    return result\n"
+    )
+    assert _n_plus_one_lines(source) == []
+
+
+def test_n_plus_one_ignores_a_batched_query_grouped_in_memory() -> None:
+    source = (
+        "async def list_links(self, links):\n"
+        "    by_link = {link.id: [] for link in links}\n"
+        "    if links:\n"
+        "        rows = await self.db.scalars(select(Claim).where(Claim.link_id.in_(list(by_link))))\n"
+        "        for claim in rows:\n"
+        "            by_link[claim.link_id].append(claim)\n"
+        "    metadata = []\n"
+        "    for link in links:\n"
+        "        metadata.append(len(by_link[link.id]))\n"
+        "    await self.db.commit()\n"
+        "    return metadata\n"
+    )
+    assert _n_plus_one_lines(source) == []
+
+
 def test_workflow_secret_labels_not_flagged_as_hardcoded_secrets() -> None:
     files = {
         ".github/workflows/security-review.yml": (

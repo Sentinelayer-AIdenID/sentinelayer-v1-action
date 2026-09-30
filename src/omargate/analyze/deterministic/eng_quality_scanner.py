@@ -28,6 +28,48 @@ _JS_COMMENTS_AND_STRINGS_RE = re.compile(
 )
 
 
+_PY_FOR_LINE_RE = re.compile(r"^\s*for\s+.+:\s*$", re.IGNORECASE | re.MULTILINE)
+_PY_DB_AWAIT_LINE_RE = re.compile(
+    r"^\s+await\s+.*\b(db|session|cursor|query|execute|fetch)\b", re.IGNORECASE
+)
+_PY_LOOP_BODY_WINDOW = 800
+
+
+def _python_loops_awaiting_db(content: str) -> list[int]:
+    """Match offsets of for-lines whose OWN body awaits a likely DB call.
+
+    The body is the run of lines indented deeper than the for-line (blank lines
+    included). An await after the loop ends, such as one commit once the loop is
+    done, is not a per-item call and does not count.
+    """
+    offsets: list[int] = []
+    consumed = 0
+    for m in _PY_FOR_LINE_RE.finditer(content):
+        if m.start() < consumed:
+            continue
+        prefix = m.group(0)[: m.group(0).index("for")]
+        indent = len(prefix.rsplit("\n", 1)[-1].expandtabs())
+        for_line_end = content.find("\n", m.start() + len(prefix))
+        if for_line_end == -1:
+            continue
+        line_start = for_line_end + 1
+        while line_start < len(content) and line_start - for_line_end <= _PY_LOOP_BODY_WINDOW + 1:
+            line_end = content.find("\n", line_start)
+            if line_end == -1:
+                line_end = len(content)
+            line = content[line_start:line_end]
+            if line.strip():
+                expanded = line.expandtabs()
+                if len(expanded) - len(expanded.lstrip()) <= indent:
+                    break  # the loop body ended before any per-item await
+                if _PY_DB_AWAIT_LINE_RE.match(line):
+                    offsets.append(m.start())
+                    consumed = line_end
+                    break
+            line_start = line_end + 1
+    return offsets
+
+
 @dataclass(frozen=True)
 class _Rule:
     pattern_id: str
@@ -374,11 +416,6 @@ class EngQualityScanner:
             r"for\s*\([^)]*\)\s*\{[^}]{0,1200}\bawait\b[^;]{0,200}\b(db|prisma|sequelize|knex|query|execute)\b",
             re.IGNORECASE | re.DOTALL,
         )
-        py_re = re.compile(
-            r"^\s*for\s+.+:\s*$[\s\S]{0,800}?\n\s+await\s+.*\b(db|session|cursor|query|execute|fetch)\b",
-            re.IGNORECASE | re.MULTILINE,
-        )
-
         for path, content in self._iter_files(files, exts=_BACKEND_EXTS):
             if self._is_test_file(path):
                 continue
@@ -396,8 +433,8 @@ class EngQualityScanner:
                         )
                     )
             if path.endswith(_PY_EXTS):
-                for m in py_re.finditer(content):
-                    line = self._index_to_line(content, m.start())
+                for start in _python_loops_awaiting_db(content):
+                    line = self._index_to_line(content, start)
                     snippet = self._line_snippet(content, line, min(line + 6, line + 6))
                     findings.append(
                         self._make_finding(
