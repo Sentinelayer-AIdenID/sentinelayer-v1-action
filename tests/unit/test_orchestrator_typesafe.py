@@ -11,6 +11,8 @@ import httpx
 import pytest
 
 import omargate.analyze.orchestrator as module
+from omargate.analyze.codex.codex_runner import parse_codex_findings
+from omargate.analyze.llm.response_parser import ResponseParser
 from omargate.analyze.orchestrator import AnalysisOrchestrator, LLMAnalysisResult
 from omargate.analyze.typesafe_client import TypeSafeClient, TypeSafeResult
 from omargate.analyze.typesafe_review import (
@@ -33,7 +35,7 @@ ACTUAL_GENERATOR = "fixture-returned-generator-model"
 DIFF = "diff --git a/source.py b/source.py\n--- a/source.py\n+++ b/source.py\n@@ -1 +1,2 @@\n-old\n+first\n+second\n"
 
 
-def finding(source="deterministic", *, model=None):
+def finding(source="deterministic", *, model=None, rule_id=None):
     result = {
         "id": "det-fixture" if source == "deterministic" else "typed-fixture",
         "severity": "P2", "category": "fixture", "file_path": "source.py",
@@ -44,6 +46,8 @@ def finding(source="deterministic", *, model=None):
     }
     if model is not None:
         result["model_source"] = model
+    if rule_id is not None:
+        result["rule_id"] = rule_id
     return result
 
 
@@ -497,9 +501,11 @@ async def test_real_partial_policy_result_is_valid_but_incomplete(tmp_path, monk
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("category", ["availability", "infrastructure"])
 async def test_blocking_category_without_corroboration_producer_requires_generator(
     tmp_path,
     monkeypatch,
+    category,
 ):
     policy = FixturePolicy()
 
@@ -509,8 +515,8 @@ async def test_blocking_category_without_corroboration_producer_requires_generat
                 candidate_id=candidates[0].candidate_id,
                 question_ids=("q0",),
                 severity="P1",
-                category="availability",
-                message="A fixed availability verdict.",
+                category=category,
+                message="A fixed generator-required verdict.",
                 recommendation="Bound attacker-controlled work.",
                 support_probability=0.95,
             ),),
@@ -533,7 +539,7 @@ async def test_blocking_category_without_corroboration_producer_requires_generat
     assessment = result.usage["typesafe_assessment"]
     assert assessment["complete"] is False
     assert assessment["policy_decision_complete"] is True
-    assert assessment["generator_required_categories"] == ["availability"]
+    assert assessment["generator_required_categories"] == [category]
     assert len(client.calls) == 1
 
 
@@ -646,20 +652,22 @@ async def test_empty_successful_fallback_retains_confirmed_partial_typed_finding
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("category", ["availability", "infrastructure"])
 async def test_generator_fallback_cannot_promote_category_without_corroboration_producer(
     tmp_path,
     monkeypatch,
+    category,
 ):
     instance, _, _ = orchestrator(tmp_path, monkeypatch, codex=False)
     typed_category_hold = partial_typed_outcome()
     typed_category_hold.findings[0].update(
         severity="P1",
-        category="availability",
-        typed_verdict={"severity": "P1", "category": "availability"},
+        category=category,
+        typed_verdict={"severity": "P1", "category": category},
     )
     typed_category_hold.failure_class = "typesafe_category_requires_generator"
     typed_category_hold.usage["typesafe_assessment"].update(
-        generator_required_categories=["availability"],
+        generator_required_categories=[category],
         failure_class="typesafe_category_requires_generator",
     )
     typed, cli, api = stages(
@@ -740,6 +748,305 @@ async def test_fallback_duplicate_does_not_replace_or_inflate_partial_typed_find
 
 
 @pytest.mark.parametrize(
+    "typed_severity,generator_severity,expected_severity,expected_source",
+    [
+        ("P2", "P0", "P0", "codex"),
+        ("P0", "P2", "P0", "llm"),
+        ("P0", "P0", "P0", "llm"),
+    ],
+)
+def test_llm_composition_keeps_strongest_guarded_severity_and_typed_provenance(
+    typed_severity,
+    generator_severity,
+    expected_severity,
+    expected_source,
+):
+    typed = bind_typed_candidate(finding("llm", model=PIN))
+    typed.update(
+        id="typed-collision",
+        severity=typed_severity,
+        category="auth",
+        line_start=2,
+        line_end=2,
+        typed_verdict={"severity": typed_severity, "category": "auth"},
+    )
+    generator = finding("codex", model=GENERATOR)
+    generator.update(
+        id="generator-collision",
+        severity=generator_severity,
+        category="auth",
+        line_start=2,
+        line_end=2,
+    )
+
+    composed = AnalysisOrchestrator._compose_llm_findings([typed], [generator])
+
+    assert len(composed) == 1
+    winner = composed[0]
+    assert winner["severity"] == expected_severity
+    assert winner["source"] == expected_source
+    assert {winner["id"]} | {
+        record["id"] for record in winner["collision_provenance"]
+    } == {
+        "typed-collision",
+        "generator-collision",
+    }
+    if expected_source == "llm":
+        assert winner["typed_candidate"] == typed["typed_candidate"]
+        assert winner["typed_verdict"] == typed["typed_verdict"]
+    else:
+        assert "typed_candidate" not in winner
+        assert "typed_verdict" not in winner
+        typed_alternate = next(
+            record
+            for record in winner["collision_provenance"]
+            if "typed_candidate" in record
+        )
+        assert typed_alternate["typed_candidate"] == typed["typed_candidate"]
+        assert typed_alternate["typed_verdict"] == typed["typed_verdict"]
+
+
+def test_final_merge_is_order_independent_and_keeps_typed_p0_over_deterministic_p2(
+    tmp_path,
+    monkeypatch,
+):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch)
+    typed = bind_typed_candidate(finding("llm", model=PIN))
+    typed.update(
+        id="typed-p0",
+        severity="P0",
+        category="auth",
+        line_start=2,
+        line_end=2,
+        typed_verdict={"severity": "P0", "category": "auth"},
+    )
+    deterministic = finding(rule_id="SEC-016")
+    deterministic.update(
+        id="deterministic-p2",
+        severity="P2",
+        category="auth",
+        line_start=2,
+        line_end=2,
+    )
+
+    forward = instance._merge_findings([deterministic], [typed])
+    reverse = instance._merge_findings([typed], [deterministic])
+
+    assert forward == reverse
+    assert len(forward) == 1
+    assert forward[0]["id"] == "typed-p0"
+    assert forward[0]["severity"] == "P0"
+    assert forward[0]["typed_candidate"] == typed["typed_candidate"]
+    assert {forward[0]["id"]} | {
+        record["id"] for record in forward[0]["collision_provenance"]
+    } == {
+        "typed-p0",
+        "deterministic-p2",
+    }
+
+
+def test_equal_severity_duplicate_prefers_typed_provenance_in_both_input_orders(
+    tmp_path,
+    monkeypatch,
+):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch)
+    typed = bind_typed_candidate(finding("llm", model=PIN))
+    typed.update(
+        id="typed-equal",
+        severity="P1",
+        category="auth",
+        typed_verdict={"severity": "P1", "category": "auth"},
+    )
+    generator = finding("codex", model=GENERATOR)
+    generator.update(
+        id="generator-equal",
+        severity="P1",
+        category="auth",
+    )
+
+    forward = instance._merge_findings([typed], [generator])
+    reverse = instance._merge_findings([generator], [typed])
+
+    assert forward == reverse
+    assert len(forward) == 1
+    assert forward[0]["id"] == "typed-equal"
+    assert forward[0]["typed_candidate"] == typed["typed_candidate"]
+
+
+def test_equal_severity_reviewed_producer_wins_and_retains_typed_alternate(
+    tmp_path,
+    monkeypatch,
+):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch)
+    typed = bind_typed_candidate(finding("llm", model=PIN))
+    typed.update(
+        id="typed-equal",
+        severity="P1",
+        category="auth",
+        typed_verdict={"severity": "P1", "category": "auth"},
+    )
+    deterministic = finding(rule_id="SEC-016")
+    deterministic.update(
+        id="reviewed-producer-equal",
+        severity="P1",
+        category="auth",
+    )
+
+    forward = instance._merge_findings([deterministic], [typed])
+    reverse = instance._merge_findings([typed], [deterministic])
+
+    assert forward == reverse
+    winner, = forward
+    assert winner["id"] == "reviewed-producer-equal"
+    assert "typed_candidate" not in winner
+    typed_alternate = next(
+        record
+        for record in winner["collision_provenance"]
+        if "typed_candidate" in record
+    )
+    assert typed_alternate["typed_candidate"] == typed["typed_candidate"]
+    assert typed_alternate["typed_verdict"] == typed["typed_verdict"]
+
+
+def test_distinct_same_start_spans_remain_stable_in_both_input_orders(
+    tmp_path,
+    monkeypatch,
+):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch)
+    short = finding(rule_id="SEC-016")
+    short.update(id="short-span", category="auth", line_start=1, line_end=1)
+    long = finding(rule_id="SEC-016")
+    long.update(id="long-span", category="auth", line_start=1, line_end=2)
+
+    forward = instance._merge_findings([short], [long])
+    reverse = instance._merge_findings([long], [short])
+
+    assert forward == reverse
+    assert [row["id"] for row in forward] == ["short-span", "long-span"]
+
+
+def test_collision_provenance_is_bounded_without_dropping_typed_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch)
+    typed = bind_typed_candidate(finding("llm", model=PIN))
+    typed.update(
+        id="z-typed-alternate",
+        category="auth",
+        typed_verdict={"severity": "P2", "category": "auth"},
+    )
+    winner = finding("codex", model=GENERATOR)
+    winner.update(id="winner", severity="P0", category="auth")
+    alternates = []
+    for index in range(12):
+        alternate = finding("codex", model=GENERATOR)
+        alternate.update(id=f"alternate-{index:02d}", category="auth")
+        alternates.append(alternate)
+
+    forward = instance._merge_findings([], [winner, *alternates, typed])
+    reverse = instance._merge_findings([], [typed, *reversed(alternates), winner])
+
+    assert forward == reverse
+    selected, = forward
+    assert selected["id"] == "winner"
+    assert len(selected["collision_provenance"]) == module._MAX_COLLISION_PROVENANCE
+    assert selected["collision_provenance_truncated"] is True
+    typed_alternate = next(
+        record
+        for record in selected["collision_provenance"]
+        if "typed_candidate" in record
+    )
+    assert typed_alternate["typed_candidate"] == typed["typed_candidate"]
+    assert typed_alternate["typed_verdict"] == typed["typed_verdict"]
+
+
+@pytest.mark.anyio
+async def test_guarded_fallback_p0_replaces_partial_typed_p2_without_losing_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch, codex=False)
+    corroboration = finding(rule_id="SEC-016")
+    corroboration.update(category="auth", line_start=2, line_end=2)
+    monkeypatch.setattr(instance, "_run_deterministic_scans", lambda _: [corroboration])
+    typed_partial = partial_typed_outcome()
+    generator = finding("llm", model=GENERATOR)
+    generator.update(
+        id="generator-p0",
+        severity="P0",
+        category="auth",
+        line_start=2,
+        line_end=2,
+        snippet="second\n",
+    )
+    stages(
+        instance,
+        monkeypatch,
+        typed=typed_partial,
+        generator=outcome(
+            provider="openai",
+            model=GENERATOR,
+            findings=[generator],
+        ),
+    )
+
+    result = await run(instance)
+
+    assert result.counts["total"] == result.counts["P0"] == 1
+    winner, = result.findings
+    assert winner["id"] == "generator-p0"
+    assert winner["severity"] == "P0"
+    assert "typed_candidate" not in winner
+    typed_alternate = next(
+        record
+        for record in winner["collision_provenance"]
+        if "typed_candidate" in record
+    )
+    assert typed_alternate["typed_candidate"] == (
+        typed_partial.findings[0]["typed_candidate"]
+    )
+    assert typed_alternate["typed_verdict"] == (
+        typed_partial.findings[0]["typed_verdict"]
+    )
+    assert result.llm_count == result.llm_reported_finding_count == 1
+
+
+@pytest.mark.anyio
+async def test_run_keeps_distinct_same_start_spans_in_counts(
+    tmp_path,
+    monkeypatch,
+):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch, codex=False)
+    deterministic = finding(rule_id="SEC-016")
+    deterministic.update(category="auth", line_start=1, line_end=1)
+    monkeypatch.setattr(instance, "_run_deterministic_scans", lambda _: [deterministic])
+    typed_partial = partial_typed_outcome()
+    typed_partial.findings[0].update(
+        severity="P0",
+        line_start=1,
+        line_end=2,
+        typed_verdict={"severity": "P0", "category": "auth"},
+    )
+    stages(
+        instance,
+        monkeypatch,
+        typed=typed_partial,
+        generator=outcome(provider="openai", model=GENERATOR),
+    )
+
+    result = await run(instance)
+
+    assert result.counts["total"] == 2
+    assert result.counts["P0"] == 1
+    assert result.counts["P2"] == 1
+    assert [(row["line_start"], row["line_end"]) for row in result.findings] == [
+        (1, 2),
+        (1, 1),
+    ]
+
+
+@pytest.mark.parametrize(
     "deterministic_start,deterministic_end,deterministic_category,expected_severity",
     [
         (35, 35, "auth", "P1"),
@@ -767,7 +1074,7 @@ def test_corroboration_uses_complete_typed_and_deterministic_ranges_with_exact_c
         line_end=40,
         message="A policy-owned authentication finding.",
     )
-    deterministic = finding()
+    deterministic = finding(rule_id="SEC-016")
     deterministic.update(
         category=deterministic_category,
         line_start=deterministic_start,
@@ -784,26 +1091,196 @@ def test_corroboration_uses_complete_typed_and_deterministic_ranges_with_exact_c
     assert guarded[0]["severity"] == expected_severity
 
 
+def test_reviewed_corroboration_producer_census_is_explicit_and_rule_bound(
+    tmp_path,
+    monkeypatch,
+):
+    expected = {
+        ("deterministic", "SEC-001", "secrets", "secrets"),
+        ("deterministic", "SEC-002", "secrets", "secrets"),
+        ("deterministic", "SEC-003", "secrets", "secrets"),
+        ("deterministic", "SEC-004", "secrets", "secrets"),
+        ("deterministic", "SEC-005", "secrets", "secrets"),
+        ("deterministic", "SEC-006", "secrets", "secrets"),
+        ("deterministic", "SEC-007", "misconfig", "misconfig"),
+        ("deterministic", "SEC-008", "injection", "injection"),
+        ("deterministic", "SEC-011", "crypto", "crypto"),
+        ("deterministic", "SEC-013", "secrets", "secrets"),
+        ("deterministic", "SEC-013", "ssrf", "ssrf"),
+        ("deterministic", "SEC-015", "privacy", "privacy"),
+        ("deterministic", "SEC-016", "auth", "auth"),
+        ("deterministic", "SEC-ENTROPY", "secrets", "secrets"),
+        ("deterministic", "CICD-001", "ci-cd", "ci-cd"),
+        ("deterministic", "CICD-002", "ci-cd", "ci-cd"),
+        ("deterministic", "CICD-003", "ci-cd", "ci-cd"),
+        ("deterministic", "CICD-004", "ci-cd", "ci-cd"),
+        ("deterministic", "CONF-ENV-001", "secrets", "secrets"),
+        ("deterministic", "CONF-PKG-001", "supply-chain", "supply-chain"),
+        ("deterministic", "CONF-DC-001", "misconfig", "misconfig"),
+        ("deterministic", "CONF-DC-002", "exposure", "exposure"),
+        ("deterministic", "EQ-022", "auth", "auth"),
+        ("deterministic", "EQ-023", "auth", "auth"),
+        (
+            "harness",
+            "HARNESS-NODE-IGNORE-SCRIPTS",
+            "supply-chain",
+            "supply-chain",
+        ),
+        ("harness", "HARNESS-DOCKER-COPY-ENV", "secrets", "secrets"),
+        ("harness", "HARNESS-CICD-PERMS", "ci_cd", "ci-cd"),
+        (
+            "harness",
+            "HARNESS-BUILD-LOCKFILE",
+            "supply-chain",
+            "supply-chain",
+        ),
+        (
+            "harness",
+            "HARNESS-BUILD-POSTINSTALL",
+            "supply-chain",
+            "supply-chain",
+        ),
+        (
+            "harness",
+            "HARNESS-BUILD-FLOATING-VERSIONS",
+            "supply-chain",
+            "supply-chain",
+        ),
+        ("harness", "HARNESS-NPM-AUDIT", "supply-chain", "supply-chain"),
+        ("harness", "HARNESS-PIP-AUDIT", "supply-chain", "supply-chain"),
+        ("harness", "HARNESS-CARGO-AUDIT", "supply-chain", "supply-chain"),
+        ("harness", "SEC-004", "secrets", "secrets"),
+        ("harness", "SEC-005", "secrets", "secrets"),
+        ("harness", "SEC-013", "secrets", "secrets"),
+        ("harness", "SEC-ENTROPY", "secrets", "secrets"),
+    }
+    actual = {
+        (*producer, canonical)
+        for producer, canonical in module._REVIEWED_CORROBORATION_PRODUCERS.items()
+    }
+
+    assert actual == expected
+    assert not any(canonical == "infrastructure" for *_, canonical in actual)
+
+    instance, _, _ = orchestrator(tmp_path, monkeypatch)
+    converted = instance._finding_to_dict(SimpleNamespace(
+        id="producer-fixture",
+        pattern_id="SEC-016",
+        severity="P1",
+        category="auth",
+        file_path="source.py",
+        line_start=1,
+        line_end=1,
+        snippet="first\n",
+        message="Authentication policy bypass.",
+        recommendation="Enforce authorization.",
+        fix_plan="Enforce authorization.",
+        confidence=1.0,
+        source="deterministic",
+    ))
+    assert converted["rule_id"] == "SEC-016"
+
+
 @pytest.mark.parametrize(
-    "typed_category,deterministic_category,expected_severity,expected_reason",
+    (
+        "typed_category,producer_source,rule_id,producer_category,"
+        "expected_severity,expected_reason"
+    ),
     [
-        ("ci-cd", "ci_cd", "P1", None),
-        ("auth", "csrf", "P1", None),
-        ("injection", "xss", "P1", None),
-        ("injection", "xxe", "P1", None),
-        ("injection", "path_traversal", "P1", None),
-        ("misconfig", "web", "P2", "no_compatible_deterministic_finding"),
-        ("availability", "availability", "P2", "no_reviewed_deterministic_producer"),
-        ("race-condition", "race-condition", "P2", "no_reviewed_deterministic_producer"),
-        ("other-security", "other-security", "P2", "no_reviewed_deterministic_producer"),
-        ("fixture", "fixture", "P2", "unsupported_category"),
+        ("ci-cd", "harness", "HARNESS-CICD-PERMS", "ci_cd", "P1", None),
+        ("csrf", "deterministic", "SEC-016", "auth", "P1", None),
+        ("xss", "deterministic", "SEC-008", "injection", "P1", None),
+        ("xxe", "deterministic", "SEC-008", "injection", "P1", None),
+        ("path_traversal", "deterministic", "SEC-008", "injection", "P1", None),
+        (
+            "auth",
+            "deterministic",
+            "SEC-016",
+            "csrf",
+            "P2",
+            "no_compatible_deterministic_finding",
+        ),
+        (
+            "injection",
+            "deterministic",
+            "SEC-008",
+            "xss",
+            "P2",
+            "no_compatible_deterministic_finding",
+        ),
+        (
+            "auth",
+            "deterministic",
+            None,
+            "auth",
+            "P2",
+            "no_compatible_deterministic_finding",
+        ),
+        (
+            "auth",
+            "deterministic",
+            "SEC-999",
+            "auth",
+            "P2",
+            "no_compatible_deterministic_finding",
+        ),
+        (
+            "misconfig",
+            "harness",
+            "HARNESS-HTTP-HEADERS",
+            "web",
+            "P2",
+            "no_compatible_deterministic_finding",
+        ),
+        (
+            "availability",
+            "deterministic",
+            "UNREVIEWED",
+            "availability",
+            "P2",
+            "no_reviewed_deterministic_producer",
+        ),
+        (
+            "race-condition",
+            "deterministic",
+            "UNREVIEWED",
+            "race-condition",
+            "P2",
+            "no_reviewed_deterministic_producer",
+        ),
+        (
+            "other-security",
+            "deterministic",
+            "UNREVIEWED",
+            "other-security",
+            "P2",
+            "no_reviewed_deterministic_producer",
+        ),
+        (
+            "infrastructure",
+            "deterministic",
+            "EQ-018",
+            "infrastructure",
+            "P2",
+            "no_reviewed_deterministic_producer",
+        ),
+        (
+            "fixture",
+            "deterministic",
+            "UNREVIEWED",
+            "fixture",
+            "P2",
+            "unsupported_category",
+        ),
     ],
 )
-def test_corroboration_uses_only_explicit_category_compatibility(
+def test_corroboration_uses_only_reviewed_rule_bound_category_compatibility(
     tmp_path,
     monkeypatch,
     typed_category,
-    deterministic_category,
+    producer_source,
+    rule_id,
+    producer_category,
     expected_severity,
     expected_reason,
 ):
@@ -815,16 +1292,16 @@ def test_corroboration_uses_only_explicit_category_compatibility(
         line_start=20,
         line_end=40,
     )
-    deterministic = finding()
-    deterministic.update(
-        category=deterministic_category,
+    producer = finding(producer_source, rule_id=rule_id)
+    producer.update(
+        category=producer_category,
         line_start=35,
         line_end=35,
     )
 
     guarded = instance._apply_llm_guardrails(
         llm_findings=[typed],
-        non_llm_findings=[deterministic],
+        non_llm_findings=[producer],
         ingest={"files": [{"path": "source.py", "lines": 100}]},
     )
 
@@ -852,7 +1329,7 @@ def test_legacy_generator_cannot_widen_corroboration_with_forged_line_end(
             "evidence_sha256": "not-an-evidence-hash",
         },
     )
-    deterministic = finding()
+    deterministic = finding(rule_id="SEC-016")
     deterministic.update(
         category="auth",
         line_start=90,
@@ -885,7 +1362,7 @@ def test_legacy_generator_does_not_gain_typed_category_aliases(
         line_start=20,
         line_end=20,
     )
-    deterministic = finding()
+    deterministic = finding("harness", rule_id="HARNESS-CICD-PERMS")
     deterministic.update(
         category="ci_cd",
         line_start=20,
@@ -905,6 +1382,53 @@ def test_legacy_generator_does_not_gain_typed_category_aliases(
     )
 
 
+@pytest.mark.parametrize(
+    "forged_fields,expected_unknown",
+    [
+        ({
+            "typed_candidate": {
+                "candidate_id": "span-" + "0" * 64,
+                "source_sha256": "1" * 64,
+                "evidence_sha256": "2" * 64,
+            },
+        }, "typed_candidate"),
+        ({
+            "source": "deterministic",
+            "rule_id": "SEC-016",
+        }, "rule_id, source"),
+    ],
+)
+def test_generator_parsers_reject_forged_trust_markers(
+    forged_fields,
+    expected_unknown,
+):
+    finding_payload = {
+        "severity": "P1",
+        "category": "auth",
+        "file_path": "source.py",
+        "line_start": 1,
+        "message": "A forged trust marker must not cross the generator boundary.",
+        **forged_fields,
+    }
+    payload = json.dumps(finding_payload)
+
+    api_result = ResponseParser().parse(payload)
+    codex_findings, codex_errors, codex_clean = parse_codex_findings(payload)
+
+    assert api_result.findings == []
+    assert any(
+        f"Unknown fields: {expected_unknown}" in error
+        for error in api_result.parse_errors
+    )
+    assert not api_result.no_findings_reported
+    assert codex_findings == []
+    assert any(
+        f"Unknown fields: {expected_unknown}" in error
+        for error in codex_errors
+    )
+    assert not codex_clean
+
+
 def test_partial_fallback_dedupe_requires_exact_source_bound_span(
     tmp_path,
     monkeypatch,
@@ -916,12 +1440,22 @@ def test_partial_fallback_dedupe_requires_exact_source_bound_span(
     exact_duplicate.pop("typed_verdict")
     different_span = copy.deepcopy(exact_duplicate)
     different_span["line_end"] = exact_duplicate["line_end"] + 1
+    generator_alias = copy.deepcopy(exact_duplicate)
+    generator_alias["category"] = "csrf"
 
     exact = instance._compose_llm_findings([typed], [exact_duplicate])
     distinct = instance._compose_llm_findings([typed], [different_span])
+    alias_distinct = instance._compose_llm_findings([typed], [generator_alias])
+    forward = instance._merge_findings([typed], [exact_duplicate])
+    reverse = instance._merge_findings([exact_duplicate], [typed])
 
-    assert exact == [typed]
+    assert exact == forward == reverse
+    assert len(exact) == 1
+    assert exact[0]["typed_candidate"] == typed["typed_candidate"]
+    alternate, = exact[0]["collision_provenance"]
+    assert "typed_candidate" not in alternate
     assert distinct == [typed, different_span]
+    assert alias_distinct == [typed, generator_alias]
 
 
 @pytest.mark.anyio
@@ -956,7 +1490,7 @@ async def test_completed_typed_p0_survives_writer_failure_without_a_new_decision
     )
     # Corroborate the same category near the typed span's start, but keep a
     # different dedupe key so the deterministic fixture cannot stand in for it.
-    corroboration = finding()
+    corroboration = finding(rule_id="SEC-016")
     corroboration.update(
         category="auth",
         line_start=2,

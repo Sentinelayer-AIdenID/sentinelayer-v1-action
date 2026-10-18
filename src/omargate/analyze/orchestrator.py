@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -70,10 +71,10 @@ _LOG_SECRET_SCRUB_RES = (
     ),
 )
 
-# Only policy-declared categories and narrow, reviewed aliases can corroborate a
-# blocking typed verdict. Generic labels such as ``web``/``backend`` remain
-# incompatible and therefore downgrade P0/P1 findings to P2.
-_CORROBORATION_CATEGORY_ALIASES: Mapping[str, str] = MappingProxyType({
+# TypeSafe owns this vocabulary. Fine-grained policy labels may map to a
+# canonical security class, but these aliases never authenticate producer
+# output. Non-LLM corroboration uses the separate rule-bound census below.
+_TYPED_CATEGORY_ALIASES: Mapping[str, str] = MappingProxyType({
     "auth": "auth",
     "auth_bypass": "auth",
     "csrf": "auth",
@@ -106,26 +107,99 @@ _CORROBORATION_CATEGORY_ALIASES: Mapping[str, str] = MappingProxyType({
     "other-security": "other-security",
 })
 
-# No current deterministic/harness producer emits these reviewed categories.
-# Their typed P0/P1 verdicts must trigger generator fallback and remain P2 until
-# a narrow producer contract is implemented and tested.
+# Only these reviewed producer/rule/category tuples may corroborate a blocking
+# typed verdict. The emitted category is part of the key so a known rule cannot
+# be relabelled into a more permissive security class. Generic infrastructure,
+# quality, web, and harness-health rules are intentionally absent.
+_REVIEWED_CORROBORATION_PRODUCERS: Mapping[
+    tuple[str, str, str], str
+] = MappingProxyType({
+    ("deterministic", "SEC-001", "secrets"): "secrets",
+    ("deterministic", "SEC-002", "secrets"): "secrets",
+    ("deterministic", "SEC-003", "secrets"): "secrets",
+    ("deterministic", "SEC-004", "secrets"): "secrets",
+    ("deterministic", "SEC-005", "secrets"): "secrets",
+    ("deterministic", "SEC-006", "secrets"): "secrets",
+    ("deterministic", "SEC-007", "misconfig"): "misconfig",
+    ("deterministic", "SEC-008", "injection"): "injection",
+    ("deterministic", "SEC-011", "crypto"): "crypto",
+    ("deterministic", "SEC-013", "secrets"): "secrets",
+    ("deterministic", "SEC-013", "ssrf"): "ssrf",
+    ("deterministic", "SEC-015", "privacy"): "privacy",
+    ("deterministic", "SEC-016", "auth"): "auth",
+    ("deterministic", "SEC-ENTROPY", "secrets"): "secrets",
+    ("deterministic", "CICD-001", "ci-cd"): "ci-cd",
+    ("deterministic", "CICD-002", "ci-cd"): "ci-cd",
+    ("deterministic", "CICD-003", "ci-cd"): "ci-cd",
+    ("deterministic", "CICD-004", "ci-cd"): "ci-cd",
+    ("deterministic", "CONF-ENV-001", "secrets"): "secrets",
+    ("deterministic", "CONF-PKG-001", "supply-chain"): "supply-chain",
+    ("deterministic", "CONF-DC-001", "misconfig"): "misconfig",
+    ("deterministic", "CONF-DC-002", "exposure"): "exposure",
+    ("deterministic", "EQ-022", "auth"): "auth",
+    ("deterministic", "EQ-023", "auth"): "auth",
+    ("harness", "HARNESS-NODE-IGNORE-SCRIPTS", "supply-chain"): "supply-chain",
+    ("harness", "HARNESS-DOCKER-COPY-ENV", "secrets"): "secrets",
+    ("harness", "HARNESS-CICD-PERMS", "ci_cd"): "ci-cd",
+    ("harness", "HARNESS-BUILD-LOCKFILE", "supply-chain"): "supply-chain",
+    ("harness", "HARNESS-BUILD-POSTINSTALL", "supply-chain"): "supply-chain",
+    (
+        "harness",
+        "HARNESS-BUILD-FLOATING-VERSIONS",
+        "supply-chain",
+    ): "supply-chain",
+    ("harness", "HARNESS-NPM-AUDIT", "supply-chain"): "supply-chain",
+    ("harness", "HARNESS-PIP-AUDIT", "supply-chain"): "supply-chain",
+    ("harness", "HARNESS-CARGO-AUDIT", "supply-chain"): "supply-chain",
+    ("harness", "SEC-004", "secrets"): "secrets",
+    ("harness", "SEC-005", "secrets"): "secrets",
+    ("harness", "SEC-013", "secrets"): "secrets",
+    ("harness", "SEC-ENTROPY", "secrets"): "secrets",
+})
+
+# No reviewed rule-bound producer currently supports these policy categories.
+# Their typed P0/P1 verdicts require generator review and remain P2 without
+# independently approved corroboration.
 _TYPED_CATEGORIES_REQUIRING_GENERATOR = frozenset({
     "availability",
+    "infrastructure",
     "race-condition",
     "other-security",
 })
 
 
-def _canonical_corroboration_category(value: object) -> str | None:
+def _canonical_typed_category(value: object) -> str | None:
     if not isinstance(value, str):
         return None
-    return _CORROBORATION_CATEGORY_ALIASES.get(value.strip().lower())
+    return _TYPED_CATEGORY_ALIASES.get(value.strip().lower())
+
+
+def _canonical_producer_category(finding: object) -> str | None:
+    """Return the reviewed category for an exact producer/rule/output tuple."""
+    if not isinstance(finding, dict):
+        return None
+    source = finding.get("source")
+    rule_id = finding.get("rule_id")
+    category = finding.get("category")
+    if (
+        not isinstance(source, str)
+        or not isinstance(rule_id, str)
+        or not isinstance(category, str)
+    ):
+        return None
+    return _REVIEWED_CORROBORATION_PRODUCERS.get((source, rule_id, category))
 
 
 def _validated_typed_candidate_binding(
     finding: object,
 ) -> tuple[str, str, str] | None:
-    """Return the immutable TypeSafe source binding carried by a finding."""
+    """Return the immutable TypeSafe source binding carried by a finding.
+
+    This helper validates structure, not origin. It is safe in the current
+    pipeline because only the verified TypeSafe inventory creates this field;
+    both external generator parsers reject ``typed_candidate`` as unknown.
+    Keep that parser boundary tested if a new finding ingress path is added.
+    """
     if not isinstance(finding, dict):
         return None
     binding = finding.get("typed_candidate")
@@ -156,6 +230,160 @@ def _coerce_finding_int(value: object, *, default: int | None = None) -> int | N
         return int(value)
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+_FINDING_SEVERITY_RANK = MappingProxyType({
+    "P0": 0,
+    "P1": 1,
+    "P2": 2,
+    "P3": 3,
+})
+_MAX_COLLISION_PROVENANCE = 8
+_TYPED_FINDING_FIELDS = (
+    "typed_candidate",
+    "typed_verdict",
+    "typed_reason",
+    "typed_recommendation",
+)
+
+
+def _finding_confidence(finding: Mapping[str, object]) -> float:
+    value = finding.get("confidence")
+    if isinstance(value, bool) or not isinstance(value, (int, float, str, bytes)):
+        return 0.0
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return confidence if math.isfinite(confidence) else 0.0
+
+
+def _finding_trust_rank(finding: dict) -> int:
+    if _canonical_producer_category(finding) is not None:
+        return 0
+    if _validated_typed_candidate_binding(finding) is not None:
+        return 1
+    source = finding.get("source")
+    if source in {"deterministic", "harness", "system"}:
+        return 2
+    if source in {"llm", "codex"}:
+        return 3
+    return 4
+
+
+def _stable_finding_identity(finding: dict) -> str:
+    identity = {
+        key: value
+        for key, value in finding.items()
+        if key not in {
+            "collision_provenance",
+            "collision_provenance_truncated",
+        }
+    }
+    return json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _finding_collision_priority(finding: dict) -> tuple[int, int, float, str]:
+    severity = finding.get("severity")
+    severity_rank = (
+        _FINDING_SEVERITY_RANK.get(severity, 4)
+        if isinstance(severity, str)
+        else 4
+    )
+    return (
+        severity_rank,
+        _finding_trust_rank(finding),
+        -_finding_confidence(finding),
+        _stable_finding_identity(finding),
+    )
+
+
+def _finding_provenance(finding: dict) -> dict[str, object]:
+    provenance: dict[str, object] = {}
+    for key in ("source", "id", "severity", "rule_id", "model_source"):
+        value = finding.get(key)
+        if isinstance(value, str) and value:
+            provenance[key] = value
+    binding = _validated_typed_candidate_binding(finding)
+    verdict = finding.get("typed_verdict")
+    if binding is not None and isinstance(verdict, dict):
+        provenance["typed_candidate"] = {
+            "candidate_id": binding[0],
+            "source_sha256": binding[1],
+            "evidence_sha256": binding[2],
+        }
+        provenance["typed_verdict"] = dict(verdict)
+    return provenance
+
+
+def _resolve_finding_collision(findings: List[dict]) -> dict:
+    """Collapse one collision group without weakening severity or provenance.
+
+    The winner stays authoritative at the top level. Alternate provenance is
+    bounded, with source-bound TypeSafe records retained first.
+    """
+    winner = min(findings, key=_finding_collision_priority)
+    resolved = dict(winner)
+    if _validated_typed_candidate_binding(winner) is None:
+        for field in _TYPED_FINDING_FIELDS:
+            resolved.pop(field, None)
+
+    provenance_by_identity: dict[str, dict[str, object]] = {}
+    provenance_truncated = False
+    for finding in findings:
+        existing = finding.get("collision_provenance")
+        if isinstance(existing, list):
+            for record in existing:
+                if not isinstance(record, dict):
+                    continue
+                bounded = _finding_provenance(record)
+                if bounded:
+                    identity = json.dumps(
+                        bounded,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+                    provenance_by_identity[identity] = bounded
+        record = _finding_provenance(finding)
+        if record:
+            identity = json.dumps(
+                record,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            provenance_by_identity[identity] = record
+        provenance_truncated = (
+            provenance_truncated
+            or finding.get("collision_provenance_truncated") is True
+        )
+
+    resolved.pop("collision_provenance", None)
+    resolved.pop("collision_provenance_truncated", None)
+    winner_record = _finding_provenance(winner)
+    winner_identity = json.dumps(
+        winner_record,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    provenance_by_identity.pop(winner_identity, None)
+    ordered = [
+        record
+        for _, record in sorted(
+            provenance_by_identity.items(),
+            key=lambda item: (
+                _validated_typed_candidate_binding(item[1]) is None,
+                item[0],
+            ),
+        )
+    ]
+    if ordered:
+        resolved["collision_provenance"] = ordered[:_MAX_COLLISION_PROVENANCE]
+    if provenance_truncated or len(ordered) > _MAX_COLLISION_PROVENANCE:
+        resolved["collision_provenance_truncated"] = True
+    return resolved
 
 
 def _scrub_log_value(value):
@@ -578,15 +806,31 @@ class AnalysisOrchestrator:
         else:
             warnings.append("LLM analysis skipped (no API key or limited mode)")
 
+        # Guard each lane before composing it. Collision resolution may retain
+        # TypeSafe metadata on a stronger generator record, so a composed
+        # record must never be fed back through the typed trust path.
+        base_findings = harness_findings + det_findings
+        llm_findings_guarded = False
         if (
             typed_result is not None
             and typed_result.findings
             and generator_result_recorded
         ):
-            llm_findings = self._compose_llm_findings(
-                typed_result.findings,
-                llm_findings,
+            typed_findings = self._apply_llm_guardrails(
+                llm_findings=typed_result.findings,
+                non_llm_findings=base_findings,
+                ingest=ingest,
             )
+            generator_findings = self._apply_llm_guardrails(
+                llm_findings=llm_findings,
+                non_llm_findings=base_findings,
+                ingest=ingest,
+            )
+            llm_findings = self._compose_llm_findings(
+                typed_findings,
+                generator_findings,
+            )
+            llm_findings_guarded = True
             llm_no_findings_reported = False
             llm_reported_finding_count = len(llm_findings)
 
@@ -624,12 +868,12 @@ class AnalysisOrchestrator:
                 )
 
         # Step 6: Merge findings
-        base_findings = harness_findings + det_findings
-        llm_findings = self._apply_llm_guardrails(
-            llm_findings=llm_findings,
-            non_llm_findings=base_findings,
-            ingest=ingest,
-        )
+        if not llm_findings_guarded:
+            llm_findings = self._apply_llm_guardrails(
+                llm_findings=llm_findings,
+                non_llm_findings=base_findings,
+                ingest=ingest,
+            )
         all_findings = self._merge_findings(base_findings, llm_findings)
         add_fingerprints_to_findings(
             all_findings,
@@ -793,7 +1037,7 @@ class AnalysisOrchestrator:
             policy_complete = review.assessment.get("complete") is True
             generator_required = set()
             for finding in review.findings:
-                category = _canonical_corroboration_category(
+                category = _canonical_typed_category(
                     finding.get("category")
                 )
                 if (
@@ -1276,44 +1520,78 @@ class AnalysisOrchestrator:
         return files
 
     def _merge_findings(self, deterministic: List[dict], llm: List[dict]) -> List[dict]:
-        """Merge findings, dedupe by file+line+category."""
-        seen = set()
-        merged: List[dict] = []
+        """Merge one finding per file/span/category without severity loss."""
 
-        for finding in deterministic:
-            key = (
-                finding.get("file_path"),
-                finding.get("line_start"),
-                finding.get("category"),
+        def collision_key(finding: dict) -> tuple[str, int, int, str]:
+            path = str(finding.get("file_path") or "").replace("\\", "/")
+            line_start = _coerce_finding_int(finding.get("line_start"), default=0)
+            normalized_start = line_start or 0
+            line_end = _coerce_finding_int(
+                finding.get("line_end"),
+                default=normalized_start,
             )
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(finding)
-
-        for finding in llm:
-            key = (
-                finding.get("file_path"),
-                finding.get("line_start"),
-                finding.get("category"),
+            normalized_end = (
+                line_end
+                if line_end is not None and line_end >= normalized_start
+                else normalized_start
             )
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(finding)
+            typed_category = None
+            if _validated_typed_candidate_binding(finding) is not None:
+                typed_category = _canonical_typed_category(finding.get("category"))
+            raw_category = finding.get("category")
+            normalized_category = (
+                raw_category.strip().lower()
+                if isinstance(raw_category, str)
+                else ""
+            )
+            category = (
+                typed_category
+                or _canonical_producer_category(finding)
+                or normalized_category
+            )
+            return path, normalized_start, normalized_end, category
 
-        severity_order = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+        groups: dict[tuple[str, int, int, str], List[dict]] = {}
+        for finding in [*deterministic, *llm]:
+            groups.setdefault(collision_key(finding), []).append(finding)
+        merged = [
+            _resolve_finding_collision(group)
+            for group in groups.values()
+        ]
 
-        def finding_sort_key(finding: dict) -> tuple[int, str]:
+        def finding_sort_key(
+            finding: dict,
+        ) -> tuple[int, str, int, int, str, str, str, str]:
             raw_severity = finding.get("severity")
             severity = raw_severity if isinstance(raw_severity, str) else ""
             raw_path = finding.get("file_path")
             path = raw_path if isinstance(raw_path, str) else ""
-            return severity_order.get(severity, 4), path
+            line_start = _coerce_finding_int(finding.get("line_start"), default=0)
+            normalized_start = line_start or 0
+            line_end = _coerce_finding_int(
+                finding.get("line_end"),
+                default=normalized_start,
+            )
+            normalized_end = (
+                line_end
+                if line_end is not None and line_end >= normalized_start
+                else normalized_start
+            )
+            category = str(finding.get("category") or "")
+            finding_id = str(finding.get("id") or "")
+            source = str(finding.get("source") or "")
+            return (
+                _FINDING_SEVERITY_RANK.get(severity, 4),
+                path,
+                normalized_start,
+                normalized_end,
+                category,
+                finding_id,
+                source,
+                _stable_finding_identity(finding),
+            )
 
-        merged.sort(
-            key=finding_sort_key
-        )
+        merged.sort(key=finding_sort_key)
 
         return merged
 
@@ -1321,18 +1599,30 @@ class AnalysisOrchestrator:
     def _compose_llm_findings(
         typed_findings: List[dict], generator_findings: List[dict]
     ) -> List[dict]:
-        """Keep typed verdicts and drop only exact source-bound fallback overlap."""
+        """Compose guarded lanes, collapsing only exact source-bound overlap."""
 
-        def span_key(finding: dict) -> tuple[str, int, int, str] | None:
+        def span_key(
+            finding: dict,
+            *,
+            typed: bool,
+        ) -> tuple[str, int, int, str] | None:
             path = finding.get("file_path")
-            category = _canonical_corroboration_category(finding.get("category"))
-            if not isinstance(path, str) or category is None:
+            raw_category = finding.get("category")
+            if not isinstance(path, str) or not isinstance(raw_category, str):
+                return None
+            category = (
+                _canonical_typed_category(raw_category)
+                if typed
+                else raw_category.strip().lower()
+            )
+            if category is None or not category:
                 return None
             line_start = _coerce_finding_int(finding.get("line_start"))
             if line_start is None:
                 return None
             line_end = _coerce_finding_int(
-                finding.get("line_end") or line_start
+                finding.get("line_end"),
+                default=line_start,
             )
             if line_end is None:
                 return None
@@ -1340,22 +1630,36 @@ class AnalysisOrchestrator:
                 return None
             return (path.replace("\\", "/"), line_start, line_end, category)
 
-        composed = list(typed_findings)
-        typed_bindings: dict[tuple[str, int, int, str], tuple[str, str, str]] = {}
+        composed: List[dict | tuple[str, int, int, str]] = []
+        collision_groups: dict[tuple[str, int, int, str], List[dict]] = {}
         for finding in typed_findings:
             if not isinstance(finding, dict):
                 continue
-            key = span_key(finding)
             binding = _validated_typed_candidate_binding(finding)
+            key = span_key(finding, typed=True)
             if binding is None or key is None:
+                composed.append(finding)
                 continue
-            typed_bindings[key] = binding
+            if key not in collision_groups:
+                collision_groups[key] = []
+                composed.append(key)
+            collision_groups[key].append(finding)
 
         for finding in generator_findings:
-            if isinstance(finding, dict) and span_key(finding) in typed_bindings:
+            if not isinstance(finding, dict):
                 continue
-            composed.append(finding)
-        return composed
+            key = span_key(finding, typed=False)
+            if key is None or key not in collision_groups:
+                composed.append(finding)
+            else:
+                collision_groups[key].append(finding)
+
+        return [
+            _resolve_finding_collision(collision_groups[item])
+            if isinstance(item, tuple)
+            else item
+            for item in composed
+        ]
 
     def _apply_llm_guardrails(
         self,
@@ -1467,7 +1771,7 @@ class AnalysisOrchestrator:
                             "no_compatible_deterministic_finding"
                         )
                     else:
-                        canonical_category = _canonical_corroboration_category(category)
+                        canonical_category = _canonical_typed_category(category)
                         if canonical_category is None:
                             corroboration_reason = "unsupported_category"
                         elif canonical_category in _TYPED_CATEGORIES_REQUIRING_GENERATOR:
@@ -1520,7 +1824,7 @@ class AnalysisOrchestrator:
         typed_candidate: bool = False,
     ) -> bool:
         expected_category = (
-            _canonical_corroboration_category(category)
+            _canonical_typed_category(category)
             if typed_candidate
             else category
         )
@@ -1543,8 +1847,11 @@ class AnalysisOrchestrator:
             other_path = str(finding.get("file_path") or "").replace("\\", "/")
             if other_path != path:
                 continue
+            producer_category = _canonical_producer_category(finding)
+            if producer_category is None:
+                continue
             other_category = (
-                _canonical_corroboration_category(finding.get("category"))
+                producer_category
                 if typed_candidate
                 else str(finding.get("category") or "")
             )
@@ -1610,6 +1917,7 @@ class AnalysisOrchestrator:
             ),
             "confidence": finding.confidence,
             "source": finding.source,
+            "rule_id": finding.pattern_id,
         }
 
     def _parsed_finding_to_dict(self, finding: ParsedFinding) -> dict:
