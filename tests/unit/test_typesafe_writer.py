@@ -247,3 +247,36 @@ async def test_writer_prose_reuses_existing_redactor_without_changing_bound_verd
         assert new["typed_recommendation"] == old["recommendation"]
         assert new["message"] == sanitize_public_error(message)
         assert new["recommendation"] == new["fix_plan"] == sanitize_public_error(recommendation)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("reported_model", ["gpt-5.3-codex", "gpt-5.3-codex-2026-10-18"])
+async def test_writer_accepts_exact_or_strictly_dated_funded_model_and_keeps_actual_id(reported_model) -> None:
+    original = review_fixture()
+    client = FakeWriter(response(model=reported_model))
+
+    written = await explain_review(original, client=client)
+
+    assert written.usage["writer_usage"]["model"] == written.assessment["writer"]["model"] == reported_model
+    assert written.usage["model"] == "jev-1.13.0"
+    for old, new in zip(original.findings, written.findings):
+        assert new["writer_model_source"] == reported_model
+        assert new["typed_verdict"] == old["typed_verdict"]
+        assert new["model_source"] == old["model_source"]
+    assert len(client.calls) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("reported_model", [
+    "gpt-4.1-mini", "gpt-5.3-codex-preview", "gpt-5.3-codex-2026-1-8",
+    "gpt-5.3-codex-2026-02-30", "gpt-5.3-codex-2026-10-18-extra",
+    "gpt-5.3-codex-2026-10-18\n", "gpt-5.3-codex-20261018", " gpt-5.3-codex",
+])
+async def test_writer_rejects_other_families_and_malformed_dated_model_ids(reported_model) -> None:
+    original = review_fixture()
+    before = copy.deepcopy(original)
+
+    with pytest.raises(TypeSafeReviewIncomplete, match="typesafe_writer_failed"):
+        await explain_review(original, client=FakeWriter(response(model=reported_model)))
+
+    assert original == before

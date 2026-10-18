@@ -42,6 +42,11 @@ For emitted findings, the OpenAI writer receives fixed verdicts and evidence. It
 may return only the matching finding IDs, explanation and recommendation. Code
 retains the original severity, category, source range, evidence hashes and typed
 reason; extra, missing or verdict-changing fields refuse the writer output.
+The writer request stays pinned to `gpt-5.3-codex`. A response may report that
+exact name or the same family with a valid `YYYY-MM-DD` snapshot suffix; artifacts
+retain the actual returned identifier. Preview names and other model families
+are refused. Snapshot acceptance is a compatibility rule, not proof of a live
+provider response or model pricing.
 Existing independent P0/P1 corroboration guardrails still apply after assessment.
 
 `TYPESAFE_REVIEW.json` retains the assessment and final completion/failure state

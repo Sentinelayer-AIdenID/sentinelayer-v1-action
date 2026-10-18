@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import re
+from datetime import date
 from typing import Any
 
 from ..redaction import sanitize_public_error
@@ -10,6 +12,21 @@ from .typesafe_review import TypeSafeReviewIncomplete, TypedReview
 
 
 WRITER_MODEL = "gpt-5.3-codex"
+
+
+def _is_writer_model(model: str) -> bool:
+    if model == WRITER_MODEL:
+        return True
+    if not isinstance(model, str) or not model.startswith(WRITER_MODEL + "-"):
+        return False
+    suffix = model[len(WRITER_MODEL) + 1:]
+    if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", suffix) is None:
+        return False
+    try:
+        date.fromisoformat(suffix)
+    except ValueError:
+        return False
+    return True
 
 
 def _unique_object(pairs):
@@ -41,7 +58,7 @@ async def explain_review(review: TypedReview, *, client: LLMClient) -> TypedRevi
         }, ensure_ascii=False, allow_nan=False),
         max_tokens=4096,
     )
-    if not response.success or response.usage is None or response.usage.model != WRITER_MODEL:
+    if not response.success or response.usage is None or not _is_writer_model(response.usage.model):
         raise TypeSafeReviewIncomplete("typesafe_writer_failed")
     try:
         body = json.loads(response.content, object_pairs_hook=_unique_object)
