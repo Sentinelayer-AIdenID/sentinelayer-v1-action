@@ -374,11 +374,13 @@ Omar Gate uses a layered approach to minimize false positives:
 
 ### Layer 3: LLM Guardrails (Corroboration Requirement)
 
-At [orchestrator.py:560](src/omargate/analyze/orchestrator.py#L560), `_apply_llm_guardrails()` enforces:
+In [`orchestrator.py`](../src/omargate/analyze/orchestrator.py), `_apply_llm_guardrails()` enforces:
 
 - **File validation:** LLM findings pointing to files not in the ingest are dropped.
 - **Line clamping:** Line numbers are clamped to actual file bounds.
-- **Corroboration requirement:** LLM/Codex P0/P1 findings require a deterministic or harness finding within 5 lines of the same file and category. Without corroboration, the finding is **downgraded to P2 advisory**.
+- **Legacy generator corroboration:** Codex/OpenAI P0/P1 findings retain the established broad contract: any deterministic or harness finding in the same file, with the exact emitted category, and within 5 lines of the generator finding's starting line can corroborate them. The TypeSafe producer allowlist does not apply to this lane.
+- **Typed corroboration:** Source-bound TypeSafe P0/P1 findings use canonical category aliases and only reviewed producer/rule/emitted-category tuples. Proximity covers the complete bound typed span plus 5 lines on either side; an unreviewed producer leaves the finding at P2.
+- **Clean-span confirmation:** A generator run is required for every TypeSafe candidate span resolved clean, including mixed reviews where another span emitted a finding. Disabling `typesafe_fallback` leaves the review incomplete; it does not convert the clean span into confirmed coverage.
 - This prevents LLM hallucinations from blocking merges while preserving them as review hints.
 
 ### Gitleaks Allowlist

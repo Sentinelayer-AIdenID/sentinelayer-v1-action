@@ -1035,6 +1035,32 @@ class AnalysisOrchestrator:
             verify_sources(self.repo_root, inventory)
             attempted = bool(client.attempted)
             policy_complete = review.assessment.get("complete") is True
+            finding_candidate_ids = {
+                binding[0]
+                for finding in review.findings
+                if (binding := _validated_typed_candidate_binding(finding))
+                is not None
+            }
+            unresolved_candidate_ids = {
+                record["candidate_id"]
+                for record in review.assessment.get(
+                    "unresolved_candidates", []
+                )
+                if isinstance(record, dict)
+                and isinstance(record.get("candidate_id"), str)
+            }
+            clean_candidate_ids = sorted(
+                {
+                    candidate.candidate_id
+                    for candidate in inventory.candidates
+                }
+                - finding_candidate_ids
+                - unresolved_candidate_ids
+            )
+            if clean_candidate_ids:
+                review.assessment["generator_required_clean_candidates"] = (
+                    clean_candidate_ids
+                )
             generator_required = set()
             for finding in review.findings:
                 category = _canonical_typed_category(
@@ -1052,7 +1078,22 @@ class AnalysisOrchestrator:
                     generator_required_categories
                 )
             warning: Optional[str]
-            if policy_complete and review.findings and generator_required_categories:
+            if policy_complete and clean_candidate_ids:
+                success = False
+                failure_class = "typesafe_clean_requires_generator"
+                warning = (
+                    "TypeSafe resolved one or more source spans clean; generator "
+                    "confirmation is required even when other spans produced "
+                    "findings."
+                )
+                if generator_required_categories:
+                    warning += (
+                        " A blocking typed category also lacks a reviewed "
+                        "deterministic corroboration producer."
+                    )
+                if writer_warning:
+                    warning += " The TypeSafe writer also did not complete."
+            elif policy_complete and review.findings and generator_required_categories:
                 success = False
                 failure_class = "typesafe_category_requires_generator"
                 warning = (
@@ -1847,14 +1888,18 @@ class AnalysisOrchestrator:
             other_path = str(finding.get("file_path") or "").replace("\\", "/")
             if other_path != path:
                 continue
-            producer_category = _canonical_producer_category(finding)
-            if producer_category is None:
-                continue
-            other_category = (
-                producer_category
-                if typed_candidate
-                else str(finding.get("category") or "")
-            )
+            if typed_candidate:
+                producer_category = _canonical_producer_category(finding)
+                if producer_category is None:
+                    continue
+                other_category = producer_category
+            else:
+                # Preserve the legacy generator contract: every finding in
+                # this collection already came from the deterministic or
+                # harness stages, so exact emitted category compatibility is
+                # sufficient. The reviewed producer/rule allowlist is a
+                # TypeSafe-only trust boundary.
+                other_category = str(finding.get("category") or "")
             if other_category != expected_category:
                 continue
             other_start = _coerce_finding_int(finding.get("line_start"))

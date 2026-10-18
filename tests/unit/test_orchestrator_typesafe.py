@@ -444,6 +444,97 @@ async def test_real_empty_complete_policy_decision_requires_generator(tmp_path, 
 
 
 @pytest.mark.anyio
+async def test_complete_mixed_typed_review_runs_generator_for_clean_span(
+    tmp_path,
+    monkeypatch,
+):
+    policy = FixturePolicy()
+
+    def mixed_decision(candidates, answers):
+        confirmed, _clean = candidates
+        return ReviewDecision(
+            (RatedFinding(
+                candidate_id=confirmed.candidate_id,
+                question_ids=("q0",),
+                severity="P2",
+                category="crypto",
+                message="A fixed typed finding covers the first span only.",
+                recommendation="Inspect the first source span.",
+                support_probability=0.95,
+            ),),
+            complete=True,
+            reason="policy_review_complete",
+        )
+
+    policy.decide = mixed_decision
+    instance, ingest, _ = orchestrator(
+        tmp_path,
+        monkeypatch,
+        fallback=True,
+        codex=False,
+    )
+    source = "".join(f"line {index}\n" for index in range(1, 43))
+    (tmp_path / "source.py").write_text(source, encoding="utf-8")
+    ingest["files"][0]["lines"] = 42
+    diff = (
+        "diff --git a/source.py b/source.py\n"
+        "--- /dev/null\n"
+        "+++ b/source.py\n"
+        "@@ -0,0 +1,42 @@\n"
+        + "".join(f"+line {index}\n" for index in range(1, 43))
+    )
+    client = FixtureClient()
+    monkeypatch.setattr(module, "TypeSafeClient", lambda *args, **kwargs: client)
+    monkeypatch.setattr(module, "load_policy", lambda: policy)
+    corroboration = finding(rule_id="SEC-016")
+    corroboration.update(
+        category="auth",
+        line_start=41,
+        line_end=41,
+        snippet="line 41\n",
+    )
+    monkeypatch.setattr(
+        instance,
+        "_run_deterministic_scans",
+        lambda _: [corroboration],
+    )
+    generator_finding = finding("llm", model=GENERATOR)
+    generator_finding.update(
+        id="generator-clean-span-p1",
+        severity="P1",
+        category="auth",
+        line_start=41,
+        line_end=41,
+        snippet="line 41\n",
+    )
+    generator = AsyncMock(return_value=outcome(
+        provider="openai",
+        model=GENERATOR,
+        findings=[generator_finding],
+    ))
+    monkeypatch.setattr(instance, "_run_llm_analysis", generator)
+
+    result = await instance.run(
+        scan_mode="pr-diff",
+        changed_files=["source.py"],
+        diff_content=diff,
+    )
+
+    assessment = result.llm_usage["typesafe_assessment"]
+    clean_candidate, = assessment["generator_required_clean_candidates"]
+    assert clean_candidate == assessment["candidates"][1]["candidate_id"]
+    assert assessment["policy_decision_complete"] is True
+    assert assessment["failure_class"] == "typesafe_clean_requires_generator"
+    assert generator.await_count == 1
+    assert result.llm_success and result.counts["P1"] == 1
+    assert any(
+        row["id"] == "generator-clean-span-p1"
+        for row in result.findings
+    )
+    assert len(client.calls) == 1
+
+
+@pytest.mark.anyio
 async def test_real_partial_policy_result_is_valid_but_incomplete(tmp_path, monkeypatch):
     policy = FixturePolicy()
 
@@ -1310,6 +1401,62 @@ def test_corroboration_uses_only_reviewed_rule_bound_category_compatibility(
         assert "corroboration" not in guarded[0]
     else:
         assert guarded[0]["corroboration"]["reason"] == expected_reason
+
+
+@pytest.mark.parametrize(
+    "producer_source,rule_id,category",
+    [
+        ("deterministic", "EQ-001", "frontend"),
+        ("deterministic", "EQ-010", "backend"),
+        ("harness", "HARNESS-TF-STATE-ENCRYPT", "infrastructure"),
+        ("harness", "HARNESS-HTTP-HEADERS", "web"),
+    ],
+)
+def test_legacy_generator_keeps_broad_scanner_rule_corroboration_contract(
+    tmp_path,
+    monkeypatch,
+    producer_source,
+    rule_id,
+    category,
+):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch)
+    legacy = finding("codex", model=GENERATOR)
+    legacy.update(
+        severity="P1",
+        category=category,
+        line_start=20,
+        line_end=20,
+    )
+    producer = finding(producer_source, rule_id=rule_id)
+    producer.update(
+        category=category,
+        line_start=20,
+        line_end=20,
+    )
+
+    guarded = instance._apply_llm_guardrails(
+        llm_findings=[legacy],
+        non_llm_findings=[producer],
+        ingest={"files": [{"path": "source.py", "lines": 100}]},
+    )
+
+    assert guarded[0]["severity"] == "P1"
+    assert "corroboration" not in guarded[0]
+
+    typed = bind_typed_candidate(finding("llm", model=PIN))
+    typed.update(
+        severity="P1",
+        category=category,
+        line_start=20,
+        line_end=20,
+    )
+    typed_guarded = instance._apply_llm_guardrails(
+        llm_findings=[typed],
+        non_llm_findings=[producer],
+        ingest={"files": [{"path": "source.py", "lines": 100}]},
+    )
+    assert typed_guarded[0]["severity"] == "P2"
+    assert typed_guarded[0]["corroboration"]["status"] == "missing"
 
 
 def test_legacy_generator_cannot_widen_corroboration_with_forged_line_end(

@@ -330,7 +330,9 @@ Implemented in [`orchestrator.py:_apply_llm_guardrails()`](../src/omargate/analy
 
 - **File validation**: LLM findings pointing to files not in the scanned diff/ingest are dropped.
 - **Line clamping**: Line numbers are clamped to actual file bounds; hallucinated locations are discarded.
-- **Corroboration requirement**: LLM/Codex P0/P1 findings require a **deterministic or harness finding** within 5 lines of the same file and same category. Without corroboration, the finding is **downgraded to P2** (advisory).
+- **Legacy generator corroboration**: Codex/OpenAI P0/P1 findings require any **deterministic or harness finding** in the same file, with the exact emitted category, whose range is within 5 lines of the generator finding's starting line. The TypeSafe producer allowlist does not narrow this established scanner-rule contract.
+- **Typed corroboration**: Source-bound TypeSafe P0/P1 findings map policy aliases to canonical categories and accept only reviewed producer/rule/emitted-category tuples. The complete bound TypeSafe span, expanded by 5 lines, is used for proximity. A non-allowlisted producer cannot promote a typed finding above P2.
+- **Clean-span confirmation**: Every TypeSafe candidate span resolved clean requires the generator, even when other spans emitted typed findings. If `typesafe_fallback` is disabled, the review stays incomplete instead of treating the clean span as confirmed.
 - This means LLM analysis enriches results (adds context, explanations, risk assessment) but cannot independently block a merge.
 
 ### What this means in practice
@@ -339,8 +341,9 @@ Implemented in [`orchestrator.py:_apply_llm_guardrails()`](../src/omargate/analy
 |---|---|---|
 | Deterministic scanner | Yes | Regex, AST, config rules — high precision |
 | Harness (dep audit, secrets-in-git) | Yes | External tool output (pip-audit, gitleaks) |
-| LLM/Codex with corroboration | Yes | Deterministic finding nearby confirms it |
-| LLM/Codex without corroboration | **No** (downgraded to P2) | Preserved as review hint |
+| Legacy Codex/OpenAI with corroboration | Yes | Any deterministic/harness scanner rule with exact emitted category nearby confirms it |
+| Source-bound TypeSafe with corroboration | Yes | Reviewed producer/rule/category tuple confirms the canonical typed category |
+| LLM without compatible corroboration | **No** (downgraded to P2) | Preserved as review hint |
 
 ### Handling persistent false positives
 

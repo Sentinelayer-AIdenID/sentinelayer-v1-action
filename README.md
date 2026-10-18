@@ -382,15 +382,18 @@ Omar Gate uses three independent layers so that **LLM analysis can never unilate
 - Removed lines are scanned separately at P3 (advisory only)
 
 ### Layer 3 — LLM Guardrails (Corroboration Required)
-- LLM P0/P1 findings are **downgraded to P2** unless a deterministic finding in the *same file*, *same category*, within *5 lines* corroborates them
+- Legacy Codex/OpenAI P0/P1 findings are **downgraded to P2** unless any deterministic or harness finding has the *same file*, exact emitted *category*, and a range within *5 lines of the generator finding's starting line*. This preserves the existing scanner-rule contract; it does not use the TypeSafe producer allowlist.
+- Source-bound TypeSafe P0/P1 findings use canonical category aliases and a reviewed producer/rule/category allowlist. Their complete bound span (plus 5 lines on each side) may be corroborated; unreviewed producer tuples cannot make a typed finding block.
+- Every TypeSafe candidate span resolved clean requires generator confirmation, even when another span produced a typed finding. With `typesafe_fallback: false`, the typed review remains incomplete instead of accepting that clean span as confirmed.
 - Findings referencing files not in the scanned diff are dropped entirely
 
 | Finding Source | Can Block Merge? |
 |---|:---:|
 | Deterministic scanner (regex, AST, config) | Yes |
 | Harness (pip-audit, gitleaks) | Yes |
-| LLM **with** deterministic corroboration | Yes |
-| LLM **without** corroboration | No (advisory P2) |
+| Legacy Codex/OpenAI **with** deterministic or harness corroboration | Yes |
+| Source-bound TypeSafe **with** reviewed producer corroboration | Yes |
+| LLM **without compatible corroboration** | No (advisory P2) |
 
 ---
 
