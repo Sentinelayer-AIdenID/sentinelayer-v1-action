@@ -354,10 +354,11 @@ runs:
 
     - name: Install Omar Gate dependencies
       shell: bash
+      working-directory: ${{ github.action_path }}
       run: |
         set -euo pipefail
-        python -m pip install --upgrade pip
-        python -m pip install --no-cache-dir --require-hashes -r "${GITHUB_ACTION_PATH}/requirements.lock.txt"
+        python -P -m pip install --upgrade pip
+        python -P -m pip install --no-cache-dir --require-hashes -r "${GITHUB_ACTION_PATH}/requirements.lock.txt"
 
     - name: Install Codex CLI
       shell: bash

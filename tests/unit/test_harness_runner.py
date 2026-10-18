@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
-from omargate.harness.runner import HarnessRunner, SecuritySuite
+from omargate.harness.runner import (
+    _HARNESS_PROCESS_ENV_KEYS,
+    HarnessRunner,
+    SecuritySuite,
+    run_command,
+)
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _touch(path: Path, content: str = "") -> None:
@@ -39,6 +50,74 @@ def test_empty_project_runs_only_secrets_in_git(tmp_path: Path) -> None:
     runner = HarnessRunner(project_root=str(tmp_path), tech_stack=[])
     suites = runner._select_suites()
     assert [s.name for s in suites] == ["secrets_in_git"]
+
+
+def test_harness_public_import_isolated_from_analyze_initialization(tmp_path: Path) -> None:
+    child_env = os.environ.copy()
+    child_env["PYTHONPATH"] = str(ROOT / "src")
+    child_env["PYTHONSAFEPATH"] = "1"
+
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-P",
+            "-c",
+            "from omargate.harness import HarnessRunner; print(HarnessRunner.__name__)",
+        ],
+        cwd=tmp_path,
+        env=child_env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == "HarnessRunner"
+
+
+@pytest.mark.anyio
+async def test_audit_subprocess_receives_only_allowlisted_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inherited_secrets = {
+        "INPUT_TYPESAFE_API_KEY": "typesafe-private",
+        "OPENAI_API_KEY": "openai-private",
+        "ANTHROPIC_API_KEY": "anthropic-private",
+        "GITHUB_TOKEN": "github-private",
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "oidc-private",
+        "AWS_SECRET_ACCESS_KEY": "aws-private",
+        "DATABASE_PASSWORD": "database-private",
+        "NODE_OPTIONS": "--require=./workspace-controlled.js",
+        "PYTHONPATH": "./workspace-controlled",
+        "NPM_CONFIG_USERCONFIG": "./workspace-controlled.npmrc",
+    }
+    monkeypatch.setenv("PATH", "safe-tool-path")
+    for key, value in inherited_secrets.items():
+        monkeypatch.setenv(key, value)
+
+    captured: dict[str, object] = {}
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"{}", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured["args"] = args
+        captured["env"] = kwargs.get("env")
+        return FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await run_command(["npm", "audit", "--json"], cwd=tmp_path, timeout_s=5)
+
+    assert result.returncode == 0
+    child_env = captured["env"]
+    assert isinstance(child_env, dict)
+    assert child_env["PATH"] == "safe-tool-path"
+    assert set(child_env).issubset(_HARNESS_PROCESS_ENV_KEYS)
+    assert set(child_env).isdisjoint(inherited_secrets)
 
 
 @pytest.mark.anyio

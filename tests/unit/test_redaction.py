@@ -62,10 +62,24 @@ def test_sanitize_public_error_redacts_cli_masked_openai_key() -> None:
         "# rotated key AKIA1234567890ABCDEF\n",
         "token = low-entropy-but-still-private\n",
         "authorization: Bearer opaque-credential\n",
+        'DB_PASSWORD="database-private"\n',
+        "AWS_SECRET_ACCESS_KEY=aws-private\n",
+        "DATABASE_URL=postgres://dbuser:db-private@db.example.test/app\n",
+        'headers = {"Authorization": "Bearer bearer-private"}\n',
         "url = 'https://example.test/?signature=private-value'\n",
         "-----BEGIN PRIVATE KEY-----\nprivate-body\n-----END PRIVATE KEY-----\n",
     ],
-    ids=["aws-comment", "assignment", "authorization", "query", "private-key"],
+    ids=[
+        "aws-comment",
+        "assignment",
+        "authorization",
+        "db-password",
+        "aws-secret-access-key",
+        "credentialed-postgres-url",
+        "quoted-authorization",
+        "query",
+        "private-key",
+    ],
 )
 def test_redact_secret_source_excludes_complete_secret_lines(source: str) -> None:
     safe, changed = redact_secret_source(source, file_path="src/config.py")

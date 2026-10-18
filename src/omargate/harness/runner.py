@@ -1,13 +1,59 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Mapping
 
-from ..analyze.deterministic.pattern_scanner import Finding, _truncate_snippet
 from .detectors import ProjectFacts, detect_project_facts
+
+if TYPE_CHECKING:
+    from ..analyze.deterministic.pattern_scanner import Finding
+
+
+# Audit tools need executable discovery, a small amount of platform context, and
+# temporary-directory/locale settings.  Passing the complete Action environment
+# would also pass provider credentials, GitHub/OIDC tokens, and arbitrary INPUT_*
+# secrets to commands whose configuration is controlled by the scanned repository.
+_HARNESS_PROCESS_ENV_KEYS = frozenset(
+    {
+        "PATH",
+        "PATHEXT",
+        "COMSPEC",
+        "SHELL",
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "SYSTEMROOT",
+        "WINDIR",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "TERM",
+        "NO_COLOR",
+        "FORCE_COLOR",
+    }
+)
+
+
+def _harness_child_env(inherited: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Build the complete, bounded environment passed to harness commands."""
+
+    source = os.environ if inherited is None else inherited
+    return {
+        key: value
+        for key, value in source.items()
+        if key in _HARNESS_PROCESS_ENV_KEYS
+    }
 
 
 @dataclass(frozen=True)
@@ -26,6 +72,7 @@ async def run_command(args: list[str], cwd: Path, timeout_s: int) -> CommandResu
             cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=_harness_child_env(),
         )
     except FileNotFoundError:
         return CommandResult(args=args, returncode=127, stdout="", stderr="command not found")
@@ -127,6 +174,8 @@ class HarnessRunner:
         return suites
 
     def _timeout_finding(self, suite_name: str, timeout_s: int) -> Finding:
+        from ..analyze.deterministic.pattern_scanner import Finding
+
         return Finding(
             id=f"HARNESS-TIMEOUT-{suite_name}",
             pattern_id="HARNESS-TIMEOUT",
@@ -143,6 +192,8 @@ class HarnessRunner:
         )
 
     def _error_finding(self, suite_name: str, exc: Exception) -> Finding:
+        from ..analyze.deterministic.pattern_scanner import Finding, _truncate_snippet
+
         msg = _truncate_snippet(str(exc) or "unknown error", max_chars=200)
         return Finding(
             id=f"HARNESS-ERROR-{suite_name}",
@@ -160,6 +211,8 @@ class HarnessRunner:
         )
 
     def _ensure_harness_source(self, finding: Finding) -> Finding:
+        from ..analyze.deterministic.pattern_scanner import Finding
+
         if getattr(finding, "source", None) == "harness":
             return finding
         return Finding(

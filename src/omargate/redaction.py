@@ -86,11 +86,15 @@ _SOURCE_SECRET_LINE_RE = re.compile(
       \bslrt_v1\.[A-Za-z0-9_.-]+\b |
       \bsl_[A-Za-z0-9_-]{16,}\b |
       \beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b |
-      \bauthorization\s*[:=]\s*["']?(?:bearer|basic)\s+\S+ |
+      ["']?authorization["']?\s*[:=]\s*["']?(?:bearer|basic)\s+\S+ |
+      \b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?|https?)
+        ://[^\s/:@]+:[^\s/@]+@ |
       [?&](?:api[_-]?key|access[_-]?token|token|signature|secret)=[^&#\s]+ |
-      \b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|
-          private[_-]?key|secret|token|password|passwd|pwd|credential|
-          webhook[_-]?secret)\b\s*[:=]\s*(?!["']?(?:none|null|false|true|
+      (?<![A-Za-z0-9])(?:[A-Za-z0-9]+[_-])*
+        (?:secret[_-]?access[_-]?key|api[_-]?key|access[_-]?token|
+          auth[_-]?token|client[_-]?secret|private[_-]?key|secret|token|
+          password|passwd|pwd|credential|webhook[_-]?secret)
+        \b\s*[:=]\s*(?!["']?(?:none|null|false|true|
           example|sample|dummy|placeholder|redacted|changeme|replace[_-]?me)\b)\S+
     )
     """

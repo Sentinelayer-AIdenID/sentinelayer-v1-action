@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from ..formatting import format_int, truncate
 from ..models import GateResult, GateStatus
 from ..ingest.codebase_snapshot import build_codebase_synopsis, render_codebase_snapshot_md
+from ..redaction import sanitize_untrusted_markdown_scalar
 
 
 def _status_key(status: GateStatus | str) -> str:
     return status.value if isinstance(status, GateStatus) else str(status)
+
 
 def _blocking_severities(severity_gate: str) -> set[str]:
     gate = (severity_gate or "P1").strip().upper()
@@ -20,6 +22,27 @@ def _blocking_severities(severity_gate: str) -> set[str]:
     if gate == "P2":
         return {"P0", "P1", "P2"}
     return set()
+
+
+def _sort_int(value: object) -> int:
+    try:
+        return int(str(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _sanitize_snapshot_scalars(value: Any) -> Any:
+    """Encode repository-derived strings while preserving the trusted template."""
+
+    if isinstance(value, dict):
+        return {key: _sanitize_snapshot_scalars(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_snapshot_scalars(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_snapshot_scalars(item) for item in value)
+    if isinstance(value, str):
+        return sanitize_untrusted_markdown_scalar(value)
+    return value
 
 
 def write_step_summary(
@@ -54,19 +77,24 @@ def write_step_summary(
     severity_gate = str(summary.get("severity_gate") or "P1").strip().upper() if summary else "P1"
     blocking = _blocking_severities(severity_gate)
 
+    status = _status_key(gate_result.status)
     status_icon = {
         "passed": "✅",
         "blocked": "❌",
         "bypassed": "⚠️",
         "needs_approval": "⏸️",
         "error": "🔴",
-    }.get(_status_key(gate_result.status), "❓")
+    }.get(status, "❓")
+
+    safe_status = sanitize_untrusted_markdown_scalar(status.upper())
+    safe_severity_gate = sanitize_untrusted_markdown_scalar(severity_gate)
+    safe_reason = sanitize_untrusted_markdown_scalar(gate_result.reason)
 
     md = [
-        f"## 🛡️ Omar Gate: {status_icon} {_status_key(gate_result.status).upper()}",
+        f"## 🛡️ Omar Gate: {status_icon} {safe_status}",
         "",
-        f"**Gate:** `{severity_gate}`",
-        f"**Result:** {gate_result.reason}",
+        f"**Gate:** `{safe_severity_gate}`",
+        f"**Result:** {safe_reason}",
         "",
         "| Severity | Count | Blocks Merge? |",
         "|----------|------:|:------------:|",
@@ -81,7 +109,8 @@ def write_step_summary(
     if not resolved_synopsis and codebase_snapshot:
         resolved_synopsis = build_codebase_synopsis(codebase_snapshot=codebase_snapshot)
     if resolved_synopsis:
-        md.extend([f"**Codebase Synopsis:** {resolved_synopsis}", ""])
+        safe_synopsis = sanitize_untrusted_markdown_scalar(resolved_synopsis)
+        md.extend([f"**Codebase Synopsis:** {safe_synopsis}", ""])
 
     if findings:
         md.append("### Top Findings")
@@ -92,21 +121,26 @@ def write_step_summary(
             key=lambda f: (
                 severity_order.get(str(f.get("severity", "")).upper(), 99),
                 str(f.get("file_path") or ""),
-                int(f.get("line_start") or 0),
+                _sort_int(f.get("line_start")),
             ),
         )[:3]
         for finding in top:
-            severity = str(finding.get("severity", "?")).upper()
-            file_path = finding.get("file_path", "?")
-            line_start = finding.get("line_start", "?")
-            category = finding.get("category", "Issue")
-            message = truncate(str(finding.get("message") or "No description"), 200)
+            severity = sanitize_untrusted_markdown_scalar(
+                str(finding.get("severity", "?")).upper()
+            )
+            file_path = sanitize_untrusted_markdown_scalar(finding.get("file_path", "?"))
+            line_start = sanitize_untrusted_markdown_scalar(finding.get("line_start", "?"))
+            category = sanitize_untrusted_markdown_scalar(finding.get("category", "Issue"))
+            message = sanitize_untrusted_markdown_scalar(
+                truncate(str(finding.get("message") or "No description"), 200)
+            )
             md.append(f"- **{severity}** `{file_path}:{line_start}` · **{category}**: {message}")
         md.append("")
 
     if codebase_snapshot:
         try:
-            snapshot_md = render_codebase_snapshot_md(codebase_snapshot).strip()
+            safe_snapshot = _sanitize_snapshot_scalars(codebase_snapshot)
+            snapshot_md = render_codebase_snapshot_md(safe_snapshot).strip()
             if snapshot_md.startswith("# "):
                 snapshot_md = "### " + snapshot_md[2:]
             md.extend(
@@ -123,7 +157,9 @@ def write_step_summary(
         except Exception:
             pass
 
-    md.append(f"<sub>Omar Gate v{version} • run_id={run_id[:8]}</sub>")
+    safe_version = sanitize_untrusted_markdown_scalar(version)
+    safe_run_id = sanitize_untrusted_markdown_scalar(run_id[:8])
+    md.append(f"<sub>Omar Gate v{safe_version} • run_id={safe_run_id}</sub>")
     md.append("")
 
     with open(summary_path, "a", encoding="utf-8") as summary_file:
