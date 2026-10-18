@@ -5,7 +5,7 @@ import hashlib
 from pathlib import Path
 import re
 
-from ..redaction import sanitize_public_error
+from ..redaction import redact_secret_source, sanitize_public_error
 from .typesafe_review import ReviewInventory, TypeSafeReviewIncomplete
 
 
@@ -89,11 +89,16 @@ def build_typed_context(
             raise TypeSafeReviewIncomplete("incomplete_typed_diff_hunk")
         touched.add(current)
         text = "\n".join(hunk)
+        safe_text, source_redacted = redact_secret_source(text, file_path=current)
+        safe_hunk = sanitize_public_error(safe_text)
         hunks.append({
             "file_path": current, "line_start": start,
             "line_end": start + max(0, new_count - 1),
-            "diff_hunk": sanitize_public_error(text),
+            "diff_hunk": safe_hunk,
+            # Bind the display-safe hunk to the exact local source without
+            # retaining its credential bytes in the provider state.
             "diff_hunk_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "source_redacted": source_redacted or safe_hunk != text,
         })
     if touched != set(expected):
         raise TypeSafeReviewIncomplete("incomplete_typed_diff_file_coverage")
@@ -112,12 +117,22 @@ def build_typed_context(
                 raise TypeSafeReviewIncomplete("invalid_deterministic_location")
             if line_end < candidate.line_start or line_start > candidate.line_end:
                 continue
-            hits.append({
-                key: sanitize_public_error(finding[key]) if isinstance(finding.get(key), str) else finding.get(key)
-                for key in ("id", "rule_id", "category", "severity", "file_path", "line_start", "line_end", "message")
-            })
+            hit = {}
+            for key in (
+                "id", "rule_id", "category", "severity", "file_path",
+                "line_start", "line_end", "message",
+            ):
+                value = finding.get(key)
+                if isinstance(value, str):
+                    if key == "message":
+                        value, _ = redact_secret_source(value)
+                    value = sanitize_public_error(value)
+                hit[key] = value
+            if str(finding.get("category", "")).lower() == "secrets":
+                hit["message"] = "Secret-bearing scanner evidence excluded"
+            hits.append(hit)
         candidates[candidate.candidate_id] = {
-            "language": language,
+            "language": sanitize_public_error(language),
             "diff_hunks": [hunk for hunk in hunks if hunk["file_path"] == candidate.file_path
                            and hunk["line_end"] >= candidate.line_start
                            and hunk["line_start"] <= candidate.line_end],

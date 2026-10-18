@@ -25,13 +25,15 @@ from omargate.redaction import sanitize_public_error
 MODEL = "jev-1.13.0"
 
 
-def source_inventory(tmp_path: Path, text: str | None = None) -> ReviewInventory:
+def source_inventory(
+    tmp_path: Path, text: str | None = None, *, name: str = "source.py"
+) -> ReviewInventory:
     text = text if text is not None else "".join(f"line {index}\n" for index in range(1, 86))
-    (tmp_path / "source.py").write_bytes(text.encode("utf-8"))
+    (tmp_path / name).write_bytes(text.encode("utf-8"))
     return build_inventory(
         repo_root=tmp_path,
-        ingest={"files": [{"path": "source.py"}]},
-        changed_files=["source.py"],
+        ingest={"files": [{"path": name}]},
+        changed_files=[name],
         scan_mode="pr-diff",
         max_candidates=50,
     )
@@ -316,7 +318,9 @@ async def test_review_preserves_source_binding_and_reports_only_actual_usage(tmp
     assert secret not in json.dumps(sent)
     sent_candidate = sent["state"]["candidates"][0]
     assert sent_candidate["evidence_redacted"] is True
-    assert "[redacted]" in sent_candidate["evidence"] or "[redacted-secret]" in sent_candidate["evidence"]
+    assert any(marker in sent_candidate["evidence"] for marker in (
+        "[redacted]", "[redacted-secret]", "[secret-bearing source excluded]",
+    ))
     assert sent_candidate["source_sha256"] == candidate.source_sha256
     assert sent_candidate["evidence_sha256"] == hashlib.sha256(candidate.evidence.encode()).hexdigest()
     assert result.assessment["source_hashes"] == {"source.py": candidate.source_sha256}
@@ -335,6 +339,50 @@ async def test_review_preserves_source_binding_and_reports_only_actual_usage(tmp
         "typesafe_usage": {"input_tokens": 13, "output_tokens": 0, "fixture_meter": "reported"},
         "typesafe_assessment": result.assessment,
     }
+
+
+@pytest.mark.anyio
+async def test_review_excludes_comment_and_private_key_material_before_client(tmp_path: Path):
+    aws_secret = "AKIA1234567890ABCDEF"
+    private_body = "private-body-must-never-cross-the-provider-boundary"
+    inventory = source_inventory(
+        tmp_path,
+        "# historical credential " + aws_secret + "\n"
+        "-----BEGIN PRIVATE KEY-----\n"
+        + private_body
+        + "\n-----END PRIVATE KEY-----\nordinary = 1\n",
+    )
+    candidate = inventory.candidates[0]
+    client = FakeClient()
+
+    result = await review(tmp_path, inventory, client=client)
+
+    sent = json.dumps(client.calls[0], sort_keys=True)
+    retained = json.dumps(
+        {"findings": result.findings, "assessment": result.assessment, "usage": result.usage},
+        sort_keys=True,
+    )
+    assert aws_secret not in sent + retained
+    assert private_body not in sent + retained
+    assert "[secret-bearing source excluded]" in sent
+    assert client.calls[0]["state"]["candidates"][0]["evidence_redacted"] is True
+    assert result.assessment["source_hashes"] == {"source.py": candidate.source_sha256}
+    assert result.assessment["candidates"][0]["evidence_sha256"] == candidate.evidence_sha256
+
+
+@pytest.mark.anyio
+async def test_review_excludes_entire_sensitive_source_file_before_client(tmp_path: Path):
+    secret = "value-that-has-no-recognizable-secret-shape"
+    inventory = source_inventory(tmp_path, f"ORDINARY_NAME={secret}\n", name=".env.production")
+    client = FakeClient()
+
+    result = await review(tmp_path, inventory, client=client)
+
+    sent = json.dumps(client.calls[0], sort_keys=True)
+    assert secret not in sent
+    assert "ORDINARY_NAME" not in sent
+    assert "[secret-bearing source excluded]" in sent
+    assert secret not in json.dumps(result.findings, sort_keys=True)
 
 
 class MixedFixturePolicy(FixturePolicy):

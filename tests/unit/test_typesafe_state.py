@@ -85,10 +85,49 @@ def test_actual_head_hunk_language_hash_and_redacted_scanner_evidence(tmp_path: 
     assert hunk["diff_hunk_sha256"] == hashlib.sha256(raw_hunk.encode()).hexdigest()
     assert (hunk["line_start"], hunk["line_end"]) == (1, 3)
     assert secret not in json.dumps(result)
-    assert "[redacted" in hunk["diff_hunk"]
+    assert any(marker in hunk["diff_hunk"] for marker in (
+        "[redacted", "[secret-bearing source excluded]",
+    ))
     assert row["deterministic_scanner_hits"][0]["id"] == "det-1"
     assert row["deterministic_scanner_hits"][0]["severity"] == "P2"
     assert hits[0]["message"].endswith(secret)  # input was not mutated
+
+
+def test_removed_comment_secret_is_excluded_from_typed_diff_context(tmp_path: Path) -> None:
+    secret = "AKIA1234567890ABCDEF"
+    before = f"# removed historical key {secret}\nkeep = 1\n"
+    after = "# removed historical key\nkeep = 1\n"
+    inventory, ingest = inventory_for(tmp_path, {"source.py": after}, language="python")
+    diff = patch("source.py", before, after)
+
+    result = context_for(tmp_path, inventory, ingest, diff)
+
+    serialized = json.dumps(result, sort_keys=True)
+    assert secret not in serialized
+    hunk = next(iter(result["candidate_context"].values()))["diff_hunks"][0]
+    assert "[secret-bearing source excluded]" in hunk["diff_hunk"]
+    raw_hunk = "\n".join(diff.splitlines()[3:])
+    assert hunk["diff_hunk_sha256"] == hashlib.sha256(raw_hunk.encode()).hexdigest()
+
+
+def test_secret_scanner_message_is_constant_at_typed_context_boundary(tmp_path: Path) -> None:
+    secret = "arbitrary-low-entropy-private-value"
+    after = "keep = 1\n"
+    inventory, ingest = inventory_for(tmp_path, {"source.py": after})
+    findings = [{
+        "id": "secret-hit", "rule_id": "fixture", "category": "secrets",
+        "severity": "P1", "file_path": "source.py", "line_start": 1,
+        "line_end": 1, "message": f"scanner accidentally echoed {secret}",
+    }]
+
+    result = context_for(
+        tmp_path, inventory, ingest, patch("source.py", "old = 1\n", after), findings,
+    )
+
+    serialized = json.dumps(result, sort_keys=True)
+    assert secret not in serialized
+    hit = next(iter(result["candidate_context"].values()))["deterministic_scanner_hits"][0]
+    assert hit["message"] == "Secret-bearing scanner evidence excluded"
 
 
 def test_multiple_hunks_attach_only_to_intersecting_source_candidates(tmp_path: Path) -> None:

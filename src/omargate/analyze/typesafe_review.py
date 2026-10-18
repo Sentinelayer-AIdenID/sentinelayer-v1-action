@@ -13,7 +13,7 @@ import math
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
-from ..redaction import sanitize_public_error
+from ..redaction import redact_secret_source, sanitize_public_error
 from .typesafe_client import TypeSafeClient, TypeSafeError, ChoiceAnswer, validate_answers
 
 
@@ -41,15 +41,19 @@ class ReviewCandidate:
     source_sha256: str
 
     def state(self) -> dict[str, Any]:
-        # Existing public redaction is reused; raw evidence is not sent or logged.
-        safe = sanitize_public_error(self.evidence)
+        # Source redaction excludes complete secret-bearing lines before the
+        # general diagnostic redactor runs; raw evidence is never sent or logged.
+        source_safe, source_redacted = redact_secret_source(
+            self.evidence, file_path=self.file_path
+        )
+        safe = sanitize_public_error(source_safe)
         return {
             "candidate_id": self.candidate_id,
             "file_path": self.file_path,
             "line_start": self.line_start,
             "line_end": self.line_end,
             "evidence": safe,
-            "evidence_redacted": safe != self.evidence,
+            "evidence_redacted": source_redacted or safe != self.evidence,
             "evidence_sha256": self.evidence_sha256,
             "source_sha256": self.source_sha256,
         }
