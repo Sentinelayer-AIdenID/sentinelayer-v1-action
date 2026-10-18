@@ -33,7 +33,10 @@ for name in $required_envs; do
   fi
 done
 
-export PYTHONPATH="/app/src:${PYTHONPATH:-}"
+# The mounted workspace is attacker-controlled input.  Keep imports bound to the
+# image-owned package even when the container starts in that workspace.
+export PYTHONPATH="/app/src"
+export PYTHONSAFEPATH=1
 
 
 # Docker actions run in an ephemeral container. Running as root avoids all
@@ -44,4 +47,4 @@ if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
   mkdir -p "$GITHUB_WORKSPACE/.sentinelayer/runs" "$GITHUB_WORKSPACE/.sentinelayer/artifacts" 2>/dev/null || true
 fi
 
-exec python -m omargate.main
+exec python -P -m omargate.main

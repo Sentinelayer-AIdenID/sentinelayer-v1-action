@@ -425,5 +425,8 @@ runs:
         INPUT_POLICY_PACK_VERSION: ${{ inputs.policy_pack_version }}
       run: |
         set -euo pipefail
-        export PYTHONPATH="${GITHUB_ACTION_PATH}/src:${PYTHONPATH:-}"
-        python -m omargate.main
+        # The scanned workspace is untrusted.  Do not let its cwd or an inherited
+        # PYTHONPATH shadow the action-owned omargate package while secrets exist.
+        export PYTHONPATH="${GITHUB_ACTION_PATH}/src"
+        export PYTHONSAFEPATH=1
+        python -P -m omargate.main
