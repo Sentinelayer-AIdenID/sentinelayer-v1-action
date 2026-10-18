@@ -4,6 +4,6 @@ google-genai==1.64.0
 pydantic==2.10.6
 pydantic-settings==2.2.1
 httpx==0.28.1
-anyio==4.12.1
+anyio==4.14.2
 requests==2.33.0
 pip-audit==2.10.0
