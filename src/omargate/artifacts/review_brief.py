@@ -7,7 +7,7 @@ from typing import Dict, Iterable, List, Optional
 from .priority_ranker import CATEGORY_SCORE, CATEGORIES, SEVERITY_SCORE, detect_categories, rank_files
 from ..fix_plan import ensure_fix_plan
 from ..ingest.codebase_snapshot import build_codebase_snapshot, build_codebase_synopsis
-from ..redaction import sanitize_public_error
+from ..redaction import sanitize_public_error, sanitize_untrusted_markdown_scalar
 
 CATEGORY_ACTIONS = {
     "auth": "Review auth and session controls",
@@ -167,16 +167,21 @@ def _format_fix_plan_section(findings: List[dict]) -> List[str]:
     lines: List[str] = []
     for idx, finding in enumerate(sorted_findings, start=1):
         severity = str(finding.get("severity") or "P3").upper()
-        category = str(finding.get("category") or "issue")
+        category = sanitize_untrusted_markdown_scalar(
+            finding.get("category") or "issue"
+        )
         path = str(finding.get("file_path") or "unknown").replace("\\", "/")
         line = int(finding.get("line_start") or 1)
         raw_message = sanitize_public_error(str(finding.get("message") or "No description"))
-        message = _truncate_message(raw_message, 220)
-        fix_plan = ensure_fix_plan(
+        message = sanitize_untrusted_markdown_scalar(
+            _truncate_message(raw_message, 220)
+        )
+        raw_fix_plan = ensure_fix_plan(
             fix_plan=sanitize_public_error(finding.get("fix_plan", "")),
             recommendation=sanitize_public_error(finding.get("recommendation", "")),
             message=raw_message,
         )
+        fix_plan = sanitize_untrusted_markdown_scalar(raw_fix_plan)
         lines.append(
             f"{idx}. **{severity}** `{path}:{line}` · **{category}**: {message}"
         )

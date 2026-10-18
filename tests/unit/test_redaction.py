@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from omargate.redaction import redact_secret_source, sanitize_public_error
+from omargate.redaction import (
+    redact_secret_source,
+    sanitize_public_error,
+    sanitize_untrusted_markdown_scalar,
+)
 
 
 def test_sanitize_public_error_redacts_provider_ids_and_keys() -> None:
@@ -93,3 +97,35 @@ def test_redact_secret_source_leaves_ordinary_source_byte_exact() -> None:
 
     assert changed is False
     assert safe == source
+
+
+def test_sanitize_public_error_preserves_canonical_redaction_placeholders() -> None:
+    raw = (
+        'token=[redacted-secret] {"api_key":"[redacted]"} '
+        "https://example.test?access_token=[redacted-provider-id]"
+    )
+
+    assert sanitize_public_error(raw) == raw
+
+
+def test_untrusted_markdown_scalar_is_inert_single_line_and_idempotent() -> None:
+    raw = (
+        "\r\n# forged [click](javascript:alert(1)) </details><!-- x -->"
+        "\x00\u202e token=sk-testtesttesttest"
+    )
+
+    sanitized = sanitize_untrusted_markdown_scalar(raw)
+
+    assert sanitized == sanitize_untrusted_markdown_scalar(sanitized)
+    assert "\r" not in sanitized
+    assert "\n" not in sanitized
+    assert "\x00" not in sanitized
+    assert "\u202e" not in sanitized
+    assert "# forged" not in sanitized
+    assert "[click](" not in sanitized
+    assert "</details>" not in sanitized
+    assert "<!--" not in sanitized
+    assert "sk-testtesttesttest" not in sanitized
+    assert "&#35;" in sanitized
+    assert "&#91;click&#93;&#40;" in sanitized
+    assert "&#60;&#47;details&#62;" in sanitized

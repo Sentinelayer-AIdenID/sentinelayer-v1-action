@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import html
 import re
 from pathlib import PurePosixPath
+import string
+import unicodedata
 
 
 _QUERY_SECRET_RE = re.compile(
-    r"(?i)([?&](?:key|api_key|access_token|token|signature)=)([^&#\s]+)"
+    r"(?i)([?&](?:key|api_key|access_token|token|signature)=)"
+    r"(?!\[redacted(?:-secret|-provider-id)?\](?:[&#\s]|$))([^&#\s]+)"
 )
 _JSON_SECRET_RE = re.compile(
     r"""(?ix)
@@ -13,6 +17,7 @@ _JSON_SECRET_RE = re.compile(
       (?:api[_-]?key|access[_-]?token|token|authorization|x[-_]?api[-_]?key)
       ["']?\s*[:=]\s*["']?
     )
+    (?!\[redacted(?:-secret|-provider-id)?\](?:["',\s}\]]|$))
     (?P<value>[^"',\s}\]]{8,})
     """
 )
@@ -170,3 +175,27 @@ def sanitize_public_error(value: object) -> str:
 
     text = _PROVIDER_ID_RE.sub(_provider_repl, text)
     return _GOOGLE_PROJECT_RESOURCE_RE.sub("projects/[redacted]", text)
+
+
+def sanitize_untrusted_markdown_scalar(value: object) -> str:
+    """Return inert, single-line text for a Markdown/HTML scalar position.
+
+    Finding prose is stored in its source-bound form and encoded only when it is
+    rendered.  Numeric character references preserve the visible punctuation,
+    but CommonMark never sees raw heading, link, blockquote, code, table, or HTML
+    delimiters.  Decoding once before canonical encoding makes this boundary
+    idempotent and closes entity-encoded variants of the same payload.
+    """
+
+    text = sanitize_public_error(html.unescape(str(value or "")))
+    normalized = "".join(
+        " "
+        if char.isspace() or unicodedata.category(char) in {"Cc", "Cf", "Cs"}
+        else char
+        for char in text
+    )
+    normalized = " ".join(normalized.split())
+    return "".join(
+        f"&#{ord(char)};" if char in string.punctuation else char
+        for char in normalized
+    )

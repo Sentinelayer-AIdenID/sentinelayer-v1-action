@@ -13,7 +13,7 @@ from .formatting import (
 from .fix_plan import ensure_fix_plan
 from .ingest.codebase_snapshot import build_codebase_synopsis, render_codebase_snapshot_md
 from .models import GateResult, GateStatus
-from .redaction import sanitize_public_error
+from .redaction import sanitize_public_error, sanitize_untrusted_markdown_scalar
 
 MARKER_PREFIX = "<!-- sentinelayer:omar-gate:v1:"
 
@@ -167,12 +167,14 @@ def _top_findings_section(
         severity = str(finding.get("severity") or "?").upper()
         file_path = str(finding.get("file_path") or "?").replace("\\", "/")
         line_start = finding.get("line_start")
-        category = str(finding.get("category") or "Issue")
+        category = sanitize_untrusted_markdown_scalar(
+            finding.get("category") or "Issue"
+        )
         raw_message = sanitize_public_error(
             str(finding.get("message") or "No description").strip()
         )
-        message = truncate(raw_message, 220)
-        fix_plan = truncate(
+        message = sanitize_untrusted_markdown_scalar(truncate(raw_message, 220))
+        raw_fix_plan = truncate(
             ensure_fix_plan(
                 fix_plan=sanitize_public_error(finding.get("fix_plan", "")),
                 recommendation=sanitize_public_error(finding.get("recommendation", "")),
@@ -180,6 +182,7 @@ def _top_findings_section(
             ),
             600,
         )
+        fix_plan = sanitize_untrusted_markdown_scalar(raw_fix_plan)
 
         loc = f"{file_path}:{line_start}" if line_start else file_path
         link = None
