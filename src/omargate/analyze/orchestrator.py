@@ -42,6 +42,7 @@ from .llm.providers import detect_provider_from_model
 from .llm.response_parser import ParsedFinding
 from .typesafe_client import TypeSafeClient, TypeSafeError
 from .typesafe_review import (
+    TypedReview,
     TypeSafeReviewIncomplete,
     build_inventory,
     load_policy,
@@ -82,6 +83,40 @@ def _scrub_log_value(value):
     for pattern, repl in _LOG_SECRET_SCRUB_RES:
         scrubbed = pattern.sub(repl, scrubbed)
     return scrubbed
+
+
+def _writer_failure_class(error: Exception) -> str:
+    """Return a bounded class without retaining provider or source-bearing text."""
+    if isinstance(error, TimeoutError):
+        return "typesafe_writer_timeout"
+    if isinstance(error, TypeSafeReviewIncomplete):
+        reason = str(error)
+        if reason in {"typesafe_writer_failed", "typesafe_writer_invalid"}:
+            return reason
+    return "typesafe_writer_error"
+
+
+def _preserve_review_after_writer_failure(
+    review: TypedReview,
+    *,
+    failure_class: str,
+) -> TypedReview:
+    """Retain the completed typed decision and add only safe writer metadata."""
+    findings = []
+    for original in review.findings:
+        finding = dict(original)
+        finding.setdefault("typed_reason", finding.get("message", ""))
+        finding.setdefault("typed_recommendation", finding.get("recommendation", ""))
+        findings.append(finding)
+    writer = {
+        "provider": "openai",
+        "requested_model": WRITER_MODEL,
+        "success": False,
+        "failure_class": failure_class,
+    }
+    assessment = {**review.assessment, "writer": writer}
+    usage = {**review.usage, "typesafe_assessment": assessment}
+    return TypedReview(findings, usage, assessment)
 
 
 @dataclass
@@ -601,6 +636,7 @@ class AnalysisOrchestrator:
         attempted = False
         client = None
         typed_usage = None
+        writer_warning = None
         metadata: dict = {
             "requested_provider": "typesafe", "requested_model": self.config.typesafe_model,
             "complete": False,
@@ -626,19 +662,32 @@ class AnalysisOrchestrator:
             metadata = review.assessment
             typed_usage = review.usage
             if review.findings:
-                writer = LLMClient(
-                    api_key=self.config.openai_api_key.get_secret_value(),
-                    primary_model=WRITER_MODEL, fallback_model=WRITER_MODEL,
-                    llm_provider="openai", managed_llm=False,
-                    managed_capacity_fallback=False,
-                )
-                review = await explain_review(review, client=writer)
+                try:
+                    writer = LLMClient(
+                        api_key=self.config.openai_api_key.get_secret_value(),
+                        primary_model=WRITER_MODEL,
+                        fallback_model=WRITER_MODEL,
+                        llm_provider="openai",
+                        managed_llm=False,
+                        managed_capacity_fallback=False,
+                    )
+                    review = await explain_review(review, client=writer)
+                except Exception as error:
+                    review = _preserve_review_after_writer_failure(
+                        review,
+                        failure_class=_writer_failure_class(error),
+                    )
+                    writer_warning = (
+                        "TypeSafe writer did not complete; policy-owned typed "
+                        "verdicts were preserved."
+                    )
                 metadata = review.assessment
+                typed_usage = review.usage
             verify_sources(self.repo_root, inventory)
             attempted = bool(client.attempted)
             result = LLMAnalysisResult(
                 findings=review.findings, success=True, usage=review.usage,
-                warning=None, attempted=attempted, output_valid=True,
+                warning=writer_warning, attempted=attempted, output_valid=True,
                 no_findings_reported=not review.findings,
                 reported_finding_count=len(review.findings),
             )
@@ -1195,7 +1244,7 @@ class AnalysisOrchestrator:
 
             if source in {"llm", "codex"} and severity in {"P0", "P1"}:
                 if not self._is_corroborated(
-                    path, line_start, category, non_llm_findings
+                    path, line_start, line_end, category, non_llm_findings
                 ):
                     severity = "P2"
                     confidence = min(confidence, 0.75)
@@ -1224,9 +1273,12 @@ class AnalysisOrchestrator:
         self,
         path: str,
         line_start: int,
+        line_end: int,
         category: str,
         non_llm_findings: List[dict],
     ) -> bool:
+        expanded_start = max(1, line_start - 5)
+        expanded_end = line_end + 5
         for finding in non_llm_findings:
             if not isinstance(finding, dict):
                 continue
@@ -1234,13 +1286,16 @@ class AnalysisOrchestrator:
             if other_path != path:
                 continue
             other_category = str(finding.get("category") or "")
-            if other_category and category and other_category != category:
+            if other_category != category:
                 continue
             try:
-                other_line = int(finding.get("line_start") or 1)
+                other_start = int(finding.get("line_start"))
+                other_end = int(finding.get("line_end") or other_start)
             except (TypeError, ValueError):
-                other_line = 1
-            if abs(other_line - line_start) <= 5:
+                continue
+            if other_start < 1 or other_end < other_start:
+                continue
+            if other_start <= expanded_end and other_end >= expanded_start:
                 return True
         return False
 

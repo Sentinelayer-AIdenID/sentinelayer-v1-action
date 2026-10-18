@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -19,7 +20,11 @@ from omargate.analyze.typesafe_review import (
     TypeSafeReviewIncomplete,
 )
 from omargate.config import OmarGateConfig
+from omargate.gate import evaluate_gate
 from omargate.logging import OmarLogger
+from omargate.main import _build_llm_evidence
+from omargate.models import GateConfig, GateStatus
+from omargate.packaging import write_findings_jsonl, write_pack_summary
 
 
 PIN = "jev-1.13.0"
@@ -57,7 +62,15 @@ def outcome(*, success=True, provider="typesafe", model=PIN, findings=None, atte
     )
 
 
-def orchestrator(tmp_path, monkeypatch, *, fallback=True, codex=True, allow=True):
+def orchestrator(
+    tmp_path,
+    monkeypatch,
+    *,
+    fallback=True,
+    codex=True,
+    allow=True,
+    failure_policy="block",
+):
     (tmp_path / "source.py").write_text("first\nsecond\n", encoding="utf-8")
     config = OmarGateConfig(
         llm_provider="typesafe", typesafe_api_key="synthetic-typesafe-key",
@@ -65,6 +78,7 @@ def orchestrator(tmp_path, monkeypatch, *, fallback=True, codex=True, allow=True
         typesafe_fallback=fallback, use_codex=codex, model=GENERATOR,
         model_fallback=GENERATOR, codex_model=GENERATOR,
         run_harness=False, publish_github=False, telemetry=False,
+        llm_failure_policy=failure_policy,
         sentinelayer_spec_id="fixture", _env_file=None,
     )
     instance = AnalysisOrchestrator(config, OmarLogger("typesafe-fixture"), tmp_path, allow_llm=allow)
@@ -408,3 +422,189 @@ async def test_generator_fallback_keeps_the_failed_typed_evidence(tmp_path, monk
     assert result.llm_usage["typesafe_assessment"] == typed.usage["typesafe_assessment"]
     assert result.llm_usage["typesafe_usage"] == {"input_tokens": 17}
     assert result.llm_usage["typesafe_attempt"]["success"] is False
+
+
+@pytest.mark.parametrize(
+    "deterministic_start,deterministic_end,deterministic_category,expected_severity",
+    [
+        (35, 35, "auth", "P1"),
+        (1, 15, "auth", "P1"),
+        (45, 50, "auth", "P1"),
+        (46, 50, "auth", "P2"),
+        (35, 35, "privacy", "P2"),
+        (35, 35, "", "P2"),
+    ],
+)
+def test_corroboration_uses_complete_typed_and_deterministic_ranges_with_exact_category(
+    tmp_path,
+    monkeypatch,
+    deterministic_start,
+    deterministic_end,
+    deterministic_category,
+    expected_severity,
+):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch)
+    typed = finding("llm")
+    typed.update(
+        severity="P1",
+        category="auth",
+        line_start=20,
+        line_end=40,
+        message="A policy-owned authentication finding.",
+    )
+    deterministic = finding()
+    deterministic.update(
+        category=deterministic_category,
+        line_start=deterministic_start,
+        line_end=deterministic_end,
+    )
+
+    guarded = instance._apply_llm_guardrails(
+        llm_findings=[typed],
+        non_llm_findings=[deterministic],
+        ingest={"files": [{"path": "source.py", "lines": 100}]},
+    )
+
+    assert len(guarded) == 1
+    assert guarded[0]["severity"] == expected_severity
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "writer_failure",
+    ["malformed", "failed", "timeout", "wrong-family"],
+)
+@pytest.mark.parametrize(
+    "fallback,failure_policy",
+    [
+        (True, "block"),
+        (True, "deterministic_only"),
+        (True, "allow_with_warning"),
+        (False, "block"),
+        (False, "deterministic_only"),
+        (False, "allow_with_warning"),
+    ],
+)
+async def test_completed_typed_p0_survives_writer_failure_without_a_new_decision(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    writer_failure,
+    fallback,
+    failure_policy,
+):
+    instance, _, _ = orchestrator(
+        tmp_path,
+        monkeypatch,
+        fallback=fallback,
+        failure_policy=failure_policy,
+    )
+    # Corroborate the same category near the typed span's start, but keep a
+    # different dedupe key so the deterministic fixture cannot stand in for it.
+    corroboration = finding()
+    corroboration.update(line_start=2, line_end=2, snippet="second\n")
+    monkeypatch.setattr(instance, "_run_deterministic_scans", lambda _: [corroboration])
+    policy = FixturePolicy()
+
+    def completed_verdict(candidates, answers):
+        return ReviewDecision(
+            (
+                RatedFinding(
+                    candidate_id=candidates[0].candidate_id,
+                    question_ids=("q0",),
+                    severity="P0",
+                    category="fixture",
+                    message="Fixed fixture typed verdict.",
+                    recommendation="Inspect the bound fixture source.",
+                    support_probability=0.8,
+                ),
+            ),
+            complete=True,
+        )
+
+    monkeypatch.setattr(policy, "decide", completed_verdict)
+    monkeypatch.setattr(module, "load_policy", lambda: policy)
+    typed_client = FixtureClient()
+    monkeypatch.setattr(module, "TypeSafeClient", lambda *args, **kwargs: typed_client)
+    usage = module.LLMUsage(GENERATOR, 10, 3, 0.0, 1, provider="openai")
+    source_marker = "SOURCE_BEARING_WRITER_FIXTURE_MARKER"
+    response = module.LLMResponse(f"not json: {source_marker}", usage, success=True)
+    if writer_failure == "failed":
+        response.success = False
+    elif writer_failure == "wrong-family":
+        response.usage.model = "gpt-4.1-mini"
+    writer = SimpleNamespace(analyze=AsyncMock(return_value=response))
+    if writer_failure == "timeout":
+        writer.analyze.side_effect = TimeoutError(source_marker)
+    writer_options = []
+
+    def writer_factory(**kwargs):
+        writer_options.append(kwargs)
+        return writer
+
+    monkeypatch.setattr(module, "LLMClient", writer_factory)
+    clean_cli = AsyncMock(return_value=outcome(provider="openai", model=GENERATOR))
+    clean_api = AsyncMock(return_value=outcome(provider="openai", model=GENERATOR))
+    monkeypatch.setattr(instance, "_run_codex_audit", clean_cli)
+    monkeypatch.setattr(instance, "_run_llm_analysis", clean_api)
+
+    result = await run(instance)
+    gate_dir = tmp_path / "gate"
+    gate_dir.mkdir()
+    findings_path = gate_dir / "FINDINGS.jsonl"
+    write_findings_jsonl(findings_path, result.findings)
+    write_pack_summary(
+        gate_dir,
+        "fixed-typed-verdict",
+        True,
+        findings_path,
+        {key: result.counts[key] for key in ("P0", "P1", "P2", "P3")},
+        {"action": "fixture"},
+        ["deterministic", "llm"],
+        llm_usage=result.llm_usage,
+        llm_evidence=_build_llm_evidence(result, instance.config),
+    )
+    gate = evaluate_gate(
+        gate_dir,
+        GateConfig(
+            severity_gate="P1",
+            require_llm_success=failure_policy == "block",
+        ),
+    )
+    typed = [row for row in result.findings if row.get("typed_verdict")]
+    assert len(typed) == 1, {
+        "counts": result.counts,
+        "gate": gate.status.value,
+        "cliCalls": clean_cli.await_count,
+        "apiCalls": clean_api.await_count,
+    }
+    assert typed[0]["severity"] == typed[0]["typed_verdict"]["severity"] == "P0"
+    assert typed[0]["message"] == "Fixed fixture typed verdict."
+    assert (
+        typed[0]["typed_reason"]
+        == typed[0]["typed_verdict"]["reason"]
+        == "Fixed fixture typed verdict."
+    )
+    assert typed[0]["recommendation"] == "Inspect the bound fixture source."
+    assert typed[0]["file_path"] == "source.py" and typed[0]["line_start"] == 1
+    assert typed[0]["model_source"] == PIN
+    assert result.llm_success and result.llm_output_valid and result.llm_attempted
+    assert result.llm_reported_finding_count == result.llm_count == 1
+    assert result.counts["P0"] == 1 and result.counts["P2"] == 1
+    assert gate.status == GateStatus.BLOCKED and gate.block_merge and gate.counts.p0 == 1
+    assert clean_cli.await_count == clean_api.await_count == 0
+    assert len(typed_client.calls) == writer.analyze.await_count == len(writer_options) == 1
+    assert (
+        writer_options[0]["primary_model"]
+        == writer_options[0]["fallback_model"]
+        == GENERATOR
+    )
+    writer_status = result.llm_usage["typesafe_assessment"]["writer"]
+    assert writer_status["success"] is False
+    assert writer_status["requested_model"] == GENERATOR
+    assert re.fullmatch(r"[a-z][a-z0-9_]{0,95}", writer_status["failure_class"])
+    assert any("writer" in warning.lower() for warning in result.warnings)
+    assert source_marker not in json.dumps(
+        {"warnings": result.warnings, "usage": result.llm_usage}
+    )
+    assert source_marker not in capsys.readouterr().err
