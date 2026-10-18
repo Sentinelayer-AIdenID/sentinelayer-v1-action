@@ -19,6 +19,7 @@ from omargate.analyze.typesafe_review import (
     review_inventory,
     verify_sources,
 )
+from omargate.redaction import sanitize_public_error
 
 
 MODEL = "jev-1.13.0"
@@ -508,3 +509,37 @@ async def test_none_choice_does_not_override_uncertain_fixture_policy(tmp_path: 
     with pytest.raises(TypeSafeReviewIncomplete, match="typed_review_incomplete"):
         await review(tmp_path, inventory, policy=policy, client=client)
     assert len(client.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_policy_prose_reuses_existing_redactor_with_bound_source_and_verdict(tmp_path: Path):
+    secret = "sk-synthetic-policy-fixture-123456789"
+    message = f"The fixture policy reason repeated {secret}."
+    recommendation = f"Remove the fixture policy value {secret}."
+    assert secret not in sanitize_public_error(message)
+    inventory = source_inventory(tmp_path, "ordinary fixture source\n")
+    candidate, = inventory.candidates
+    policy = FixturePolicy()
+    proposed = replace(policy.finding(inventory.candidates), message=message, recommendation=recommendation)
+    policy.finding = lambda candidates: proposed
+
+    result = await review(tmp_path, inventory, policy=policy)
+
+    serialized = json.dumps({
+        "findings": result.findings, "assessment": result.assessment, "usage": result.usage,
+    })
+    assert secret not in serialized
+    finding, = result.findings
+    assert finding["message"] == sanitize_public_error(message)
+    assert finding["recommendation"] == finding["fix_plan"] == sanitize_public_error(recommendation)
+    assert finding["typed_verdict"] == {
+        "severity": proposed.severity, "category": proposed.category,
+        "question_ids": list(proposed.question_ids),
+        "support_probability": proposed.support_probability,
+        "reason": sanitize_public_error(message),
+    }
+    assert finding["file_path"] == candidate.file_path
+    assert (finding["line_start"], finding["line_end"]) == (candidate.line_start, candidate.line_end)
+    assert finding["snippet"] == candidate.evidence
+    assert finding["model_source"] == MODEL
+    assert result.assessment["source_hashes"] == dict(inventory.source_hashes)

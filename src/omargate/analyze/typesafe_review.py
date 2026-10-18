@@ -294,8 +294,9 @@ async def review_inventory(
             "file_path": candidate.file_path,
             "line_start": candidate.line_start, "line_end": candidate.line_end,
             "snippet": candidate.state()["evidence"],
-            "message": finding.message, "recommendation": finding.recommendation,
-            "fix_plan": finding.recommendation,
+            "message": sanitize_public_error(finding.message),
+            "recommendation": sanitize_public_error(finding.recommendation),
+            "fix_plan": sanitize_public_error(finding.recommendation),
             # Legacy finding field: explicitly interpreted by the policy owner,
             # never inferred as a separate Noul confidence by the transport.
             "confidence": finding.support_probability,
@@ -304,7 +305,7 @@ async def review_inventory(
                 "severity": finding.severity, "category": finding.category,
                 "question_ids": list(finding.question_ids),
                 "support_probability": finding.support_probability,
-                "reason": finding.message,
+                "reason": sanitize_public_error(finding.message),
             },
         })
     assessment = {

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ..redaction import sanitize_public_error
 from .llm import LLMClient
 from .typesafe_review import TypeSafeReviewIncomplete, TypedReview
 
@@ -69,9 +70,9 @@ async def explain_review(review: TypedReview, *, client: LLMClient) -> TypedRevi
             **finding,
             "typed_reason": finding["message"],
             "typed_recommendation": finding["recommendation"],
-            "message": prose["message"],
-            "recommendation": prose["recommendation"],
-            "fix_plan": prose["recommendation"],
+            "message": sanitize_public_error(prose["message"]),
+            "recommendation": sanitize_public_error(prose["recommendation"]),
+            "fix_plan": sanitize_public_error(prose["recommendation"]),
             "writer_model_source": response.usage.model,
         })
     writer = {
