@@ -7,7 +7,7 @@ RUN set -eux; \
     apk add --no-cache \
       build-base=0.5-r3 \
       libffi-dev=3.5.2-r0 \
-      openssl-dev=3.5.7-r0 \
+      openssl-dev=3.5.9-r0 \
       cargo=1.91.1-r2 \
     && python -m pip install --upgrade pip wheel
 
@@ -25,7 +25,7 @@ RUN set -eux; \
       libstdc++=15.2.0-r2 \
       nodejs=24.18.1-r0 \
       npm=11.11.0-r0 \
-      openssl=3.5.7-r0 \
+      openssl=3.5.9-r0 \
       git=2.52.0-r0
 
 # Install Codex CLI (pinned) with npm dist.integrity verification.
