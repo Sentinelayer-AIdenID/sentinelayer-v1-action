@@ -251,6 +251,78 @@ async def test_uncertain_policy_is_not_a_clean_review(tmp_path: Path):
 
 
 @pytest.mark.anyio
+async def test_partial_policy_retains_only_bound_confirmed_findings(tmp_path: Path):
+    inventory = source_inventory(
+        tmp_path,
+        "".join(f"line {index}\n" for index in range(1, 43)),
+    )
+    confirmed, unresolved = inventory.candidates
+    policy = FixturePolicy()
+    policy.decide = lambda candidates, answers: ReviewDecision(
+        (policy.finding(candidates),),
+        complete=False,
+        reason="policy_review_incomplete",
+        unresolved_candidates=((unresolved.candidate_id, "policy_risk_answer_ambiguous"),),
+    )
+
+    result = await review(tmp_path, inventory, policy=policy)
+
+    finding, = result.findings
+    assert finding["file_path"] == confirmed.file_path
+    assert finding["line_start"] == confirmed.line_start
+    assert result.assessment["complete"] is False
+    assert result.assessment["decision_reason"] == "policy_review_incomplete"
+    assert result.assessment["unresolved_candidates"] == [{
+        "candidate_id": unresolved.candidate_id,
+        "reason": "policy_risk_answer_ambiguous",
+    }]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("kind", ["cross-question", "invalid-severity"])
+async def test_partial_policy_still_validates_every_retained_finding(
+    tmp_path: Path,
+    kind: str,
+):
+    inventory = source_inventory(
+        tmp_path,
+        "".join(f"line {index}\n" for index in range(1, 43)),
+    )
+    policy = FixturePolicy()
+    finding = policy.finding(inventory.candidates)
+    if kind == "cross-question":
+        finding = replace(finding, question_ids=("q1",))
+        expected = "unbound_typed_finding"
+    else:
+        finding = replace(finding, severity="P9")
+        expected = "invalid_typed_finding"
+    policy.decide = lambda candidates, answers: ReviewDecision(
+        (finding,),
+        complete=False,
+        reason="policy_review_incomplete",
+        unresolved_candidates=((candidates[1].candidate_id, "policy_risk_answer_ambiguous"),),
+    )
+
+    with pytest.raises(TypeSafeReviewIncomplete, match=expected):
+        await review(tmp_path, inventory, policy=policy)
+
+
+@pytest.mark.anyio
+async def test_partial_policy_rejects_unbounded_unresolved_reason(tmp_path: Path):
+    inventory = source_inventory(tmp_path, "one line\n")
+    policy = FixturePolicy()
+    policy.decide = lambda candidates, answers: ReviewDecision(
+        (),
+        complete=False,
+        reason="policy_review_incomplete",
+        unresolved_candidates=((candidates[0].candidate_id, "unsafe reason with source text"),),
+    )
+
+    with pytest.raises(TypeSafeReviewIncomplete, match="invalid_unresolved_candidate"):
+        await review(tmp_path, inventory, policy=policy)
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("kind", ["invented-candidate", "missing-reference", "unknown-question", "other-candidate-question"])
 async def test_finding_must_reference_its_own_candidate_questions(tmp_path: Path, kind: str):
     inventory = source_inventory(tmp_path)
@@ -331,6 +403,11 @@ async def test_review_preserves_source_binding_and_reports_only_actual_usage(tmp
     assert finding["snippet"] == sent_candidate["evidence"]
     assert finding["confidence"] == 0.61  # The fixture policy's interpretation, not the raw 0.87 Noul.
     assert finding["model_source"] == MODEL
+    assert finding["typed_candidate"] == {
+        "candidate_id": candidate.candidate_id,
+        "evidence_sha256": candidate.evidence_sha256,
+        "source_sha256": candidate.source_sha256,
+    }
     assert secret not in json.dumps(result.findings)
     assert result.usage == {
         "provider": "typesafe", "model": MODEL, "route": "typed-review",

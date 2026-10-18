@@ -42,6 +42,7 @@ CHOICE_MARGIN_MIN = 0.20
 CLEAN_CHOICE_CONFIDENCE_MIN = 0.95
 CLEAN_CHOICE_PROBABILITY_MIN = 0.95
 CLEAN_CHOICE_MARGIN_MIN = 0.80
+CLEAN_BLOCKING_SEVERITY_TAIL_MAX = 0.01
 
 _SEVERITY_SUPPORT_FLOORS = MappingProxyType({
     "P0": 0.90,
@@ -72,12 +73,14 @@ _SEVERITY_CRITERIA = MappingProxyType({
 
 _CATEGORY_CRITERIA = MappingProxyType({
     "auth": (
-        "Authentication, authorization, session, token, tenant, role or privilege enforcement "
-        "permits an unauthorized action."
+        "Authentication, authorization, session, token, tenant, role, privilege enforcement or "
+        "cross-site request forgery (CSRF) permits an unauthorized action."
     ),
     "injection": (
         "Untrusted data changes executable or interpreted structure, including SQL, XSS/HTML/JS, "
-        "OS/shell/remote code execution (RCE), path traversal, unsafe deserialization or log injection."
+        "OS/shell/remote code execution (RCE), path traversal, unsafe deserialization, XML external "
+        "entity (XXE), server-side template injection (SSTI), log injection or prompt injection "
+        "that crosses a tool or action trust boundary."
     ),
     "crypto": (
         "Cryptographic construction, randomness, verification, algorithm or key handling defeats "
@@ -121,7 +124,9 @@ _CATEGORY_CRITERIA = MappingProxyType({
     ),
     "other-security": (
         "A concrete confidentiality, integrity, availability or trust-boundary failure does not "
-        "fit another policy category."
+        "fit another policy category, including reviewed open-redirect, prototype-pollution or "
+        "memory-safety paths. Blocking verdicts require generator review because this category has "
+        "no current deterministic corroboration producer."
     ),
     "none": "The bound source candidate does not support an actionable security category.",
 })
@@ -218,6 +223,7 @@ _RISK_INSTRUCTIONS = MappingProxyType({
 @dataclass(frozen=True)
 class _ChoiceEvidence:
     choice: str
+    probabilities: Mapping[str, float]
     selected_probability: float
     confidence: float
     margin: float
@@ -323,6 +329,7 @@ def _choice_evidence(
     margin = selected_probability - ordered[1] if len(ordered) > 1 else selected_probability
     return _ChoiceEvidence(
         choice=answer.choice,
+        probabilities=MappingProxyType(normalized),
         selected_probability=selected_probability,
         confidence=float(answer.confidence),
         margin=margin,
@@ -418,11 +425,13 @@ class SecurityReviewPolicy:
             return ReviewDecision((), complete=False, reason="policy_answer_coverage_incomplete")
 
         findings: list[RatedFinding] = []
+        unresolved: list[tuple[str, str]] = []
         for candidate in candidates:
             risk_id, severity_id, category_id = _question_ids(candidate.candidate_id)
             risk = answers[risk_id]
             if not _is_probability(risk):
-                return ReviewDecision((), complete=False, reason="policy_risk_answer_malformed")
+                unresolved.append((candidate.candidate_id, "policy_risk_answer_malformed"))
+                continue
             severity, severity_error = _choice_evidence(
                 answers[severity_id],
                 _SEVERITY_CRITERIA,
@@ -432,15 +441,18 @@ class SecurityReviewPolicy:
                 _CATEGORY_CRITERIA,
             )
             if severity_error is not None:
-                return ReviewDecision((), complete=False, reason="policy_severity_answer_malformed")
+                unresolved.append((candidate.candidate_id, "policy_severity_answer_malformed"))
+                continue
             if category_error is not None:
-                return ReviewDecision((), complete=False, reason="policy_category_answer_malformed")
+                unresolved.append((candidate.candidate_id, "policy_category_answer_malformed"))
+                continue
             assert severity is not None and category is not None
 
             risk_probability = float(risk)
             if risk_probability <= RISK_ABSENT_MAX:
                 if severity.choice != "none" or category.choice != "none":
-                    return ReviewDecision((), complete=False, reason="policy_answers_inconsistent")
+                    unresolved.append((candidate.candidate_id, "policy_answers_inconsistent"))
+                    continue
                 if not _choice_clears(
                     severity,
                     confidence=CLEAN_CHOICE_CONFIDENCE_MIN,
@@ -452,27 +464,38 @@ class SecurityReviewPolicy:
                     probability=CLEAN_CHOICE_PROBABILITY_MIN,
                     margin=CLEAN_CHOICE_MARGIN_MIN,
                 ):
-                    return ReviewDecision((), complete=False, reason="policy_clean_answer_uncertain")
+                    unresolved.append((candidate.candidate_id, "policy_clean_answer_uncertain"))
+                    continue
+                severe_tail = math.fsum(
+                    severity.probabilities[label] for label in ("P0", "P1")
+                )
+                if severe_tail - CLEAN_BLOCKING_SEVERITY_TAIL_MAX > 1e-9:
+                    unresolved.append((candidate.candidate_id, "policy_clean_severity_tail_too_high"))
+                    continue
                 continue
 
             if risk_probability < RISK_PRESENT_MIN:
-                return ReviewDecision((), complete=False, reason="policy_risk_answer_ambiguous")
+                unresolved.append((candidate.candidate_id, "policy_risk_answer_ambiguous"))
+                continue
             if severity.choice == "none" or category.choice == "none":
-                return ReviewDecision((), complete=False, reason="policy_answers_inconsistent")
+                unresolved.append((candidate.candidate_id, "policy_answers_inconsistent"))
+                continue
             if not _choice_clears(
                 severity,
                 confidence=CHOICE_CONFIDENCE_MIN,
                 probability=CHOICE_PROBABILITY_MIN,
                 margin=CHOICE_MARGIN_MIN,
             ):
-                return ReviewDecision((), complete=False, reason="policy_severity_answer_uncertain")
+                unresolved.append((candidate.candidate_id, "policy_severity_answer_uncertain"))
+                continue
             if not _choice_clears(
                 category,
                 confidence=CHOICE_CONFIDENCE_MIN,
                 probability=CHOICE_PROBABILITY_MIN,
                 margin=CHOICE_MARGIN_MIN,
             ):
-                return ReviewDecision((), complete=False, reason="policy_category_answer_uncertain")
+                unresolved.append((candidate.candidate_id, "policy_category_answer_uncertain"))
+                continue
 
             support_probability = min(
                 risk_probability,
@@ -480,7 +503,8 @@ class SecurityReviewPolicy:
                 category.selected_probability,
             )
             if support_probability < _SEVERITY_SUPPORT_FLOORS[severity.choice]:
-                return ReviewDecision((), complete=False, reason="policy_support_probability_too_low")
+                unresolved.append((candidate.candidate_id, "policy_support_probability_too_low"))
+                continue
             message, recommendation = _FINDING_TEMPLATES[category.choice]
             findings.append(RatedFinding(
                 candidate_id=candidate.candidate_id,
@@ -491,6 +515,13 @@ class SecurityReviewPolicy:
                 recommendation=recommendation,
                 support_probability=support_probability,
             ))
+        if unresolved:
+            return ReviewDecision(
+                tuple(findings),
+                complete=False,
+                reason="policy_review_incomplete",
+                unresolved_candidates=tuple(unresolved),
+            )
         return ReviewDecision(tuple(findings), complete=True, reason="policy_review_complete")
 
 

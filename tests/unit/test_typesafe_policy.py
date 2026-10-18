@@ -68,6 +68,7 @@ class ReviewDecision:
     findings: tuple[RatedFinding, ...]
     complete: bool
     reason: str = ""
+    unresolved_candidates: tuple[tuple[str, str], ...] = ()
 
 
 class TypeSafeReviewIncomplete(ValueError):
@@ -199,7 +200,13 @@ def question(
 
 
 def assert_incomplete(decision: ReviewDecision, reason: str) -> None:
-    assert decision == ReviewDecision((), complete=False, reason=reason)
+    assert decision.complete is False
+    assert decision.findings == ()
+    if decision.unresolved_candidates:
+        assert decision.reason == "policy_review_incomplete"
+        assert tuple(item[1] for item in decision.unresolved_candidates) == (reason,)
+    else:
+        assert decision.reason == reason
 
 
 def test_policy_identity_is_nonempty_stable_and_immutable() -> None:
@@ -312,8 +319,19 @@ def test_broad_category_criteria_define_unambiguous_security_mappings() -> None:
     }
     assert all(
         phrase in criteria["injection"]
-        for phrase in ("sql", "xss", "rce", "path traversal", "deserialization", "log injection")
+        for phrase in (
+            "sql",
+            "xss",
+            "rce",
+            "path traversal",
+            "deserialization",
+            "xxe",
+            "ssti",
+            "log injection",
+            "prompt injection",
+        )
     )
+    assert "csrf" in criteria["auth"]
     assert all(
         phrase in criteria["secrets"]
         for phrase in ("credential", "api token", "private key", "logs")
@@ -322,6 +340,11 @@ def test_broad_category_criteria_define_unambiguous_security_mappings() -> None:
     assert "non-public sensitive data" in criteria["exposure"]
     assert "resource exhaustion" in criteria["availability"]
     assert "time-of-check/time-of-use" in criteria["race-condition"]
+    assert all(
+        phrase in criteria["other-security"]
+        for phrase in ("open-redirect", "prototype-pollution", "memory-safety")
+    )
+    assert "no current deterministic corroboration producer" in criteria["other-security"]
 
 
 def test_risk_wording_does_not_blanket_exclude_dos_or_security_relevant_logs() -> None:
@@ -647,6 +670,48 @@ def test_low_confidence_clean_choice_is_not_empty_success(prefix: str) -> None:
     assert_incomplete(decision, "policy_clean_answer_uncertain")
 
 
+@pytest.mark.parametrize("prefix", ["severity", "category"])
+def test_clean_probability_floor_is_load_bearing(prefix: str) -> None:
+    candidates = (candidate(),)
+    answers = complete_answers(
+        candidates,
+        risk=0.01,
+        severity="none",
+        category="none",
+        probability=0.98,
+        confidence=0.99,
+    )
+    _, choice_question = question(candidates, prefix)
+    below_floor = answer_choice(
+        "none", choice_question["criteria"], probability=0.94, confidence=0.99
+    )
+    decision = policy_module.POLICY.decide(
+        candidates,
+        replace_answer(answers, prefix, below_floor),
+    )
+    assert_incomplete(decision, "policy_clean_answer_uncertain")
+
+
+def test_clean_none_rejects_meaningful_p0_p1_probability_tail() -> None:
+    candidates = (candidate(),)
+    answers = complete_answers(
+        candidates,
+        risk=0.01,
+        severity="none",
+        category="none",
+        probability=0.98,
+        confidence=0.99,
+    )
+    severity_id, severity_question = question(candidates, "severity")
+    probabilities = {name: 0.0 for name in severity_question["criteria"]}
+    probabilities.update({"none": 0.96, "P0": 0.025, "P1": 0.015})
+    answers[severity_id] = ChoiceAnswer("none", probabilities, 0.99)
+
+    decision = policy_module.POLICY.decide(candidates, answers)
+
+    assert_incomplete(decision, "policy_clean_severity_tail_too_high")
+
+
 @pytest.mark.parametrize(
     ("risk", "severity", "category"),
     [
@@ -690,13 +755,52 @@ def test_severity_specific_support_floor_is_fail_closed(severity: str, risk: flo
     )
 
 
-def test_later_uncertain_candidate_discards_earlier_findings() -> None:
-    candidates = (candidate(0), candidate(1))
+@pytest.mark.parametrize("severity", ["P0", "P1"])
+def test_blocking_severity_support_floors_are_load_bearing(severity: str) -> None:
+    candidates = (candidate(),)
+    answers = complete_answers(
+        candidates,
+        severity=severity,
+        probability=0.98,
+    )
+    _, severity_question = question(candidates, "severity")
+    answers = replace_answer(
+        answers,
+        "severity",
+        answer_choice(
+            severity,
+            severity_question["criteria"],
+            probability=0.85,
+            confidence=0.97,
+        ),
+    )
+
+    assert_incomplete(
+        policy_module.POLICY.decide(candidates, answers),
+        "policy_support_probability_too_low",
+    )
+
+
+@pytest.mark.parametrize("uncertain_first", [False, True])
+def test_uncertain_candidate_retains_confirmed_findings_regardless_of_order(
+    uncertain_first: bool,
+) -> None:
+    confirmed = candidate(0)
+    uncertain = candidate(1)
+    candidates = (uncertain, confirmed) if uncertain_first else (confirmed, uncertain)
     answers = complete_answers(candidates)
-    second_risk = f"risk::{candidates[1].candidate_id}"
-    answers[second_risk] = 0.5
+    answers[f"risk::{uncertain.candidate_id}"] = 0.5
+
     decision = policy_module.POLICY.decide(candidates, answers)
-    assert_incomplete(decision, "policy_risk_answer_ambiguous")
+
+    assert decision.complete is False
+    assert decision.reason == "policy_review_incomplete"
+    assert [finding.candidate_id for finding in decision.findings] == [
+        confirmed.candidate_id
+    ]
+    assert decision.unresolved_candidates == (
+        (uncertain.candidate_id, "policy_risk_answer_ambiguous"),
+    )
 
 
 def test_findings_preserve_candidate_order_and_question_binding() -> None:

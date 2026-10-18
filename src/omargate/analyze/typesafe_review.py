@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 from pathlib import Path, PurePosixPath
+import re
 from typing import Any, Protocol
 
 from ..redaction import redact_secret_source, sanitize_public_error
@@ -88,13 +89,17 @@ class ReviewDecision:
     findings: tuple[RatedFinding, ...]
     complete: bool
     reason: str = ""
+    unresolved_candidates: tuple[tuple[str, str], ...] = ()
 
 
 class ReviewPolicy(Protocol):
     """Owned security catalogue/calibration; transport does not define policy."""
 
-    policy_id: str
-    calibration_id: str
+    @property
+    def policy_id(self) -> str: ...
+
+    @property
+    def calibration_id(self) -> str: ...
 
     def plan(self, candidates: tuple[ReviewCandidate, ...]) -> ReviewPlan: ...
 
@@ -270,9 +275,15 @@ async def review_inventory(
     except TypeSafeError:
         raise TypeSafeReviewIncomplete("incomplete_typed_answers")
     decision = policy.decide(inventory.candidates, response.answers)
-    if decision.complete is not True:
-        raise TypeSafeReviewIncomplete("typed_review_incomplete")
+    if (
+        not isinstance(decision, ReviewDecision)
+        or type(decision.findings) is not tuple
+        or type(decision.complete) is not bool
+        or type(decision.unresolved_candidates) is not tuple
+    ):
+        raise TypeSafeReviewIncomplete("invalid_typed_decision")
     emitted: list[dict[str, Any]] = []
+    finding_candidates: set[str] = set()
     for finding in decision.findings:
         candidate = by_id.get(finding.candidate_id)
         if candidate is None or not finding.question_ids or any(
@@ -292,6 +303,9 @@ async def review_inventory(
             or not 0 <= finding.support_probability <= 1
         ):
             raise TypeSafeReviewIncomplete("invalid_finding_support_probability")
+        if finding.candidate_id in finding_candidates:
+            raise TypeSafeReviewIncomplete("duplicate_typed_finding_candidate")
+        finding_candidates.add(finding.candidate_id)
         emitted.append({
             "id": f"typesafe-{finding.candidate_id}-{finding.category}",
             "severity": finding.severity, "category": finding.category,
@@ -305,6 +319,11 @@ async def review_inventory(
             # never inferred as a separate Noul confidence by the transport.
             "confidence": finding.support_probability,
             "source": "llm", "model_source": response.model,
+            "typed_candidate": {
+                "candidate_id": candidate.candidate_id,
+                "evidence_sha256": candidate.evidence_sha256,
+                "source_sha256": candidate.source_sha256,
+            },
             "typed_verdict": {
                 "severity": finding.severity, "category": finding.category,
                 "question_ids": list(finding.question_ids),
@@ -312,6 +331,41 @@ async def review_inventory(
                 "reason": sanitize_public_error(finding.message),
             },
         })
+    unresolved: list[dict[str, str]] = []
+    unresolved_ids: set[str] = set()
+    for record in decision.unresolved_candidates:
+        if type(record) is not tuple or len(record) != 2:
+            raise TypeSafeReviewIncomplete("invalid_unresolved_candidate")
+        candidate_id, reason = record
+        if (
+            not isinstance(candidate_id, str)
+            or candidate_id not in by_id
+            or candidate_id in unresolved_ids
+            or candidate_id in finding_candidates
+            or not isinstance(reason, str)
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,95}", reason) is None
+        ):
+            raise TypeSafeReviewIncomplete("invalid_unresolved_candidate")
+        unresolved_ids.add(candidate_id)
+        unresolved.append({"candidate_id": candidate_id, "reason": reason})
+    if decision.complete is True:
+        if unresolved:
+            raise TypeSafeReviewIncomplete("invalid_typed_decision")
+        decision_reason = (
+            decision.reason
+            if isinstance(decision.reason, str)
+            and re.fullmatch(r"[a-z][a-z0-9_]{0,95}", decision.reason)
+            else "policy_review_complete"
+        )
+    else:
+        if not unresolved:
+            raise TypeSafeReviewIncomplete("typed_review_incomplete")
+        decision_reason = (
+            decision.reason
+            if isinstance(decision.reason, str)
+            and re.fullmatch(r"[a-z][a-z0-9_]{0,95}", decision.reason)
+            else "policy_review_incomplete"
+        )
     assessment = {
         "provider": "typesafe", "model": response.model,
         "policy_id": policy.policy_id, "calibration_id": policy.calibration_id,
@@ -329,7 +383,10 @@ async def review_inventory(
         "answers": {
             key: answer.as_dict() if isinstance(answer, ChoiceAnswer) else answer
             for key, answer in response.answers.items()
-        }, "complete": True,
+        },
+        "decision_reason": decision_reason,
+        "unresolved_candidates": unresolved,
+        "complete": decision.complete,
         "context": context or {},
     }
     return TypedReview(emitted, {

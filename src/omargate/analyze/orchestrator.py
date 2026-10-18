@@ -6,7 +6,8 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import List, Optional
+from types import MappingProxyType
+from typing import List, Mapping, Optional
 
 from ..artifacts import generate_review_brief
 from ..config import OmarGateConfig
@@ -68,6 +69,93 @@ _LOG_SECRET_SCRUB_RES = (
         r"\1[REDACTED]",
     ),
 )
+
+# Only policy-declared categories and narrow, reviewed aliases can corroborate a
+# blocking typed verdict. Generic labels such as ``web``/``backend`` remain
+# incompatible and therefore downgrade P0/P1 findings to P2.
+_CORROBORATION_CATEGORY_ALIASES: Mapping[str, str] = MappingProxyType({
+    "auth": "auth",
+    "auth_bypass": "auth",
+    "csrf": "auth",
+    "injection": "injection",
+    "sql_injection": "injection",
+    "sql-injection": "injection",
+    "xss": "injection",
+    "rce": "injection",
+    "path_traversal": "injection",
+    "path-traversal": "injection",
+    "deserialization": "injection",
+    "log_injection": "injection",
+    "log-injection": "injection",
+    "xxe": "injection",
+    "ssti": "injection",
+    "prompt_injection": "injection",
+    "prompt-injection": "injection",
+    "crypto": "crypto",
+    "secrets": "secrets",
+    "privacy": "privacy",
+    "ssrf": "ssrf",
+    "misconfig": "misconfig",
+    "exposure": "exposure",
+    "supply-chain": "supply-chain",
+    "ci-cd": "ci-cd",
+    "ci_cd": "ci-cd",
+    "availability": "availability",
+    "race-condition": "race-condition",
+    "infrastructure": "infrastructure",
+    "other-security": "other-security",
+})
+
+# No current deterministic/harness producer emits these reviewed categories.
+# Their typed P0/P1 verdicts must trigger generator fallback and remain P2 until
+# a narrow producer contract is implemented and tested.
+_TYPED_CATEGORIES_REQUIRING_GENERATOR = frozenset({
+    "availability",
+    "race-condition",
+    "other-security",
+})
+
+
+def _canonical_corroboration_category(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return _CORROBORATION_CATEGORY_ALIASES.get(value.strip().lower())
+
+
+def _validated_typed_candidate_binding(
+    finding: object,
+) -> tuple[str, str, str] | None:
+    """Return the immutable TypeSafe source binding carried by a finding."""
+    if not isinstance(finding, dict):
+        return None
+    binding = finding.get("typed_candidate")
+    if not isinstance(binding, dict):
+        return None
+    candidate_id = binding.get("candidate_id")
+    source_sha256 = binding.get("source_sha256")
+    evidence_sha256 = binding.get("evidence_sha256")
+    if (
+        not isinstance(candidate_id, str)
+        or re.fullmatch(r"span-[0-9a-f]{64}", candidate_id) is None
+        or not isinstance(source_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", source_sha256) is None
+        or not isinstance(evidence_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", evidence_sha256) is None
+    ):
+        return None
+    return candidate_id, source_sha256, evidence_sha256
+
+
+def _coerce_finding_int(value: object, *, default: int | None = None) -> int | None:
+    """Normalize a JSON-shaped finding value before integer operations."""
+    if value is None:
+        return default
+    if not isinstance(value, (bool, int, float, str, bytes)):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _scrub_log_value(value):
@@ -211,7 +299,7 @@ class AnalysisOrchestrator:
         warnings: List[str] = []
 
         # Step 0: Quick Learn
-        quick_learn: Optional[QuickLearnSummary] = None
+        quick_learn: QuickLearnSummary
         with self.logger.stage("quick_learn"):
             quick_learn = await asyncio.to_thread(
                 extract_quick_learn_summary, self.repo_root
@@ -345,6 +433,7 @@ class AnalysisOrchestrator:
         llm_reported_finding_count = 0
         llm_parse_error_count = 0
         llm_failure_class: Optional[str] = "not_attempted"
+        generator_result_recorded = False
 
         def record_llm_result(result: LLMAnalysisResult) -> None:
             nonlocal llm_attempted
@@ -368,6 +457,9 @@ class AnalysisOrchestrator:
             llm_usage = result.usage
 
         async def run_llm_stage(stage_name: str, completion_event: str) -> None:
+            nonlocal generator_result_recorded
+
+            generator_result_recorded = True
             with self.logger.stage(stage_name):
                 try:
                     result = await self._run_llm_analysis(
@@ -429,6 +521,7 @@ class AnalysisOrchestrator:
             not llm_success and self.config.typesafe_fallback
         )
         if run_generator and self.allow_llm and self.config.use_codex:
+            generator_result_recorded = True
             with self.logger.stage("deep_scan"):
                 codex_model = self.config.codex_model
                 try:
@@ -485,7 +578,19 @@ class AnalysisOrchestrator:
         else:
             warnings.append("LLM analysis skipped (no API key or limited mode)")
 
-        if not llm_success and not llm_findings:
+        if (
+            typed_result is not None
+            and typed_result.findings
+            and generator_result_recorded
+        ):
+            llm_findings = self._compose_llm_findings(
+                typed_result.findings,
+                llm_findings,
+            )
+            llm_no_findings_reported = False
+            llm_reported_finding_count = len(llm_findings)
+
+        if not llm_success and not llm_findings and not llm_output_valid:
             record_llm_result(
                 self._llm_failure_result(
                     deterministic_findings=det_findings,
@@ -497,15 +602,15 @@ class AnalysisOrchestrator:
                 )
             )
 
-        if typed_result is not None and llm_usage is not None:
-            llm_usage = dict(llm_usage)
+        if typed_result is not None:
+            llm_usage = dict(llm_usage or {})
             llm_usage["typesafe_attempt"] = {
                 "requested_model": self.config.typesafe_model,
                 "attempted": typed_result.attempted,
                 "success": typed_result.success,
                 "failure_class": typed_result.failure_class,
             }
-            if run_generator:
+            if generator_result_recorded:
                 prior_usage = typed_result.usage or {}
                 if prior_usage.get("typesafe_assessment") is not None:
                     llm_usage["typesafe_assessment"] = prior_usage["typesafe_assessment"]
@@ -685,11 +790,64 @@ class AnalysisOrchestrator:
                 typed_usage = review.usage
             verify_sources(self.repo_root, inventory)
             attempted = bool(client.attempted)
+            policy_complete = review.assessment.get("complete") is True
+            generator_required = set()
+            for finding in review.findings:
+                category = _canonical_corroboration_category(
+                    finding.get("category")
+                )
+                if (
+                    finding.get("severity") in {"P0", "P1"}
+                    and category is not None
+                    and category in _TYPED_CATEGORIES_REQUIRING_GENERATOR
+                ):
+                    generator_required.add(category)
+            generator_required_categories = sorted(generator_required)
+            if generator_required_categories:
+                review.assessment["generator_required_categories"] = (
+                    generator_required_categories
+                )
+            warning: Optional[str]
+            if policy_complete and review.findings and generator_required_categories:
+                success = False
+                failure_class = "typesafe_category_requires_generator"
+                warning = (
+                    "TypeSafe blocking category lacks a reviewed deterministic "
+                    "corroboration producer; generator review is required and the "
+                    "finding remains non-blocking without corroboration."
+                )
+                if writer_warning:
+                    warning += " The TypeSafe writer also did not complete."
+            elif policy_complete and review.findings:
+                success = True
+                failure_class = None
+                warning = writer_warning
+            elif policy_complete:
+                success = False
+                failure_class = "typesafe_clean_requires_generator"
+                warning = (
+                    "TypeSafe clean review requires generator confirmation until "
+                    "empirical recall evidence is available."
+                )
+            else:
+                success = False
+                failure_class = review.assessment.get("decision_reason")
+                if not isinstance(failure_class, str) or not re.fullmatch(
+                    r"[a-z][a-z0-9_]{0,95}", failure_class
+                ):
+                    failure_class = "typed_review_incomplete"
+                warning = (
+                    "TypeSafe review was incomplete; confirmed policy findings "
+                    "were preserved and generator review is required."
+                )
+                if writer_warning:
+                    warning += " The TypeSafe writer also did not complete."
             result = LLMAnalysisResult(
-                findings=review.findings, success=True, usage=review.usage,
-                warning=writer_warning, attempted=attempted, output_valid=True,
-                no_findings_reported=not review.findings,
+                findings=review.findings, success=success, usage=review.usage,
+                warning=warning, attempted=attempted, output_valid=True,
+                no_findings_reported=policy_complete and not review.findings,
                 reported_finding_count=len(review.findings),
+                failure_class=failure_class,
             )
         except (TypeSafeReviewIncomplete, TypeSafeError) as exc:
             attempted = bool(client is not None and client.attempted)
@@ -714,9 +872,13 @@ class AnalysisOrchestrator:
                 usage=typed_usage,
             )
         metadata["http_attempted"] = attempted
-        metadata["typed_assessment_complete"] = bool(metadata.get("complete"))
+        policy_decision_complete = metadata.get("complete") is True
+        metadata["policy_decision_complete"] = policy_decision_complete
+        metadata["typed_assessment_complete"] = policy_decision_complete
         metadata["complete"] = result.success
         metadata["review_complete"] = result.success
+        if result.failure_class:
+            metadata["failure_class"] = result.failure_class
         if result.usage is None:
             result.usage = {
                 "provider": "typesafe", "model": None,
@@ -1141,14 +1303,59 @@ class AnalysisOrchestrator:
             merged.append(finding)
 
         severity_order = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+        def finding_sort_key(finding: dict) -> tuple[int, str]:
+            raw_severity = finding.get("severity")
+            severity = raw_severity if isinstance(raw_severity, str) else ""
+            raw_path = finding.get("file_path")
+            path = raw_path if isinstance(raw_path, str) else ""
+            return severity_order.get(severity, 4), path
+
         merged.sort(
-            key=lambda f: (
-                severity_order.get(f.get("severity"), 4),
-                f.get("file_path") or "",
-            )
+            key=finding_sort_key
         )
 
         return merged
+
+    @staticmethod
+    def _compose_llm_findings(
+        typed_findings: List[dict], generator_findings: List[dict]
+    ) -> List[dict]:
+        """Keep typed verdicts and drop only exact source-bound fallback overlap."""
+
+        def span_key(finding: dict) -> tuple[str, int, int, str] | None:
+            path = finding.get("file_path")
+            category = _canonical_corroboration_category(finding.get("category"))
+            if not isinstance(path, str) or category is None:
+                return None
+            line_start = _coerce_finding_int(finding.get("line_start"))
+            if line_start is None:
+                return None
+            line_end = _coerce_finding_int(
+                finding.get("line_end") or line_start
+            )
+            if line_end is None:
+                return None
+            if line_start < 1 or line_end < line_start:
+                return None
+            return (path.replace("\\", "/"), line_start, line_end, category)
+
+        composed = list(typed_findings)
+        typed_bindings: dict[tuple[str, int, int, str], tuple[str, str, str]] = {}
+        for finding in typed_findings:
+            if not isinstance(finding, dict):
+                continue
+            key = span_key(finding)
+            binding = _validated_typed_candidate_binding(finding)
+            if binding is None or key is None:
+                continue
+            typed_bindings[key] = binding
+
+        for finding in generator_findings:
+            if isinstance(finding, dict) and span_key(finding) in typed_bindings:
+                continue
+            composed.append(finding)
+        return composed
 
     def _apply_llm_guardrails(
         self,
@@ -1235,6 +1442,7 @@ class AnalysisOrchestrator:
             severity = str(finding.get("severity") or "P3")
             category = str(finding.get("category") or "unknown")
             message = str(finding.get("message") or "")
+            corroboration = None
 
             try:
                 confidence = float(finding.get("confidence", 0.8))
@@ -1243,9 +1451,39 @@ class AnalysisOrchestrator:
             confidence = min(max(confidence, 0.0), 1.0)
 
             if source in {"llm", "codex"} and severity in {"P0", "P1"}:
+                typed_candidate = _validated_typed_candidate_binding(finding)
                 if not self._is_corroborated(
-                    path, line_start, line_end, category, non_llm_findings
+                    path,
+                    line_start,
+                    line_end,
+                    category,
+                    non_llm_findings,
+                    typed_candidate=typed_candidate is not None,
                 ):
+                    canonical_category: str | None
+                    if typed_candidate is None:
+                        canonical_category = category
+                        corroboration_reason = (
+                            "no_compatible_deterministic_finding"
+                        )
+                    else:
+                        canonical_category = _canonical_corroboration_category(category)
+                        if canonical_category is None:
+                            corroboration_reason = "unsupported_category"
+                        elif canonical_category in _TYPED_CATEGORIES_REQUIRING_GENERATOR:
+                            corroboration_reason = (
+                                "no_reviewed_deterministic_producer"
+                            )
+                        else:
+                            corroboration_reason = (
+                                "no_compatible_deterministic_finding"
+                            )
+                    corroboration = {
+                        "required": True,
+                        "status": "missing",
+                        "reason": corroboration_reason,
+                        "canonical_category": canonical_category,
+                    }
                     severity = "P2"
                     confidence = min(confidence, 0.75)
                     if message:
@@ -1260,6 +1498,8 @@ class AnalysisOrchestrator:
             fixed["severity"] = severity
             fixed["confidence"] = confidence
             fixed["message"] = message
+            if corroboration is not None:
+                fixed["corroboration"] = corroboration
             fixed["fix_plan"] = ensure_fix_plan(
                 fix_plan=finding.get("fix_plan", ""),
                 recommendation=finding.get("recommendation", ""),
@@ -1276,22 +1516,47 @@ class AnalysisOrchestrator:
         line_end: int,
         category: str,
         non_llm_findings: List[dict],
+        *,
+        typed_candidate: bool = False,
     ) -> bool:
+        expected_category = (
+            _canonical_corroboration_category(category)
+            if typed_candidate
+            else category
+        )
+        if typed_candidate:
+            if (
+                expected_category is None
+                or expected_category in _TYPED_CATEGORIES_REQUIRING_GENERATOR
+            ):
+                return False
+        elif not expected_category:
+            return False
         expanded_start = max(1, line_start - 5)
-        expanded_end = line_end + 5
+        # Only source-bound TypeSafe candidates may use their reviewed span.
+        # Generator line_end is model-controlled, so legacy corroboration stays
+        # within the historical first-line window even if a huge end is forged.
+        expanded_end = (line_end if typed_candidate else line_start) + 5
         for finding in non_llm_findings:
             if not isinstance(finding, dict):
                 continue
             other_path = str(finding.get("file_path") or "").replace("\\", "/")
             if other_path != path:
                 continue
-            other_category = str(finding.get("category") or "")
-            if other_category != category:
+            other_category = (
+                _canonical_corroboration_category(finding.get("category"))
+                if typed_candidate
+                else str(finding.get("category") or "")
+            )
+            if other_category != expected_category:
                 continue
-            try:
-                other_start = int(finding.get("line_start"))
-                other_end = int(finding.get("line_end") or other_start)
-            except (TypeError, ValueError):
+            other_start = _coerce_finding_int(finding.get("line_start"))
+            if other_start is None:
+                continue
+            other_end = _coerce_finding_int(
+                finding.get("line_end") or other_start
+            )
+            if other_end is None:
                 continue
             if other_start < 1 or other_end < other_start:
                 continue

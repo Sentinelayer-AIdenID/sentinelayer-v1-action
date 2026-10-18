@@ -47,19 +47,71 @@ def finding(source="deterministic", *, model=None):
     return result
 
 
-def outcome(*, success=True, provider="typesafe", model=PIN, findings=None, attempted=True):
+def bind_typed_candidate(result):
+    result["typed_candidate"] = {
+        "candidate_id": "span-" + "0" * 64,
+        "source_sha256": "1" * 64,
+        "evidence_sha256": "2" * 64,
+    }
+    return result
+
+
+def outcome(
+    *,
+    success=True,
+    provider="typesafe",
+    model=PIN,
+    findings=None,
+    attempted=True,
+    output_valid=None,
+    failure_class=None,
+    no_findings_reported=None,
+):
     findings = [] if findings is None else findings
+    output_valid = success if output_valid is None else output_valid
+    no_findings_reported = (
+        success and not findings
+        if no_findings_reported is None
+        else no_findings_reported
+    )
     return LLMAnalysisResult(
         findings=copy.deepcopy(findings), success=success,
         usage={"provider": provider, "model": model, "route": "fixture",
                "tokens_in": None, "tokens_out": None, "cost_usd": None,
                "latency_ms": 1},
         warning=None if success else "Fixture stage did not complete.",
-        attempted=attempted, output_valid=success,
-        no_findings_reported=success and not findings,
+        attempted=attempted, output_valid=output_valid,
+        no_findings_reported=no_findings_reported,
         reported_finding_count=len(findings),
-        failure_class=None if success else "fixture_incomplete",
+        failure_class=None if success else failure_class or "fixture_incomplete",
     )
+
+
+def partial_typed_outcome():
+    confirmed = bind_typed_candidate(finding("llm", model=PIN))
+    confirmed.update(
+        category="auth",
+        line_start=2,
+        line_end=2,
+        snippet="second\n",
+        typed_verdict={"severity": "P2", "category": "auth"},
+    )
+    result = outcome(
+        success=False,
+        findings=[confirmed],
+        output_valid=True,
+        failure_class="policy_review_incomplete",
+    )
+    result.usage["typesafe_assessment"] = {
+        "complete": False,
+        "policy_decision_complete": False,
+        "decision_reason": "policy_review_incomplete",
+        "unresolved_candidates": [{
+            "candidate_id": "span-fixture-unresolved",
+            "reason": "policy_risk_answer_ambiguous",
+        }],
+    }
+    return result
 
 
 def orchestrator(
@@ -120,29 +172,70 @@ def assert_deterministic_retained(result):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("fallback,codex", [(False, True), (True, True), (True, False)])
-async def test_complete_empty_typed_review_is_success_and_skips_all_generators(tmp_path, monkeypatch, fallback, codex):
-    instance, _, synopsis = orchestrator(tmp_path, monkeypatch, fallback=fallback, codex=codex)
-    typed, cli, api = stages(instance, monkeypatch, typed=outcome())
+@pytest.mark.parametrize("codex", [True, False])
+async def test_clean_typed_review_requires_successful_generator_confirmation(
+    tmp_path,
+    monkeypatch,
+    codex,
+):
+    instance, _, synopsis = orchestrator(
+        tmp_path, monkeypatch, fallback=True, codex=codex
+    )
+    typed_clean = outcome(
+        success=False,
+        output_valid=True,
+        failure_class="typesafe_clean_requires_generator",
+        no_findings_reported=True,
+    )
+    typed_clean.usage["typesafe_assessment"] = {
+        "complete": False,
+        "policy_decision_complete": True,
+        "failure_class": "typesafe_clean_requires_generator",
+    }
+    generator = outcome(provider="openai", model=GENERATOR)
+    typed, cli, api = stages(
+        instance,
+        monkeypatch,
+        typed=typed_clean,
+        codex=generator if codex else None,
+        generator=generator,
+    )
+
     result = await run(instance)
+
     assert result.llm_success and result.llm_output_valid
     assert result.llm_no_findings_reported and result.llm_reported_finding_count == 0
     assert result.llm_count == 0 and result.llm_failure_class is None
-    assert result.llm_usage["provider"] == "typesafe"
-    assert result.llm_usage["model"] == PIN
-    assert "fallback_chain" not in result.llm_usage
-    assert typed.await_count == 1 and cli.await_count == api.await_count == 0
+    assert result.llm_usage["provider"] == "openai"
+    assert result.llm_usage["model"] == GENERATOR
+    assert result.llm_usage["typesafe_attempt"]["success"] is False
+    assert result.llm_usage["typesafe_assessment"]["complete"] is False
+    assert typed.await_count == 1
+    assert cli.await_count == int(codex)
+    assert api.await_count == int(not codex)
     assert synopsis == []
     assert_deterministic_retained(result)
 
 
 @pytest.mark.anyio
-async def test_no_fallback_flag_prevents_both_generator_routes_and_synopsis_on_typed_failure(tmp_path, monkeypatch):
+async def test_clean_typed_review_without_fallback_remains_incomplete(
+    tmp_path,
+    monkeypatch,
+):
     instance, _, synopsis = orchestrator(tmp_path, monkeypatch, fallback=False)
-    typed, cli, api = stages(instance, monkeypatch, typed=outcome(success=False, attempted=False))
+    typed_clean = outcome(
+        success=False,
+        output_valid=True,
+        failure_class="typesafe_clean_requires_generator",
+        no_findings_reported=True,
+    )
+    typed, cli, api = stages(instance, monkeypatch, typed=typed_clean)
+
     result = await run(instance)
-    assert not result.llm_success and not result.llm_output_valid
-    assert not result.llm_attempted and result.llm_failure_class == "fixture_incomplete"
+
+    assert not result.llm_success and result.llm_output_valid
+    assert result.llm_attempted and result.llm_no_findings_reported
+    assert result.llm_failure_class == "typesafe_clean_requires_generator"
     assert typed.await_count == 1 and cli.await_count == api.await_count == 0
     assert synopsis == []
     assert_deterministic_retained(result)
@@ -328,18 +421,120 @@ async def test_real_mock_http_failure_reports_attempt_but_no_complete_review(tmp
 
 
 @pytest.mark.anyio
-async def test_real_empty_complete_review_records_model_scope_and_raw_usage(tmp_path, monkeypatch):
+async def test_real_empty_complete_policy_decision_requires_generator(tmp_path, monkeypatch):
     instance, ingest, client = real_stage_setup(tmp_path, monkeypatch)
     run_dir = tmp_path / "artifacts"
     result = await real_stage(instance, ingest, run_dir=run_dir)
-    assert result.success and result.output_valid and result.attempted
+
+    assert not result.success and result.output_valid and result.attempted
     assert result.no_findings_reported and result.findings == []
     assert result.reported_finding_count == 0
+    assert result.failure_class == "typesafe_clean_requires_generator"
     assert result.usage["model"] == PIN and result.usage["provider"] == "typesafe"
     assert result.usage["typesafe_usage"] == {"input_tokens": 7, "output_tokens": 0}
     retained = json.loads((run_dir / "TYPESAFE_REVIEW.json").read_text(encoding="utf-8"))
-    assert retained["complete"] is True and retained["model"] == PIN
+    assert retained["complete"] is False and retained["model"] == PIN
+    assert retained["policy_decision_complete"] is True
+    assert retained["failure_class"] == "typesafe_clean_requires_generator"
     assert retained["source_hashes"] and len(client.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_real_partial_policy_result_is_valid_but_incomplete(tmp_path, monkeypatch):
+    policy = FixturePolicy()
+
+    def partial_decision(candidates, answers):
+        confirmed, unresolved = candidates
+        return ReviewDecision(
+            (RatedFinding(
+                candidate_id=confirmed.candidate_id,
+                question_ids=("q0",),
+                severity="P2",
+                category="fixture",
+                message="A fixed partial typed verdict.",
+                recommendation="Inspect the fixed fixture source.",
+                support_probability=0.8,
+            ),),
+            complete=False,
+            reason="policy_review_incomplete",
+            unresolved_candidates=((
+                unresolved.candidate_id,
+                "policy_risk_answer_ambiguous",
+            ),),
+        )
+
+    policy.decide = partial_decision
+    instance, ingest, client = real_stage_setup(
+        tmp_path,
+        monkeypatch,
+        policy=policy,
+    )
+    source = "".join(f"line {index}\n" for index in range(1, 43))
+    (tmp_path / "source.py").write_text(source, encoding="utf-8")
+    ingest["files"][0]["lines"] = 42
+    diff = (
+        "diff --git a/source.py b/source.py\n"
+        "--- /dev/null\n"
+        "+++ b/source.py\n"
+        "@@ -0,0 +1,42 @@\n"
+        + "".join(f"+line {index}\n" for index in range(1, 43))
+    )
+
+    result = await real_stage(instance, ingest, diff_content=diff)
+
+    finding_, = result.findings
+    assert finding_["typed_verdict"]["category"] == "fixture"
+    assert not result.success and result.output_valid and result.attempted
+    assert result.failure_class == "policy_review_incomplete"
+    assessment = result.usage["typesafe_assessment"]
+    assert assessment["complete"] is False
+    assert assessment["policy_decision_complete"] is False
+    assert assessment["unresolved_candidates"] == [{
+        "candidate_id": assessment["candidates"][1]["candidate_id"],
+        "reason": "policy_risk_answer_ambiguous",
+    }]
+    assert len(client.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_blocking_category_without_corroboration_producer_requires_generator(
+    tmp_path,
+    monkeypatch,
+):
+    policy = FixturePolicy()
+
+    def availability_decision(candidates, answers):
+        return ReviewDecision(
+            (RatedFinding(
+                candidate_id=candidates[0].candidate_id,
+                question_ids=("q0",),
+                severity="P1",
+                category="availability",
+                message="A fixed availability verdict.",
+                recommendation="Bound attacker-controlled work.",
+                support_probability=0.95,
+            ),),
+            complete=True,
+            reason="policy_review_complete",
+        )
+
+    policy.decide = availability_decision
+    instance, ingest, client = real_stage_setup(
+        tmp_path,
+        monkeypatch,
+        policy=policy,
+    )
+
+    result = await real_stage(instance, ingest)
+
+    assert not result.success and result.output_valid and result.attempted
+    assert result.failure_class == "typesafe_category_requires_generator"
+    assert result.findings[0]["severity"] == "P1"
+    assessment = result.usage["typesafe_assessment"]
+    assert assessment["complete"] is False
+    assert assessment["policy_decision_complete"] is True
+    assert assessment["generator_required_categories"] == ["availability"]
+    assert len(client.calls) == 1
 
 
 @pytest.mark.anyio
@@ -424,6 +619,126 @@ async def test_generator_fallback_keeps_the_failed_typed_evidence(tmp_path, monk
     assert result.llm_usage["typesafe_attempt"]["success"] is False
 
 
+@pytest.mark.anyio
+async def test_empty_successful_fallback_retains_confirmed_partial_typed_finding(
+    tmp_path,
+    monkeypatch,
+):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch, codex=False)
+    typed_partial = partial_typed_outcome()
+    typed, cli, api = stages(
+        instance,
+        monkeypatch,
+        typed=typed_partial,
+        generator=outcome(provider="openai", model=GENERATOR),
+    )
+
+    result = await run(instance)
+
+    retained = [row for row in result.findings if row.get("typed_verdict")]
+    assert len(retained) == 1
+    assert retained[0]["category"] == "auth"
+    assert result.llm_success and result.llm_output_valid
+    assert result.llm_count == result.llm_reported_finding_count == 1
+    assert result.llm_usage["typesafe_assessment"]["complete"] is False
+    assert result.llm_usage["typesafe_attempt"]["success"] is False
+    assert typed.await_count == api.await_count == 1 and cli.await_count == 0
+
+
+@pytest.mark.anyio
+async def test_generator_fallback_cannot_promote_category_without_corroboration_producer(
+    tmp_path,
+    monkeypatch,
+):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch, codex=False)
+    typed_category_hold = partial_typed_outcome()
+    typed_category_hold.findings[0].update(
+        severity="P1",
+        category="availability",
+        typed_verdict={"severity": "P1", "category": "availability"},
+    )
+    typed_category_hold.failure_class = "typesafe_category_requires_generator"
+    typed_category_hold.usage["typesafe_assessment"].update(
+        generator_required_categories=["availability"],
+        failure_class="typesafe_category_requires_generator",
+    )
+    typed, cli, api = stages(
+        instance,
+        monkeypatch,
+        typed=typed_category_hold,
+        generator=outcome(provider="openai", model=GENERATOR),
+    )
+
+    result = await run(instance)
+
+    retained = [row for row in result.findings if row.get("typed_verdict")]
+    assert len(retained) == 1
+    assert retained[0]["severity"] == "P2"
+    assert retained[0]["corroboration"]["reason"] == (
+        "no_reviewed_deterministic_producer"
+    )
+    assert result.llm_success and result.llm_output_valid
+    assert result.llm_usage["typesafe_assessment"]["complete"] is False
+    assert typed.await_count == api.await_count == 1 and cli.await_count == 0
+
+
+@pytest.mark.anyio
+async def test_failed_fallback_retains_confirmed_partial_typed_finding(
+    tmp_path,
+    monkeypatch,
+):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch, codex=False)
+    typed_partial = partial_typed_outcome()
+    typed, cli, api = stages(
+        instance,
+        monkeypatch,
+        typed=typed_partial,
+        generator=outcome(success=False, provider="openai", model=GENERATOR),
+    )
+
+    result = await run(instance)
+
+    retained = [row for row in result.findings if row.get("typed_verdict")]
+    assert len(retained) == 1
+    assert not result.llm_success and not result.llm_output_valid
+    assert result.llm_count == result.llm_reported_finding_count == 1
+    assert result.llm_usage["typesafe_assessment"]["complete"] is False
+    assert typed.await_count == api.await_count == 1 and cli.await_count == 0
+
+
+@pytest.mark.anyio
+async def test_fallback_duplicate_does_not_replace_or_inflate_partial_typed_finding(
+    tmp_path,
+    monkeypatch,
+):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch, codex=False)
+    typed_partial = partial_typed_outcome()
+    duplicate = copy.deepcopy(typed_partial.findings[0])
+    duplicate.pop("typed_verdict")
+    duplicate.pop("typed_candidate")
+    duplicate["id"] = "generator-duplicate"
+    duplicate["message"] = "Generator duplicate must not replace the typed verdict."
+    typed, cli, api = stages(
+        instance,
+        monkeypatch,
+        typed=typed_partial,
+        generator=outcome(
+            provider="openai",
+            model=GENERATOR,
+            findings=[duplicate],
+        ),
+    )
+
+    result = await run(instance)
+
+    retained = [row for row in result.findings if row.get("typed_verdict")]
+    assert len(retained) == 1
+    assert retained[0].get("typed_verdict")
+    assert retained[0]["message"] == "A fixture finding is retained."
+    assert result.llm_count == result.llm_reported_finding_count == 1
+    assert typed.await_count == api.await_count == 1 and cli.await_count == 0
+
+
 @pytest.mark.parametrize(
     "deterministic_start,deterministic_end,deterministic_category,expected_severity",
     [
@@ -444,7 +759,7 @@ def test_corroboration_uses_complete_typed_and_deterministic_ranges_with_exact_c
     expected_severity,
 ):
     instance, _, _ = orchestrator(tmp_path, monkeypatch)
-    typed = finding("llm")
+    typed = bind_typed_candidate(finding("llm"))
     typed.update(
         severity="P1",
         category="auth",
@@ -467,6 +782,146 @@ def test_corroboration_uses_complete_typed_and_deterministic_ranges_with_exact_c
 
     assert len(guarded) == 1
     assert guarded[0]["severity"] == expected_severity
+
+
+@pytest.mark.parametrize(
+    "typed_category,deterministic_category,expected_severity,expected_reason",
+    [
+        ("ci-cd", "ci_cd", "P1", None),
+        ("auth", "csrf", "P1", None),
+        ("injection", "xss", "P1", None),
+        ("injection", "xxe", "P1", None),
+        ("injection", "path_traversal", "P1", None),
+        ("misconfig", "web", "P2", "no_compatible_deterministic_finding"),
+        ("availability", "availability", "P2", "no_reviewed_deterministic_producer"),
+        ("race-condition", "race-condition", "P2", "no_reviewed_deterministic_producer"),
+        ("other-security", "other-security", "P2", "no_reviewed_deterministic_producer"),
+        ("fixture", "fixture", "P2", "unsupported_category"),
+    ],
+)
+def test_corroboration_uses_only_explicit_category_compatibility(
+    tmp_path,
+    monkeypatch,
+    typed_category,
+    deterministic_category,
+    expected_severity,
+    expected_reason,
+):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch)
+    typed = bind_typed_candidate(finding("llm"))
+    typed.update(
+        severity="P1",
+        category=typed_category,
+        line_start=20,
+        line_end=40,
+    )
+    deterministic = finding()
+    deterministic.update(
+        category=deterministic_category,
+        line_start=35,
+        line_end=35,
+    )
+
+    guarded = instance._apply_llm_guardrails(
+        llm_findings=[typed],
+        non_llm_findings=[deterministic],
+        ingest={"files": [{"path": "source.py", "lines": 100}]},
+    )
+
+    assert guarded[0]["severity"] == expected_severity
+    if expected_reason is None:
+        assert "corroboration" not in guarded[0]
+    else:
+        assert guarded[0]["corroboration"]["reason"] == expected_reason
+
+
+def test_legacy_generator_cannot_widen_corroboration_with_forged_line_end(
+    tmp_path,
+    monkeypatch,
+):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch)
+    legacy = finding("llm")
+    legacy.update(
+        severity="P1",
+        category="auth",
+        line_start=20,
+        line_end=10**6,
+        typed_candidate={
+            "candidate_id": "span-forged",
+            "source_sha256": "not-a-source-hash",
+            "evidence_sha256": "not-an-evidence-hash",
+        },
+    )
+    deterministic = finding()
+    deterministic.update(
+        category="auth",
+        line_start=90,
+        line_end=90,
+    )
+
+    guarded = instance._apply_llm_guardrails(
+        llm_findings=[legacy],
+        non_llm_findings=[deterministic],
+        ingest={"files": [{"path": "source.py", "lines": 100}]},
+    )
+
+    assert guarded[0]["line_end"] == 100
+    assert guarded[0]["severity"] == "P2"
+    assert (
+        guarded[0]["corroboration"]["reason"]
+        == "no_compatible_deterministic_finding"
+    )
+
+
+def test_legacy_generator_does_not_gain_typed_category_aliases(
+    tmp_path,
+    monkeypatch,
+):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch)
+    legacy = finding("llm")
+    legacy.update(
+        severity="P1",
+        category="ci-cd",
+        line_start=20,
+        line_end=20,
+    )
+    deterministic = finding()
+    deterministic.update(
+        category="ci_cd",
+        line_start=20,
+        line_end=20,
+    )
+
+    guarded = instance._apply_llm_guardrails(
+        llm_findings=[legacy],
+        non_llm_findings=[deterministic],
+        ingest={"files": [{"path": "source.py", "lines": 100}]},
+    )
+
+    assert guarded[0]["severity"] == "P2"
+    assert (
+        guarded[0]["corroboration"]["reason"]
+        == "no_compatible_deterministic_finding"
+    )
+
+
+def test_partial_fallback_dedupe_requires_exact_source_bound_span(
+    tmp_path,
+    monkeypatch,
+):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch)
+    typed = partial_typed_outcome().findings[0]
+    exact_duplicate = copy.deepcopy(typed)
+    exact_duplicate.pop("typed_candidate")
+    exact_duplicate.pop("typed_verdict")
+    different_span = copy.deepcopy(exact_duplicate)
+    different_span["line_end"] = exact_duplicate["line_end"] + 1
+
+    exact = instance._compose_llm_findings([typed], [exact_duplicate])
+    distinct = instance._compose_llm_findings([typed], [different_span])
+
+    assert exact == [typed]
+    assert distinct == [typed, different_span]
 
 
 @pytest.mark.anyio
@@ -502,7 +957,12 @@ async def test_completed_typed_p0_survives_writer_failure_without_a_new_decision
     # Corroborate the same category near the typed span's start, but keep a
     # different dedupe key so the deterministic fixture cannot stand in for it.
     corroboration = finding()
-    corroboration.update(line_start=2, line_end=2, snippet="second\n")
+    corroboration.update(
+        category="auth",
+        line_start=2,
+        line_end=2,
+        snippet="second\n",
+    )
     monkeypatch.setattr(instance, "_run_deterministic_scans", lambda _: [corroboration])
     policy = FixturePolicy()
 
@@ -513,7 +973,7 @@ async def test_completed_typed_p0_survives_writer_failure_without_a_new_decision
                     candidate_id=candidates[0].candidate_id,
                     question_ids=("q0",),
                     severity="P0",
-                    category="fixture",
+                    category="auth",
                     message="Fixed fixture typed verdict.",
                     recommendation="Inspect the bound fixture source.",
                     support_probability=0.8,
