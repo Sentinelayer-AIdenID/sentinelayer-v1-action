@@ -2,12 +2,38 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 
 import pytest
-import yaml
 from pydantic import SecretStr, ValidationError
 
 from omargate.config import OmarGateConfig
+
+
+def _action_contract() -> tuple[dict, dict]:
+    """Read this action's literal input defaults and Omar env, using stdlib only.
+
+    This asserts the repository's quoted-scalar contract, not general YAML
+    parsing. Unexpected formatting fails explicitly instead of skipping checks.
+    """
+    text = (Path(__file__).resolve().parents[2] / "action.yml").read_text(encoding="utf-8")
+    section = text.split("\ninputs:\n", 1)[1].split("\noutputs:\n", 1)[0]
+    starts = list(re.finditer(r"^  ([a-z][a-z0-9_]*):\s*$", section, re.MULTILINE))
+    assert starts, "Action must declare inputs"
+    inputs = {}
+    for index, start in enumerate(starts):
+        block = section[start.end():starts[index + 1].start() if index + 1 < len(starts) else len(section)]
+        default = re.search(r"^    default: '([^\n]*)'\s*$", block, re.MULTILINE)
+        required = re.search(r"^    required: (true|false)\s*$", block, re.MULTILINE)
+        assert default and required, f"Expected literal default/required for {start[1]}"
+        inputs[start[1]] = {"default": default[1].replace("''", "'"), "required": required[1] == "true"}
+    execute = re.search(
+        r"^    - name: [^\n]+\n      id: omar\n(.*?)(?=^    - |\Z)",
+        text, re.MULTILINE | re.DOTALL,
+    )
+    assert execute, "Action must declare the Omar execution step"
+    env = dict(re.findall(r"^        (INPUT_[A-Z_]+): (.+)$", execute[1], re.MULTILINE))
+    return inputs, env
 
 
 @pytest.fixture(autouse=True)
@@ -143,8 +169,7 @@ def test_legacy_explicit_provider_key_checks_remain(provider: str) -> None:
 
 
 def test_action_forwards_typesafe_inputs_with_matching_defaults() -> None:
-    action = yaml.safe_load((Path(__file__).resolve().parents[2] / "action.yml").read_text(encoding="utf-8"))
-    execute = next(step for step in action["runs"]["steps"] if step.get("id") == "omar")
+    inputs, env = _action_contract()
     defaults = {
         "typesafe_api_key": "",
         "typesafe_model": "jev-1.13.0",
@@ -153,15 +178,15 @@ def test_action_forwards_typesafe_inputs_with_matching_defaults() -> None:
         "typesafe_fallback": "true",
     }
     for name, default in defaults.items():
-        assert action["inputs"][name]["default"] == default
-        assert action["inputs"][name]["required"] is False
-        assert execute["env"]["INPUT_" + name.upper()] == "${{ inputs." + name + " }}"
-    assert execute["env"]["INPUT_MODEL"] == "${{ inputs.model }}"
-    assert execute["env"]["INPUT_MODEL_FALLBACK"] == "${{ inputs.model_fallback }}"
-    assert action["inputs"]["model"]["default"] == ""
-    assert action["inputs"]["model_fallback"]["default"] == ""
-    assert action["inputs"]["codex_model"]["default"] == "gpt-5.3-codex"
-    assert action["inputs"]["llm_failure_policy"]["default"] == "block"
+        assert inputs[name]["default"] == default
+        assert inputs[name]["required"] is False
+        assert env["INPUT_" + name.upper()] == "${{ inputs." + name + " }}"
+    assert env["INPUT_MODEL"] == "${{ inputs.model }}"
+    assert env["INPUT_MODEL_FALLBACK"] == "${{ inputs.model_fallback }}"
+    assert inputs["model"]["default"] == ""
+    assert inputs["model_fallback"]["default"] == ""
+    assert inputs["codex_model"]["default"] == "gpt-5.3-codex"
+    assert inputs["llm_failure_policy"]["default"] == "block"
 
 
 @pytest.mark.parametrize("use_codex", [True, False])
@@ -251,10 +276,8 @@ def test_typesafe_codex_model_must_match_exactly(model: str) -> None:
 def test_action_automatic_inputs_preserve_effective_provider_defaults(
     monkeypatch: pytest.MonkeyPatch, provider: str,
 ) -> None:
-    action = yaml.safe_load(
-        (Path(__file__).resolve().parents[2] / "action.yml").read_text(encoding="utf-8")
-    )
-    for name, definition in action["inputs"].items():
+    inputs, _env = _action_contract()
+    for name, definition in inputs.items():
         monkeypatch.setenv("INPUT_" + name.upper(), str(definition.get("default", "")))
     monkeypatch.setenv("INPUT_LLM_PROVIDER", provider)
     monkeypatch.setenv("INPUT_OPENAI_API_KEY", "writer-test-only")
