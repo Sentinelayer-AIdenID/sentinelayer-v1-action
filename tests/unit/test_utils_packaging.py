@@ -67,6 +67,26 @@ def test_packaging_writes_summary(tmp_path: Path) -> None:
         "model": "gpt-5.3-codex",
         "latency_ms": 25,
     }
+    dependency_audit_evidence = {
+        "schema_version": "1.1",
+        "enabled": True,
+        "complete": True,
+        "coverage_scope": {
+            "npm": "package_lock_registry_graph",
+            "pip": "declared_direct_pins",
+            "cargo": "cargo_lock_packages",
+        },
+        "outcomes": [
+            {
+                "ecosystem": ecosystem,
+                "applicable": False,
+                "state": None,
+                "vulnerability_count": None,
+                "reason_code": None,
+            }
+            for ecosystem in ("npm", "pip", "cargo")
+        ],
+    }
     summary_path = write_pack_summary(
         run_dir=run_dir,
         run_id=run_dir.name,
@@ -80,6 +100,7 @@ def test_packaging_writes_summary(tmp_path: Path) -> None:
         policy_pack="omar",
         policy_pack_version="v1",
         llm_evidence=llm_evidence,
+        dependency_audit_evidence=dependency_audit_evidence,
         error=None,
     )
 
@@ -89,6 +110,7 @@ def test_packaging_writes_summary(tmp_path: Path) -> None:
     assert data["fingerprint_count"] == 1
     assert data["dedupe_key"] == "dedupe-key"
     assert data["llm_evidence"] == llm_evidence
+    assert data["dependency_audit_evidence"] == dependency_audit_evidence
 
 
 def test_get_run_dir_prefers_workspace(tmp_path: Path, monkeypatch) -> None:

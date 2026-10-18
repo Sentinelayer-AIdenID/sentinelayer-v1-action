@@ -12,6 +12,41 @@ ApprovalMode = Literal["pr_label", "workflow_dispatch", "none"]
 ForkPolicy = Literal["block", "limited", "allow"]
 RateLimitFailMode = Literal["open", "closed"]
 LLMProviderType = Literal["openai", "anthropic", "google", "xai", "typesafe"]
+DEPENDENCY_AUDIT_SCHEMA_VERSION = "1.1"
+DEPENDENCY_AUDIT_COVERAGE_SCOPE = {
+    "npm": "package_lock_registry_graph",
+    "pip": "declared_direct_pins",
+    "cargo": "cargo_lock_packages",
+}
+DEPENDENCY_AUDIT_INDETERMINATE_REASONS = frozenset(
+    {
+        "command_not_found",
+        "decode_error",
+        "empty_output",
+        "error_payload",
+        "execution_error",
+        "exit_result_mismatch",
+        "exited_127",
+        "invalid_json",
+        "manifest_discovery_incomplete",
+        "missing_lockfile",
+        "output_limit_exceeded",
+        "process_containment_error",
+        "spawn_error",
+        "suite_error",
+        "suite_not_run",
+        "suite_timed_out",
+        "timed_out",
+        "unexpected_exit",
+        "unrecognized_schema",
+        "unsupported_project_layout",
+        "unsafe_lockfile",
+        "unsafe_manifest",
+        "unsafe_pip_input",
+        "unsafe_working_directory",
+        "unsupported_pip_input",
+    }
+)
 
 @dataclass
 class Counts:
@@ -27,6 +62,7 @@ class Counts:
 class GateConfig:
     severity_gate: SeverityGate = "P1"
     require_llm_success: bool = False
+    require_dependency_audit_success: bool = False
 
 class GateStatus(str, Enum):
     PASSED = "passed"

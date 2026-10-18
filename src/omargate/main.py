@@ -16,7 +16,10 @@ from .config import OmarGateConfig
 from .context import GitHubContext
 from .gate import evaluate_gate
 from .github import GitHubClient, findings_to_annotations
-from .idempotency import compute_idempotency_key
+from .idempotency import (
+    compute_idempotency_key,
+    dependency_audit_freshness_epoch,
+)
 from .ingest.codebase_snapshot import (
     build_codebase_snapshot,
     build_codebase_synopsis,
@@ -65,7 +68,8 @@ from .utils import ensure_writable_dir, json_dumps
 ACTION_VERSION = "1.3.11"
 # Rotate this whenever a security-control contract changes so dedupe cannot
 # mirror a successful check produced under weaker semantics on the same head.
-ACTION_IDEMPOTENCY_VERSION = "1:llm-evidence-v1"
+ACTION_IDEMPOTENCY_VERSION = "1:llm-evidence-v1:dependency-audit-v1.1"
+DEPENDENCY_AUDIT_CONTRACT_VERSION = "dependency-audit-evidence-v1.1"
 CHECK_NAME_BASE = "Omar Gate"
 __all__ = [
     "main",
@@ -77,6 +81,7 @@ __all__ = [
     "_map_category_to_spec_sections",
     "_build_spec_compliance_from_findings",
     "_github_publish_enabled",
+    "DEPENDENCY_AUDIT_CONTRACT_VERSION",
 ]
 
 
@@ -382,6 +387,14 @@ async def async_main() -> int:
             policy_pack_version=config.policy_pack_version,
             action_major_version=ACTION_IDEMPOTENCY_VERSION,
             comment_tag=config.comment_tag,
+            audit_contract_version=DEPENDENCY_AUDIT_CONTRACT_VERSION,
+            run_harness=config.run_harness,
+            pip_audit_ignore_ids=config.pip_audit_ignore_ids,
+            audit_freshness_epoch=(
+                dependency_audit_freshness_epoch()
+                if config.run_harness
+                else None
+            ),
         )
 
         token = config.github_token.get_secret_value() or os.environ.get("GITHUB_TOKEN", "")
@@ -472,14 +485,25 @@ async def async_main() -> int:
                     collector.rate_limit_skipped = True
                     preflight_success = False
                     logger.info("Rate limited", reason=rate_reason)
-                    if rate_reason == "api_error_require_approval":
+                    if config.run_harness or rate_reason.endswith("require_approval"):
+                        # Exact-current-key dedupe already ran above. A different
+                        # check's success cannot stand in for this audit contract,
+                        # configuration or UTC day, even while scans are limited.
+                        if config.run_harness:
+                            reason_msg = (
+                                f"Rate limited ({rate_reason}); the required dependency audit "
+                                "has not completed for this audit contract and UTC day. "
+                                "Re-run when the scan limit permits a fresh audit. "
+                                "A prior result from another audit key cannot satisfy this run."
+                            )
+                        else:
+                            reason_msg = (
+                                "Rate limit enforcement unavailable; approval required "
+                                "to proceed. Set rate_limit_fail_mode=open to skip enforcement."
+                            )
                         gate_result = GateResult(
                             status=GateStatus.NEEDS_APPROVAL,
-                            reason=(
-                                "Rate limit enforcement unavailable due to GitHub API error; "
-                                "approval required to proceed. "
-                                "Set rate_limit_fail_mode=open to skip enforcement."
-                            ),
+                            reason=reason_msg,
                             block_merge=True,
                             counts=Counts(),
                             dedupe_key=idem_key,
@@ -760,6 +784,7 @@ async def async_main() -> int:
                     severity_gate=config.severity_gate,
                     llm_usage=analysis.llm_usage,
                     llm_evidence=_build_llm_evidence(analysis, config),
+                    dependency_audit_evidence=analysis.dependency_audit_evidence,
                     fingerprint_count=fingerprint_count,
                     dedupe_key=idem_key,
                     policy_pack=config.policy_pack,
@@ -834,6 +859,7 @@ async def async_main() -> int:
                     GateConfig(
                         severity_gate=config.severity_gate,
                         require_llm_success=config.llm_failure_policy == "block",
+                        require_dependency_audit_success=config.run_harness,
                     ),
                 )
         except Exception as exc:

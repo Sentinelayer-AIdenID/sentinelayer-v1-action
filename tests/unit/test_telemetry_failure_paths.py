@@ -25,6 +25,7 @@ async def test_preflight_exit_dedupe_uploads_telemetry(monkeypatch, tmp_path) ->
     from omargate import main as om
 
     uploaded: list[dict] = []
+    idempotency_kwargs: dict = {}
 
     async def fake_upload(payload: dict, **_kwargs) -> bool:
         uploaded.append(payload)
@@ -36,6 +37,10 @@ async def test_preflight_exit_dedupe_uploads_telemetry(monkeypatch, tmp_path) ->
     async def fake_fetch_oidc_token(*_args, **_kwargs):
         return None
 
+    def fake_compute_idempotency_key(**kwargs) -> str:
+        idempotency_kwargs.update(kwargs)
+        return "test-idempotency-key"
+
     class DummyGH:
         def __init__(self, token: str, repo: str):
             self.token = token
@@ -46,6 +51,12 @@ async def test_preflight_exit_dedupe_uploads_telemetry(monkeypatch, tmp_path) ->
     monkeypatch.setenv("SENTINELAYER_RUNS_DIR", str(tmp_path))
     monkeypatch.setattr(om, "upload_telemetry", fake_upload)
     monkeypatch.setattr(om, "fetch_oidc_token", fake_fetch_oidc_token)
+    monkeypatch.setattr(om, "compute_idempotency_key", fake_compute_idempotency_key)
+    monkeypatch.setattr(
+        om,
+        "dependency_audit_freshness_epoch",
+        lambda: "2026-10-18",
+    )
     monkeypatch.setattr(om, "check_dedupe", fake_check_dedupe)
     monkeypatch.setattr(om, "_estimate_cost", lambda *_args, **_kwargs: 0.0)
     monkeypatch.setattr(om, "_short_circuit_mirror_prior_check_run", lambda **_kwargs: 0)
@@ -61,6 +72,12 @@ async def test_preflight_exit_dedupe_uploads_telemetry(monkeypatch, tmp_path) ->
     assert payload["run"]["exit_reason"] == "dedupe"
     assert payload["run"]["exit_code"] == 0
     assert payload["gate"]["preflight_exits"] == [{"reason": "dedupe", "exit_code": 0}]
+    assert idempotency_kwargs["audit_contract_version"] == (
+        om.DEPENDENCY_AUDIT_CONTRACT_VERSION
+    )
+    assert idempotency_kwargs["run_harness"] is True
+    assert idempotency_kwargs["pip_audit_ignore_ids"] == ""
+    assert idempotency_kwargs["audit_freshness_epoch"] == "2026-10-18"
 
 
 @pytest.mark.anyio

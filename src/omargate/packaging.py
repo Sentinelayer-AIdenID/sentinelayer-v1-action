@@ -49,6 +49,7 @@ def write_pack_summary(
     model_fallback: str | None = None,
     model_fallback_used: bool | None = None,
     duration_ms: int | None = None,
+    dependency_audit_evidence: Dict[str, Any] | None = None,
 ) -> Path:
     errors_list = list(errors or [])
     if error:
@@ -78,6 +79,8 @@ def write_pack_summary(
         summary["llm_usage"] = llm_usage
     if llm_evidence is not None:
         summary["llm_evidence"] = llm_evidence
+    if dependency_audit_evidence is not None:
+        summary["dependency_audit_evidence"] = dependency_audit_evidence
     if fingerprint_count is not None:
         summary["fingerprint_count"] = int(fingerprint_count)
     if dedupe_key is not None:

@@ -459,6 +459,7 @@ class AnalysisResult:
     llm_reported_finding_count: int = 0
     llm_parse_error_count: int = 0
     llm_failure_class: Optional[str] = None
+    dependency_audit_evidence: Optional[dict] = None
 
 
 @dataclass
@@ -620,7 +621,13 @@ class AnalysisOrchestrator:
                     self.logger.warning("Synopsis synthesis skipped", error=str(exc))
 
         # Step 2: Harness (portable suites)
+        from ..harness.suites.dep_audit import (
+            DepAuditSuite,
+            disabled_dependency_audit_evidence,
+        )
+
         harness_findings: List[dict] = []
+        dependency_audit_evidence = disabled_dependency_audit_evidence()
         if self.config.run_harness:
             with self.logger.stage("harness"):
                 try:
@@ -629,17 +636,29 @@ class AnalysisOrchestrator:
                         tech_stack=quick_learn.tech_stack if quick_learn else [],
                         pip_audit_ignore_ids=self.config.pip_audit_ignore_ids,
                     )
-                    harness_results = await runner.run()
+                    harness_run = await runner.run_with_evidence()
                     harness_findings = [
-                        self._finding_to_dict(f) for f in harness_results
+                        self._finding_to_dict(f) for f in harness_run.findings
                     ]
+                    dependency_audit_evidence = (
+                        harness_run.dependency_audit_evidence
+                    )
                     self.logger.info(
                         "Harness complete",
                         findings_count=len(harness_findings),
                     )
-                except Exception as exc:
-                    self.logger.warning("Harness failed", error=str(exc))
+                except Exception:
+                    self.logger.warning("Harness failed", error="suite_error")
                     warnings.append("Harness failed")
+                    failed_audit = DepAuditSuite(
+                        tech_stack=quick_learn.tech_stack if quick_learn else [],
+                        pip_audit_ignore_ids=self.config.pip_audit_ignore_ids,
+                    ).failure_result(self.repo_root, "suite_error")
+                    harness_findings = [
+                        self._finding_to_dict(finding)
+                        for finding in failed_audit.findings
+                    ]
+                    dependency_audit_evidence = failed_audit.evidence.to_dict()
         else:
             warnings.append("Harness skipped (run_harness=false)")
 
@@ -925,6 +944,7 @@ class AnalysisOrchestrator:
             llm_reported_finding_count=llm_reported_finding_count,
             llm_parse_error_count=llm_parse_error_count,
             llm_failure_class=llm_failure_class,
+            dependency_audit_evidence=dependency_audit_evidence,
         )
 
     def _should_run_llm(self) -> bool:

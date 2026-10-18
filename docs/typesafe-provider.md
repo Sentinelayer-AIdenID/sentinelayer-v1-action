@@ -35,8 +35,9 @@ The packaged `typesafe_policy.POLICY` owns the risk questions, severity/category
 choices and confidence gates. NOUL answers retain probabilities; CHOICE answers
 retain the selected option, full `probabilities` distribution and provider-reported
 `confidence`. Missing policy or an uncertain/incomplete decision cannot produce a
-successful empty review. This candidate does not supply calibrated security policy;
-that module must be delivered and independently reviewed before TypeSafe adoption.
+successful empty review. The packaged policy is supplied, but its identifier and
+thresholds do not establish empirical recall, calibrated quality or independent
+security/release/adoption approval. Use an independently approved action revision.
 
 For emitted findings, the OpenAI writer receives fixed verdicts and evidence. It
 may return only the matching finding IDs, explanation and recommendation. Code
@@ -47,11 +48,41 @@ exact name or the same family with a valid `YYYY-MM-DD` snapshot suffix; artifac
 retain the actual returned identifier. Preview names and other model families
 are refused. Snapshot acceptance is a compatibility rule, not proof of a live
 provider response or model pricing.
-Existing independent P0/P1 corroboration guardrails still apply after assessment.
+Writer failure preserves the policy-owned verdict/template and bounded failure
+metadata instead of erasing the finding. It does not independently confirm clean spans.
+
+Every resolved-clean candidate requires generator confirmation, even when other
+spans emitted findings. `generator_required_clean_candidates` records those IDs;
+a complete mixed/all-clean policy decision returns `typesafe_clean_requires_generator`.
+Unresolved partial decisions retain `unresolved_candidates` and confirmed findings.
+Fallback-off does not turn missing confirmation into successful coverage; default
+`llm_failure_policy: block` remains the fail-closed choice.
+
+Typed P0/P1 corroboration requires a reviewed `(source, rule_id, emitted category)`
+producer tuple and a matching canonical typed category over the full bound span +/-5.
+Availability, infrastructure, race-condition and other-security remain generator-required
+and P2 under the typed guardrails. Legacy LLM/Codex instead accepts any deterministic/
+harness stage finding with the same exact category and an intersecting first-line +/-5
+window; typed producer restrictions/aliases do not change that lane or let a generator
+end line widen it. Both lanes are guarded before composition. Full-span collisions
+keep the strongest guarded severity; alternate identity/verdict provenance is limited
+to eight records with explicit truncation. A non-typed winner does not inherit typed
+authority at the top level. See the [full contract](CONFIGURATION.md#typesafe-review).
+
+Recognized secret-source lines and sensitive paths are excluded from displayed typed
+candidate/diff context, but original evidence/source/diff SHA-256 fingerprints remain
+in provider state. Pattern coverage is bounded; redaction/digests do not establish
+that every secret or low-entropy value is unrecoverable. Provider context, artifacts,
+rendered summaries and external provider retention are separate boundaries (see
+[data boundaries](CONFIGURATION.md#data-and-rendering-boundaries)).
 
 `TYPESAFE_REVIEW.json` retains the assessment and final completion/failure state
 and is included in the artifact manifest. The pack summary retains typed assessment
-metadata even when the generator fallback supplies the final review. Returned
+metadata even when the generator fallback supplies the final review. Dependency-audit
+evidence is separate: with `run_harness: true`, schema 1.1 audit scopes/outcomes and
+serialized harness findings must validate before the required LLM result or severity
+threshold can pass. Typed findings, a successful writer or generator output cannot
+replace an incomplete audit. See [dependency-audit coverage](CONFIGURATION.md#run_harness-and-dependency-audit-evidence). Returned
 model identity is recorded separately from requested model configuration.
 Provider usage and writer usage remain separate; absent TypeSafe prices are
 unknown. Legacy numeric telemetry totals do not aggregate these providers and

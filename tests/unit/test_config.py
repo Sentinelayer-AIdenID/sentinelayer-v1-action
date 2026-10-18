@@ -14,6 +14,8 @@ def test_config_loads_defaults_and_masks(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert cfg.scan_mode == "pr-diff"
     assert cfg.severity_gate == "P1"
+    assert cfg.run_harness is True
+    assert cfg.pip_audit_ignore_ids == ""
     assert "sk_test_dummy" not in repr(cfg)
 
 

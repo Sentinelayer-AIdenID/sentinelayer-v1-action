@@ -126,6 +126,7 @@ def orchestrator(
     codex=True,
     allow=True,
     failure_policy="block",
+    run_harness=False,
 ):
     (tmp_path / "source.py").write_text("first\nsecond\n", encoding="utf-8")
     config = OmarGateConfig(
@@ -133,7 +134,7 @@ def orchestrator(
         openai_api_key="synthetic-generator-key", typesafe_model=PIN,
         typesafe_fallback=fallback, use_codex=codex, model=GENERATOR,
         model_fallback=GENERATOR, codex_model=GENERATOR,
-        run_harness=False, publish_github=False, telemetry=False,
+        run_harness=run_harness, publish_github=False, telemetry=False,
         llm_failure_policy=failure_policy,
         sentinelayer_spec_id="fixture", _env_file=None,
     )
@@ -173,6 +174,102 @@ async def run(instance):
 def assert_deterministic_retained(result):
     assert result.deterministic_count == 1
     assert any(row["id"] == "det-fixture" and row["source"] == "deterministic" for row in result.findings)
+
+
+@pytest.mark.anyio
+async def test_orchestrator_propagates_exact_dependency_audit_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    instance, _, _ = orchestrator(
+        tmp_path,
+        monkeypatch,
+        allow=False,
+        run_harness=True,
+    )
+    evidence = {
+        "schema_version": "1.1",
+        "enabled": True,
+        "complete": True,
+        "coverage_scope": {
+            "npm": "package_lock_registry_graph",
+            "pip": "declared_direct_pins",
+            "cargo": "cargo_lock_packages",
+        },
+        "outcomes": [
+            {
+                "ecosystem": ecosystem,
+                "applicable": False,
+                "state": None,
+                "vulnerability_count": None,
+                "reason_code": None,
+            }
+            for ecosystem in ("npm", "pip", "cargo")
+        ],
+    }
+
+    class StubHarnessRunner:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run_with_evidence(self):
+            return SimpleNamespace(
+                findings=[],
+                dependency_audit_evidence=copy.deepcopy(evidence),
+            )
+
+    monkeypatch.setattr(module, "HarnessRunner", StubHarnessRunner)
+
+    result = await run(instance)
+
+    assert result.dependency_audit_evidence == evidence
+
+
+@pytest.mark.anyio
+async def test_orchestrator_converts_harness_exception_to_exact_failure_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    instance, _, _ = orchestrator(
+        tmp_path,
+        monkeypatch,
+        allow=False,
+        run_harness=True,
+    )
+    (tmp_path / "requirements.txt").write_text(
+        "example==1.0.0\n", encoding="utf-8"
+    )
+
+    class FailingHarnessRunner:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run_with_evidence(self):
+            raise RuntimeError("PRIVATE_HARNESS_EXCEPTION")
+
+    monkeypatch.setattr(module, "HarnessRunner", FailingHarnessRunner)
+
+    result = await run(instance)
+    evidence = result.dependency_audit_evidence
+
+    assert evidence is not None
+    assert evidence["schema_version"] == "1.1"
+    assert evidence["coverage_scope"] == {
+        "npm": "package_lock_registry_graph",
+        "pip": "declared_direct_pins",
+        "cargo": "cargo_lock_packages",
+    }
+    assert evidence["complete"] is False
+    pip_outcome = next(
+        item for item in evidence["outcomes"] if item["ecosystem"] == "pip"
+    )
+    assert pip_outcome["state"] == "indeterminate"
+    assert pip_outcome["reason_code"] == "suite_error"
+    assert any(
+        finding["id"] == "HARNESS-PIP-AUDIT-INCOMPLETE"
+        for finding in result.findings
+    )
+    assert "PRIVATE_HARNESS_EXCEPTION" not in json.dumps(result.findings)
 
 
 @pytest.mark.anyio
