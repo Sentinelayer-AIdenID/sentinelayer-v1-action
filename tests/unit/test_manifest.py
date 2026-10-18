@@ -33,3 +33,15 @@ def test_write_manifest(tmp_path: Path):
 
     assert manifest_path.exists()
     assert manifest_path.name == "ARTIFACT_MANIFEST.json"
+
+
+def test_manifest_retains_typed_review_evidence_with_exact_digest(tmp_path: Path):
+    import hashlib
+
+    raw = b'{"complete":false,"failure_class":"typed_review_incomplete"}\n'
+    (tmp_path / "TYPESAFE_REVIEW.json").write_bytes(raw)
+    objects = generate_artifact_manifest(tmp_path, "fixture")["objects"]
+    assert objects == [{
+        "name": "TYPESAFE_REVIEW.json", "content_type": "application/json",
+        "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+    }]

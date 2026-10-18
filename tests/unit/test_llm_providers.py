@@ -48,6 +48,72 @@ async def test_openai_provider_calls_responses_create() -> None:
 
 
 @pytest.mark.anyio
+async def test_funded_codex_uses_responses_defaults_and_retains_reported_model() -> None:
+    create = AsyncMock(return_value=SimpleNamespace(
+        model="gpt-5.3-codex", usage=SimpleNamespace(input_tokens=12, output_tokens=3),
+        output_text="explanation",
+    ))
+    provider = OpenAIProvider(
+        api_key="fixture", client_getter=lambda: SimpleNamespace(responses=SimpleNamespace(create=create)),
+    )
+    out = await provider.call(
+        model="gpt-5.3-codex", system="fixed verdicts", user="bound evidence",
+        max_tokens=123, temperature=0.1, timeout=10,
+    )
+    assert create.call_args.kwargs == {
+        "model": "gpt-5.3-codex", "instructions": "fixed verdicts",
+        "input": "bound evidence", "max_output_tokens": 123,
+    }
+    assert out.model == "gpt-5.3-codex"
+
+
+@pytest.mark.anyio
+async def test_openai_provider_retains_actual_returned_model() -> None:
+    create = AsyncMock(return_value=SimpleNamespace(
+        model="fixture-returned-model", usage=None, output_text="text",
+    ))
+    provider = OpenAIProvider(
+        api_key="fixture", client_getter=lambda: SimpleNamespace(responses=SimpleNamespace(create=create)),
+    )
+    result = await provider.call(
+        model="gpt-5.3-codex", system="s", user="u", max_tokens=1,
+        temperature=0.1, timeout=10,
+    )
+    assert result.model == "fixture-returned-model"
+
+
+@pytest.mark.anyio
+async def test_llm_client_usage_retains_reported_model_across_openai_boundary(monkeypatch) -> None:
+    reported_model = "fixture-returned-model"
+    create = AsyncMock(return_value=SimpleNamespace(
+        model=reported_model, usage=SimpleNamespace(input_tokens=12, output_tokens=3),
+        output_text="bound explanation",
+    ))
+    provider = OpenAIProvider(
+        api_key="fixture", client_getter=lambda: SimpleNamespace(responses=SimpleNamespace(create=create)),
+    )
+    estimate = Mock(return_value=0.125)
+    monkeypatch.setattr(provider, "estimate_cost", estimate)
+    client = LLMClient(
+        api_key="fixture", primary_model="gpt-5.3-codex",
+        fallback_model="gpt-5.3-codex", llm_provider="openai",
+    )
+    monkeypatch.setattr(client, "_get_provider", lambda name: provider)
+
+    result = await client.analyze("fixed verdicts", "bound evidence")
+
+    assert result.success and result.content == "bound explanation"
+    assert create.await_count == 1
+    assert create.call_args.kwargs["model"] == "gpt-5.3-codex"
+    assert "temperature" not in create.call_args.kwargs
+    assert result.usage.model == reported_model
+    assert result.usage.provider == "openai"
+    assert result.usage.tokens_in == 12 and result.usage.tokens_out == 3
+    estimate.assert_called_once_with(reported_model, 12, 3)
+    assert result.usage.cost_usd == 0.125  # Synthetic estimate, not measured billing.
+
+
+@pytest.mark.anyio
 async def test_anthropic_provider_calls_messages_create(monkeypatch: pytest.MonkeyPatch) -> None:
     # Fake anthropic module with AsyncAnthropic client.
     messages_create = AsyncMock(

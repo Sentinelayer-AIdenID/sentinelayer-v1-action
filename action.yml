@@ -8,12 +8,12 @@ branding:
 inputs:
   # Required
   openai_api_key:
-    description: 'OpenAI API key for LLM calls (BYO)'
+    description: 'OpenAI API key (BYO); required for the gpt-5.3-codex writer and fallback when llm_provider=typesafe'
     required: false
     default: ''
 
   llm_provider:
-    description: 'LLM provider: openai, anthropic, google, xai'
+    description: 'LLM provider: openai, anthropic, google, xai, typesafe. TypeSafe assesses source-backed candidates under the configured coverage/policy contract; generator fallback remains separate.'
     required: false
     default: 'openai'
 
@@ -31,6 +31,31 @@ inputs:
     description: 'xAI API key (required if llm_provider=xai)'
     required: false
     default: ''
+
+  typesafe_api_key:
+    description: 'TypeSafe API key (required if llm_provider=typesafe)'
+    required: false
+    default: ''
+
+  typesafe_model:
+    description: 'Pinned TypeSafe model version for typed candidate assessment; mutable aliases are rejected'
+    required: false
+    default: 'jev-1.13.0'
+
+  typesafe_timeout:
+    description: 'TypeSafe request timeout in seconds (1-120)'
+    required: false
+    default: '30'
+
+  typesafe_max_candidates:
+    description: 'Maximum source-backed candidates assessed per scan (1-200); reaching this cap does not establish complete source coverage'
+    required: false
+    default: '50'
+
+  typesafe_fallback:
+    description: 'Allow gpt-5.3-codex fallback when typed candidate review cannot complete. Transport success or zero candidates alone does not establish a complete review.'
+    required: false
+    default: 'true'
 
   # GitHub integration (recommended)
   github_token:
@@ -103,14 +128,14 @@ inputs:
     default: 'P1'
 
   model:
-    description: 'LLM API model (used when Codex CLI is unavailable). Default is gpt-4.1-mini.'
+    description: 'LLM API model; empty selects the provider default: gpt-5.3-codex for TypeSafe, legacy gpt-4.1-mini otherwise. TypeSafe rejects other explicit models.'
     required: false
-    default: 'gpt-4.1-mini'
+    default: ''
 
   model_fallback:
-    description: 'Fallback LLM API model (if primary model fails or quota exceeded)'
+    description: 'Fallback LLM API model; empty selects gpt-5.3-codex for TypeSafe, legacy gpt-4.1-mini otherwise. TypeSafe rejects other explicit models.'
     required: false
-    default: 'gpt-4.1-mini'
+    default: ''
 
   llm_failure_policy:
     description: 'If LLM call fails: block (fail-closed), deterministic_only, allow_with_warning'
@@ -128,7 +153,7 @@ inputs:
     default: 'false'
 
   codex_model:
-    description: 'Model for Codex CLI'
+    description: 'Model for Codex CLI; TypeSafe requires exactly gpt-5.3-codex'
     required: false
     default: 'gpt-5.3-codex'
 
@@ -357,6 +382,11 @@ runs:
         INPUT_ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
         INPUT_GOOGLE_API_KEY: ${{ inputs.google_api_key }}
         INPUT_XAI_API_KEY: ${{ inputs.xai_api_key }}
+        INPUT_TYPESAFE_API_KEY: ${{ inputs.typesafe_api_key }}
+        INPUT_TYPESAFE_MODEL: ${{ inputs.typesafe_model }}
+        INPUT_TYPESAFE_TIMEOUT: ${{ inputs.typesafe_timeout }}
+        INPUT_TYPESAFE_MAX_CANDIDATES: ${{ inputs.typesafe_max_candidates }}
+        INPUT_TYPESAFE_FALLBACK: ${{ inputs.typesafe_fallback }}
         INPUT_GITHUB_TOKEN: ${{ inputs.github_token || github.token }}
         INPUT_PR_NUMBER: ${{ inputs.pr_number }}
         INPUT_COMMENT_TAG: ${{ inputs.comment_tag }}

@@ -18,6 +18,9 @@ from .models import (
 )
 
 
+TYPESAFE_GENERATOR_MODEL = "gpt-5.3-codex"
+
+
 class OmarGateConfig(BaseSettings):
     """Configuration loaded from GitHub Actions inputs."""
 
@@ -31,13 +34,13 @@ class OmarGateConfig(BaseSettings):
     # Required
     openai_api_key: SecretStr = Field(
         default="",
-        description="OpenAI API key for LLM calls (BYO). Required when llm_provider=openai or use_codex=true.",
+        description="OpenAI API key (BYO); required for the writer and fallback when llm_provider=typesafe.",
     )
 
     # LLM provider selection + keys (BYO)
     llm_provider: LLMProviderType = Field(
         default="openai",
-        description="LLM provider: openai, anthropic, google, xai",
+        description="LLM provider: openai, anthropic, google, xai, typesafe",
     )
     anthropic_api_key: SecretStr = Field(
         default="",
@@ -50,6 +53,20 @@ class OmarGateConfig(BaseSettings):
     xai_api_key: SecretStr = Field(
         default="",
         description="xAI API key (required if llm_provider=xai)",
+    )
+    typesafe_api_key: SecretStr = Field(
+        default="",
+        description="TypeSafe API key (required if llm_provider=typesafe)",
+    )
+    typesafe_model: str = Field(
+        default="jev-1.13.0",
+        description="Pinned TypeSafe model version for typed candidate assessments",
+    )
+    typesafe_timeout: conint(ge=1, le=120) = Field(default=30)
+    typesafe_max_candidates: conint(ge=1, le=200) = Field(default=50)
+    typesafe_fallback: bool = Field(
+        default=True,
+        description="Allow gpt-5.3-codex fallback when typed candidate review cannot complete",
     )
 
     # Codex CLI path (OpenAI-only); wiring added later.
@@ -117,6 +134,7 @@ class OmarGateConfig(BaseSettings):
     # Model settings
     # Primary model for LLM API fallback path (when Codex CLI is unavailable).
     # Codex CLI model is configured separately via codex_model.
+    # TypeSafe resolves omitted model fields to its funded writer model below.
     model: str = Field(default="gpt-4.1-mini")
     model_fallback: str = Field(default="gpt-4.1-mini")
     llm_failure_policy: LLMFailurePolicy = Field(default="block")
@@ -145,6 +163,23 @@ class OmarGateConfig(BaseSettings):
     policy_pack: str = Field(default="omar")
     policy_pack_version: str = Field(default="v1")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _automatic_generator_defaults(cls, values: object) -> object:
+        # Empty action inputs mean automatic. Remove them before Pydantic records
+        # explicit fields, so TypeSafe can distinguish defaults from overrides.
+        if not isinstance(values, dict):
+            return values
+        return {
+            name: value
+            for name, value in values.items()
+            if not (
+                name in {"model", "model_fallback"}
+                and isinstance(value, str)
+                and not value.strip()
+            )
+        }
+
     @field_validator("severity_gate", mode="before")
     @classmethod
     def _normalize_severity_gate(cls, value: str) -> str:
@@ -160,6 +195,13 @@ class OmarGateConfig(BaseSettings):
     def _normalize_spec_hash(cls, value: str) -> str:
         if isinstance(value, str):
             return value.strip().lower()
+        return value
+
+    @field_validator("typesafe_model")
+    @classmethod
+    def _validate_typesafe_model(cls, value: str) -> str:
+        if not re.fullmatch(r"jev-[0-9]+\.[0-9]+\.[0-9]+", value):
+            raise ValueError("typesafe_model must be a pinned version such as jev-1.13.0")
         return value
 
     @field_validator("comment_tag", mode="before")
@@ -206,6 +248,21 @@ class OmarGateConfig(BaseSettings):
             raise ValueError("google_api_key is required when llm_provider=google")
         if provider == "xai" and not self.xai_api_key.get_secret_value():
             raise ValueError("xai_api_key is required when llm_provider=xai")
+        if provider == "typesafe":
+            if not self.typesafe_api_key.get_secret_value().strip():
+                raise ValueError("typesafe_api_key is required when llm_provider=typesafe")
+            if not self.openai_api_key.get_secret_value().strip():
+                raise ValueError(
+                    "openai_api_key is required for the writer and fallback when llm_provider=typesafe"
+                )
+            if self.codex_only:
+                raise ValueError("codex_only cannot be true when llm_provider=typesafe")
+            for name in ("model", "model_fallback", "codex_model"):
+                if name in self.model_fields_set and getattr(self, name) != TYPESAFE_GENERATOR_MODEL:
+                    raise ValueError(
+                        f"{name} must be {TYPESAFE_GENERATOR_MODEL} when llm_provider=typesafe"
+                    )
+                object.__setattr__(self, name, TYPESAFE_GENERATOR_MODEL)
 
         if self.sentinelayer_managed_llm:
             if provider != "openai":

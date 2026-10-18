@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import json
 import os
 import re
 from pathlib import Path
@@ -39,6 +40,16 @@ from .llm import (
 )
 from .llm.providers import detect_provider_from_model
 from .llm.response_parser import ParsedFinding
+from .typesafe_client import TypeSafeClient, TypeSafeError
+from .typesafe_review import (
+    TypeSafeReviewIncomplete,
+    build_inventory,
+    load_policy,
+    review_inventory,
+    verify_sources,
+)
+from .typesafe_state import build_typed_context
+from .typesafe_writer import explain_review, WRITER_MODEL
 
 
 _LOG_SECRET_SCRUB_RES = (
@@ -205,6 +216,7 @@ class AnalysisOrchestrator:
         if (
             quick_learn
             and self.allow_llm
+            and self.config.llm_provider != "typesafe"
             and _has_llm_key
             and is_boilerplate_description(quick_learn.description)
         ):
@@ -226,7 +238,7 @@ class AnalysisOrchestrator:
                         api_key=self.config.openai_api_key.get_secret_value(),
                         primary_model=self.config.model,
                         fallback_model=self.config.model_fallback,
-                        llm_provider=self.config.llm_provider,
+                        llm_provider=self._generator_provider(),
                         anthropic_api_key=self.config.anthropic_api_key.get_secret_value(),
                         google_api_key=self.config.google_api_key.get_secret_value(),
                         xai_api_key=self.config.xai_api_key.get_secret_value(),
@@ -333,7 +345,8 @@ class AnalysisOrchestrator:
                         changed_files=changed_files,
                     )
                     for finding in result.findings:
-                        finding.setdefault("model_source", self.config.model)
+                        actual_model = (result.usage or {}).get("model") or self.config.model
+                        finding.setdefault("model_source", actual_model)
                     self.logger.info(
                         completion_event,
                         model=self.config.model,
@@ -362,7 +375,25 @@ class AnalysisOrchestrator:
                         )
                     )
 
-        if self.allow_llm and self.config.use_codex:
+        typed_result: Optional[LLMAnalysisResult] = None
+        if self.allow_llm and self.config.llm_provider == "typesafe":
+            with self.logger.stage("typesafe_review"):
+                typed_result = await self._run_typesafe_analysis(
+                    ingest=ingest,
+                    changed_files=changed_files,
+                    scan_mode=scan_mode,
+                    deterministic_findings=det_findings,
+                    run_dir=run_dir,
+                    diff_content=diff_content,
+                )
+                record_llm_result(typed_result)
+                if typed_result.warning:
+                    warnings.append(typed_result.warning)
+
+        run_generator = self.config.llm_provider != "typesafe" or (
+            not llm_success and self.config.typesafe_fallback
+        )
+        if run_generator and self.allow_llm and self.config.use_codex:
             with self.logger.stage("deep_scan"):
                 codex_model = self.config.codex_model
                 try:
@@ -410,8 +441,10 @@ class AnalysisOrchestrator:
                 await run_llm_stage("llm_fallback", "LLM fallback complete")
             elif not llm_success and not self.config.codex_only:
                 warnings.append("LLM analysis skipped (no API key or limited mode)")
-        elif self._should_run_llm():
+        elif run_generator and self._should_run_llm():
             await run_llm_stage("llm_analysis", "LLM analysis complete")
+        elif not run_generator:
+            pass
         elif not self.allow_llm:
             warnings.append("LLM analysis skipped (no API key or limited mode)")
         else:
@@ -428,6 +461,27 @@ class AnalysisOrchestrator:
                     parse_error_count=llm_parse_error_count,
                 )
             )
+
+        if typed_result is not None and llm_usage is not None:
+            llm_usage = dict(llm_usage)
+            llm_usage["typesafe_attempt"] = {
+                "requested_model": self.config.typesafe_model,
+                "attempted": typed_result.attempted,
+                "success": typed_result.success,
+                "failure_class": typed_result.failure_class,
+            }
+            if run_generator:
+                prior_usage = typed_result.usage or {}
+                if prior_usage.get("typesafe_assessment") is not None:
+                    llm_usage["typesafe_assessment"] = prior_usage["typesafe_assessment"]
+                if prior_usage.get("typesafe_usage") is not None:
+                    llm_usage["typesafe_usage"] = prior_usage["typesafe_usage"]
+                actual_provider = llm_usage.get("provider") or "unknown"
+                actual_model = llm_usage.get("model") or "unknown"
+                llm_usage["fallback_chain"] = (
+                    f"typesafe/{self.config.typesafe_model} -> "
+                    f"{actual_provider}/{actual_model}"
+                )
 
         # Step 6: Merge findings
         base_findings = harness_findings + det_findings
@@ -494,7 +548,7 @@ class AnalysisOrchestrator:
         if not self.allow_llm:
             return False
         primary_provider = detect_provider_from_model(
-            self.config.model, default_provider=self.config.llm_provider
+            self.config.model, default_provider=self._generator_provider()
         )
         if (
             primary_provider == "openai"
@@ -507,7 +561,7 @@ class AnalysisOrchestrator:
     def _should_use_managed_proxy_for_llm_analysis(self) -> bool:
         """Use managed proxy only when the OpenAI fallback path has no BYO key."""
         primary_provider = detect_provider_from_model(
-            self.config.model, default_provider=self.config.llm_provider
+            self.config.model, default_provider=self._generator_provider()
         )
         if primary_provider != "openai":
             return False
@@ -518,6 +572,8 @@ class AnalysisOrchestrator:
     def _should_allow_managed_capacity_fallback(self) -> bool:
         """Allow managed proxy only as a final BYO quota/rate-limit fallback."""
         return bool(
+            self.config.llm_provider != "typesafe"
+            and
             self.config.sentinelayer_managed_llm
             and self.config.sentinelayer_token.get_secret_value()
         )
@@ -532,6 +588,112 @@ class AnalysisOrchestrator:
         if provider == "xai":
             return self.config.xai_api_key.get_secret_value()
         return ""
+
+    def _generator_provider(self) -> str:
+        # TypeSafe is a separate typed stage, never a free-text provider alias.
+        return "openai" if self.config.llm_provider == "typesafe" else self.config.llm_provider
+
+    async def _run_typesafe_analysis(
+        self, *, ingest: dict, changed_files: Optional[List[str]], scan_mode: str,
+        deterministic_findings: List[dict], run_dir: Optional[Path] = None,
+        diff_content: Optional[str] = None,
+    ) -> LLMAnalysisResult:
+        attempted = False
+        client = None
+        typed_usage = None
+        metadata: dict = {
+            "requested_provider": "typesafe", "requested_model": self.config.typesafe_model,
+            "complete": False,
+        }
+        try:
+            inventory = build_inventory(
+                repo_root=self.repo_root, ingest=ingest, changed_files=changed_files,
+                scan_mode=scan_mode, max_candidates=self.config.typesafe_max_candidates,
+            )
+            policy = load_policy()
+            context = build_typed_context(
+                repo_root=self.repo_root, inventory=inventory, ingest=ingest,
+                diff_content=diff_content, deterministic_findings=deterministic_findings,
+            )
+            client = TypeSafeClient(
+                self.config.typesafe_api_key.get_secret_value(),
+                timeout_seconds=self.config.typesafe_timeout,
+            )
+            review = await review_inventory(
+                repo_root=self.repo_root, inventory=inventory, policy=policy,
+                client=client, model=self.config.typesafe_model, context=context,
+            )
+            metadata = review.assessment
+            typed_usage = review.usage
+            if review.findings:
+                writer = LLMClient(
+                    api_key=self.config.openai_api_key.get_secret_value(),
+                    primary_model=WRITER_MODEL, fallback_model=WRITER_MODEL,
+                    llm_provider="openai", managed_llm=False,
+                    managed_capacity_fallback=False,
+                )
+                review = await explain_review(review, client=writer)
+                metadata = review.assessment
+            verify_sources(self.repo_root, inventory)
+            attempted = bool(client.attempted)
+            result = LLMAnalysisResult(
+                findings=review.findings, success=True, usage=review.usage,
+                warning=None, attempted=attempted, output_valid=True,
+                no_findings_reported=not review.findings,
+                reported_finding_count=len(review.findings),
+            )
+        except (TypeSafeReviewIncomplete, TypeSafeError) as exc:
+            attempted = bool(client is not None and client.attempted)
+            reason = str(exc) if isinstance(exc, TypeSafeReviewIncomplete) else "typesafe_transport_failure"
+            if not re.fullmatch(r"[a-z][a-z0-9_]{0,95}", reason):
+                reason = "typed_review_incomplete"
+            metadata["failure_class"] = reason
+            result = self._llm_failure_result(
+                deterministic_findings=deterministic_findings, attempted=attempted,
+                failure_class=reason, public_error="Typed review did not complete",
+                usage=typed_usage,
+            )
+        except Exception:
+            attempted = bool(client is not None and client.attempted)
+            # Policy/transport bugs cannot publish source-bearing exception bodies
+            # or turn an incomplete review into successful no-findings.
+            metadata["failure_class"] = "typesafe_execution_error"
+            result = self._llm_failure_result(
+                deterministic_findings=deterministic_findings, attempted=attempted,
+                failure_class="typesafe_execution_error",
+                public_error="Typed review raised an execution error",
+                usage=typed_usage,
+            )
+        metadata["http_attempted"] = attempted
+        metadata["typed_assessment_complete"] = bool(metadata.get("complete"))
+        metadata["complete"] = result.success
+        metadata["review_complete"] = result.success
+        if result.usage is None:
+            result.usage = {
+                "provider": "typesafe", "model": None,
+                "requested_model": self.config.typesafe_model,
+                "tokens_in": None, "tokens_out": None, "cost_usd": None,
+                "typesafe_assessment": metadata,
+            }
+        if run_dir is not None:
+            try:
+                destination = run_dir / "TYPESAFE_REVIEW.json"
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(
+                    json.dumps(metadata, sort_keys=True, allow_nan=False) + "\n",
+                    encoding="utf-8",
+                )
+            except (OSError, TypeError, ValueError):
+                metadata["failure_class"] = "typesafe_evidence_write_failed"
+                metadata["complete"] = False
+                metadata["review_complete"] = False
+                result = self._llm_failure_result(
+                    deterministic_findings=deterministic_findings, attempted=attempted,
+                    failure_class="typesafe_evidence_write_failed",
+                    public_error="Typed review evidence could not be retained",
+                    usage=result.usage,
+                )
+        return result
 
     @staticmethod
     def _llm_usage_to_dict(usage) -> Optional[dict]:
@@ -655,7 +817,7 @@ class AnalysisOrchestrator:
             api_key=self.config.openai_api_key.get_secret_value(),
             primary_model=self.config.model,
             fallback_model=self.config.model_fallback,
-            llm_provider=self.config.llm_provider,
+            llm_provider=self._generator_provider(),
             anthropic_api_key=self.config.anthropic_api_key.get_secret_value(),
             google_api_key=self.config.google_api_key.get_secret_value(),
             xai_api_key=self.config.xai_api_key.get_secret_value(),

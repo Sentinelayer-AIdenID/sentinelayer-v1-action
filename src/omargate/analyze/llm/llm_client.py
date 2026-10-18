@@ -485,10 +485,12 @@ class LLMClient:
                     input_tokens = int(getattr(response, "input_tokens", 0) or 0)
                     output_tokens = int(getattr(response, "output_tokens", 0) or 0)
                     usage = LLMUsage(
-                        model=model,
+                        model=getattr(response, "model", None) or model,
                         tokens_in=input_tokens,
                         tokens_out=output_tokens,
-                        cost_usd=provider.estimate_cost(model, input_tokens, output_tokens),
+                        cost_usd=provider.estimate_cost(
+                            getattr(response, "model", None) or model, input_tokens, output_tokens
+                        ),
                         latency_ms=latency_ms,
                         provider=provider_name,
                     )

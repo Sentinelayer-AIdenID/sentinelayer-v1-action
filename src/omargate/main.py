@@ -96,6 +96,25 @@ def _llm_fallback_used(llm_usage: dict, model_fallback: str) -> bool:
     )
 
 
+def _llm_display_identity(analysis) -> tuple[str, str]:
+    """Display observed execution identity, without substituting request config."""
+    if not analysis.llm_attempted and not analysis.llm_success:
+        return "disabled", "n/a"
+    usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
+    engine = str(usage.get("engine") or usage.get("provider") or "llm").strip() or "llm"
+    model = str(usage.get("model") or "").strip() or "unknown"
+    return engine, model
+
+
+def _llm_display_cost(analysis) -> Optional[float]:
+    """Keep an attempted review's unreported cost unknown, including failures."""
+    if not analysis.llm_attempted and not analysis.llm_success:
+        return 0.0
+    usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
+    cost = usage.get("cost_usd")
+    return float(cost) if cost is not None else None
+
+
 def _build_llm_evidence(analysis, config: OmarGateConfig) -> dict:
     usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
     provider = str(usage.get("provider") or config.llm_provider).strip()
@@ -854,14 +873,8 @@ async def async_main() -> int:
         try:
             with logger.stage("publish"):
                 publish_github = _github_publish_enabled(config)
-                # Avoid misleading "$0.00" when the engine cannot report usage (e.g. Codex CLI).
-                if not analysis.llm_success and int(analysis.llm_count or 0) == 0:
-                    cost_usd = 0.0
-                elif analysis.llm_usage:
-                    cost_raw = analysis.llm_usage.get("cost_usd")
-                    cost_usd = float(cost_raw) if cost_raw is not None else None
-                else:
-                    cost_usd = None
+                # An unsuccessful attempt can still incur an unreported cost.
+                cost_usd = _llm_display_cost(analysis)
 
                 if not publish_github:
                     logger.info("GitHub PR comment publish disabled by input")
@@ -873,23 +886,7 @@ async def async_main() -> int:
                     analysis.warnings.append(message)
                 elif ctx.pr_number:
                     try:
-                        llm_engine_used = "disabled"
-                        llm_model_used = "n/a"
-                        # Show LLM engine/model when analysis ran, even if it found 0 findings.
-                        _llm_ran = analysis.llm_success or analysis.llm_usage is not None
-                        if _llm_ran:
-                            if analysis.llm_usage:
-                                llm_engine_used = str(
-                                    analysis.llm_usage.get("engine")
-                                    or analysis.llm_usage.get("provider")
-                                    or "llm"
-                                ).strip() or "llm"
-                                llm_model_used = str(
-                                    analysis.llm_usage.get("model") or config.model
-                                ).strip() or config.model
-                            else:
-                                llm_engine_used = "llm"
-                                llm_model_used = str(config.model).strip() or "unknown"
+                        llm_engine_used, llm_model_used = _llm_display_identity(analysis)
 
                         review_brief_md = None
                         try:

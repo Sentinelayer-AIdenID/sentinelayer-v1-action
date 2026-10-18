@@ -1,0 +1,335 @@
+"""Source-bound typed review. Policy is supplied separately from transport.
+
+The provider never invents a file, line, quote or explanation. A policy maps typed
+answers to templated findings over this exact inventory. Incomplete inventory,
+missing policy and uncertain decisions are explicit generator-fallback reasons.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import json
+import math
+from pathlib import Path, PurePosixPath
+from typing import Any, Protocol
+
+from ..redaction import sanitize_public_error
+from .typesafe_client import TypeSafeClient, TypeSafeError, ChoiceAnswer, validate_answers
+
+
+MAX_FILE_BYTES = 1_000_000
+MAX_STATE_BYTES = 24_000
+LINES_PER_CANDIDATE = 40
+
+
+class TypeSafeReviewIncomplete(ValueError):
+    """A bounded reason, safe to retain without source or credential bodies."""
+
+
+def _digest(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+@dataclass(frozen=True)
+class ReviewCandidate:
+    candidate_id: str
+    file_path: str
+    line_start: int
+    line_end: int
+    evidence: str
+    evidence_sha256: str
+    source_sha256: str
+
+    def state(self) -> dict[str, Any]:
+        # Existing public redaction is reused; raw evidence is not sent or logged.
+        safe = sanitize_public_error(self.evidence)
+        return {
+            "candidate_id": self.candidate_id,
+            "file_path": self.file_path,
+            "line_start": self.line_start,
+            "line_end": self.line_end,
+            "evidence": safe,
+            "evidence_redacted": safe != self.evidence,
+            "evidence_sha256": self.evidence_sha256,
+            "source_sha256": self.source_sha256,
+        }
+
+
+@dataclass(frozen=True)
+class ReviewInventory:
+    candidates: tuple[ReviewCandidate, ...]
+    source_hashes: tuple[tuple[str, str], ...]
+    scan_mode: str
+
+
+@dataclass(frozen=True)
+class ReviewPlan:
+    questions: dict[str, dict[str, Any]]
+    question_candidates: dict[str, str]
+
+
+@dataclass(frozen=True)
+class RatedFinding:
+    candidate_id: str
+    question_ids: tuple[str, ...]
+    severity: str
+    category: str
+    message: str
+    recommendation: str
+    support_probability: float
+
+
+@dataclass(frozen=True)
+class ReviewDecision:
+    findings: tuple[RatedFinding, ...]
+    complete: bool
+    reason: str = ""
+
+
+class ReviewPolicy(Protocol):
+    """Owned security catalogue/calibration; transport does not define policy."""
+
+    policy_id: str
+    calibration_id: str
+
+    def plan(self, candidates: tuple[ReviewCandidate, ...]) -> ReviewPlan: ...
+
+    def decide(
+        self, candidates: tuple[ReviewCandidate, ...], answers: dict[str, float | ChoiceAnswer]
+    ) -> ReviewDecision: ...
+
+
+@dataclass(frozen=True)
+class TypedReview:
+    findings: list[dict[str, Any]]
+    usage: dict[str, Any]
+    assessment: dict[str, Any]
+
+
+def _source_path(repo_root: Path, relative: str) -> Path:
+    if not isinstance(relative, str) or not relative or "\\" in relative or ":" in relative:
+        raise TypeSafeReviewIncomplete("unsupported_source_path")
+    logical = PurePosixPath(relative)
+    if logical.is_absolute() or any(part in {".", ".."} for part in relative.split("/")):
+        raise TypeSafeReviewIncomplete("unsupported_source_path")
+    target = (repo_root / relative).resolve()
+    if not target.is_relative_to(repo_root.resolve()) or not target.is_file():
+        raise TypeSafeReviewIncomplete("source_unavailable")
+    return target
+
+
+def build_inventory(
+    *, repo_root: Path, ingest: dict, changed_files: list[str] | None,
+    scan_mode: str, max_candidates: int,
+) -> ReviewInventory:
+    """Cover complete changed source files, without silently truncating a scope.
+
+    Forty-line spans are bounded candidates, not claimed exact fault locations.
+    Broader scan modes and deleted/binary/oversize files use generator fallback.
+    """
+    if scan_mode != "pr-diff" or not changed_files:
+        raise TypeSafeReviewIncomplete("source_scope_unavailable")
+    if any(not isinstance(path, str) or not path for path in changed_files):
+        raise TypeSafeReviewIncomplete("unsupported_source_path")
+    if type(max_candidates) is not int or not 1 <= max_candidates <= 200:
+        raise TypeSafeReviewIncomplete("invalid_candidate_budget")
+    known = {row.get("path") for row in ingest.get("files", []) if isinstance(row, dict)}
+    candidates: list[ReviewCandidate] = []
+    hashes: list[tuple[str, str]] = []
+    for relative in sorted(set(changed_files)):
+        if relative not in known:
+            raise TypeSafeReviewIncomplete("source_outside_inventory")
+        path = _source_path(repo_root, relative)
+        if path.stat().st_size > MAX_FILE_BYTES:
+            raise TypeSafeReviewIncomplete("source_budget_exceeded")
+        raw = path.read_bytes()
+        if len(raw) > MAX_FILE_BYTES or b"\0" in raw:
+            raise TypeSafeReviewIncomplete("unsupported_source_bytes")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise TypeSafeReviewIncomplete("unsupported_source_encoding") from None
+        lines = text.splitlines(keepends=True)
+        if not lines:
+            raise TypeSafeReviewIncomplete("empty_source_scope")
+        source_hash = _digest(raw)
+        hashes.append((relative, source_hash))
+        for offset in range(0, len(lines), LINES_PER_CANDIDATE):
+            end = min(offset + LINES_PER_CANDIDATE, len(lines))
+            evidence = "".join(lines[offset:end])
+            evidence_hash = _digest(evidence.encode("utf-8"))
+            identity = f"{relative}\0{offset + 1}\0{end}\0{source_hash}\0{evidence_hash}"
+            candidates.append(ReviewCandidate(
+                candidate_id="span-" + _digest(identity.encode("utf-8")),
+                file_path=relative, line_start=offset + 1, line_end=end,
+                evidence=evidence, evidence_sha256=evidence_hash,
+                source_sha256=source_hash,
+            ))
+            if len(candidates) > max_candidates:
+                raise TypeSafeReviewIncomplete("candidate_budget_exceeded")
+    return ReviewInventory(tuple(candidates), tuple(hashes), scan_mode)
+
+
+def verify_sources(repo_root: Path, inventory: ReviewInventory) -> None:
+    expected_hashes = dict(inventory.source_hashes)
+    if (
+        inventory.scan_mode != "pr-diff"
+        or not expected_hashes
+        or len(expected_hashes) != len(inventory.source_hashes)
+        or {candidate.file_path for candidate in inventory.candidates} != set(expected_hashes)
+    ):
+        raise TypeSafeReviewIncomplete("incomplete_source_inventory")
+    for relative, expected in inventory.source_hashes:
+        path = _source_path(repo_root, relative)
+        if path.stat().st_size > MAX_FILE_BYTES:
+            raise TypeSafeReviewIncomplete("source_changed_during_review")
+        raw = path.read_bytes()
+        if len(raw) > MAX_FILE_BYTES or _digest(raw) != expected:
+            raise TypeSafeReviewIncomplete("source_changed_during_review")
+        try:
+            lines = raw.decode("utf-8").splitlines(keepends=True)
+        except UnicodeDecodeError:
+            raise TypeSafeReviewIncomplete("unsupported_source_encoding") from None
+        ordered = sorted(
+            (candidate for candidate in inventory.candidates if candidate.file_path == relative),
+            key=lambda candidate: candidate.line_start,
+        )
+        cursor = 1
+        for candidate in ordered:
+            if (
+                type(candidate.line_start) is not int
+                or type(candidate.line_end) is not int
+                or candidate.line_start != cursor
+                or not candidate.line_start <= candidate.line_end <= len(lines)
+            ):
+                raise TypeSafeReviewIncomplete("incomplete_source_span_coverage")
+            evidence = "".join(lines[candidate.line_start - 1:candidate.line_end])
+            evidence_hash = _digest(evidence.encode("utf-8"))
+            identity = f"{relative}\0{candidate.line_start}\0{candidate.line_end}\0{expected}\0{evidence_hash}"
+            if (
+                candidate.evidence != evidence
+                or candidate.evidence_sha256 != evidence_hash
+                or candidate.source_sha256 != expected
+                or candidate.candidate_id != "span-" + _digest(identity.encode("utf-8"))
+            ):
+                raise TypeSafeReviewIncomplete("unbound_source_evidence")
+            cursor = candidate.line_end + 1
+        if cursor != len(lines) + 1:
+            raise TypeSafeReviewIncomplete("incomplete_source_span_coverage")
+
+
+def load_policy() -> ReviewPolicy:
+    # This fixed packaged module is authored/reviewed by the security-policy owner.
+    # It is deliberately not loaded from an untrusted repository path or URL.
+    try:
+        from .typesafe_policy import POLICY
+    except ImportError:
+        raise TypeSafeReviewIncomplete("typesafe_policy_unavailable") from None
+    return POLICY
+
+
+async def review_inventory(
+    *, repo_root: Path, inventory: ReviewInventory, policy: ReviewPolicy,
+    client: TypeSafeClient, model: str,
+    context: dict[str, Any] | None = None,
+) -> TypedReview:
+    if not inventory.candidates or not policy.policy_id or not policy.calibration_id:
+        raise TypeSafeReviewIncomplete("review_policy_or_coverage_unavailable")
+    verify_sources(repo_root, inventory)
+    by_id = {candidate.candidate_id: candidate for candidate in inventory.candidates}
+    if len(by_id) != len(inventory.candidates):
+        raise TypeSafeReviewIncomplete("duplicate_source_candidate")
+    plan = policy.plan(inventory.candidates)
+    if (
+        not plan.questions
+        or set(plan.questions) != set(plan.question_candidates)
+        or set(plan.question_candidates.values()) != set(by_id)
+    ):
+        raise TypeSafeReviewIncomplete("incomplete_question_coverage")
+    state = {
+        "scope": inventory.scan_mode,
+        "policy_id": policy.policy_id,
+        "calibration_id": policy.calibration_id,
+        "candidates": [candidate.state() for candidate in inventory.candidates],
+        "context": context or {},
+    }
+    # Conservative byte budgets supplement server token limits; nothing is clipped.
+    if len(json.dumps(state, ensure_ascii=False).encode("utf-8")) > MAX_STATE_BYTES:
+        raise TypeSafeReviewIncomplete("typed_context_budget_exceeded")
+    request_bytes = json.dumps({"state": state, "questions": plan.questions}, ensure_ascii=False).encode("utf-8")
+    if len(request_bytes) > 48_000:
+        raise TypeSafeReviewIncomplete("typed_question_budget_exceeded")
+    response = await client.rate(state=state, questions=plan.questions, model=model)
+    verify_sources(repo_root, inventory)
+    try:
+        validate_answers(response.answers, plan.questions)
+    except TypeSafeError:
+        raise TypeSafeReviewIncomplete("incomplete_typed_answers")
+    decision = policy.decide(inventory.candidates, response.answers)
+    if decision.complete is not True:
+        raise TypeSafeReviewIncomplete("typed_review_incomplete")
+    emitted: list[dict[str, Any]] = []
+    for finding in decision.findings:
+        candidate = by_id.get(finding.candidate_id)
+        if candidate is None or not finding.question_ids or any(
+            plan.question_candidates.get(question) != finding.candidate_id
+            for question in finding.question_ids
+        ):
+            raise TypeSafeReviewIncomplete("unbound_typed_finding")
+        if finding.severity not in {"P0", "P1", "P2", "P3"} or not all(
+            isinstance(value, str) and value.strip()
+            for value in (finding.category, finding.message, finding.recommendation)
+        ):
+            raise TypeSafeReviewIncomplete("invalid_typed_finding")
+        if (
+            isinstance(finding.support_probability, bool)
+            or not isinstance(finding.support_probability, (int, float))
+            or not math.isfinite(finding.support_probability)
+            or not 0 <= finding.support_probability <= 1
+        ):
+            raise TypeSafeReviewIncomplete("invalid_finding_support_probability")
+        emitted.append({
+            "id": f"typesafe-{finding.candidate_id}-{finding.category}",
+            "severity": finding.severity, "category": finding.category,
+            "file_path": candidate.file_path,
+            "line_start": candidate.line_start, "line_end": candidate.line_end,
+            "snippet": candidate.state()["evidence"],
+            "message": finding.message, "recommendation": finding.recommendation,
+            "fix_plan": finding.recommendation,
+            # Legacy finding field: explicitly interpreted by the policy owner,
+            # never inferred as a separate Noul confidence by the transport.
+            "confidence": finding.support_probability,
+            "source": "llm", "model_source": response.model,
+            "typed_verdict": {
+                "severity": finding.severity, "category": finding.category,
+                "question_ids": list(finding.question_ids),
+                "support_probability": finding.support_probability,
+                "reason": finding.message,
+            },
+        })
+    assessment = {
+        "provider": "typesafe", "model": response.model,
+        "policy_id": policy.policy_id, "calibration_id": policy.calibration_id,
+        "source_hashes": dict(inventory.source_hashes),
+        "candidates": [{
+            "candidate_id": candidate.candidate_id,
+            "file_path": candidate.file_path,
+            "line_start": candidate.line_start,
+            "line_end": candidate.line_end,
+            "evidence_sha256": candidate.evidence_sha256,
+            "source_sha256": candidate.source_sha256,
+            "evidence_redacted": candidate.state()["evidence_redacted"],
+        } for candidate in inventory.candidates],
+        "question_candidates": dict(plan.question_candidates),
+        "answers": {
+            key: answer.as_dict() if isinstance(answer, ChoiceAnswer) else answer
+            for key, answer in response.answers.items()
+        }, "complete": True,
+        "context": context or {},
+    }
+    return TypedReview(emitted, {
+        "provider": "typesafe", "model": response.model, "route": "typed-review",
+        "tokens_in": None, "tokens_out": None, "cost_usd": None,
+        "latency_ms": response.latency_ms, "typesafe_usage": response.usage,
+        "typesafe_assessment": assessment,
+    }, assessment)

@@ -41,14 +41,16 @@ class OpenAIProvider(LLMProvider):
         temperature: float,
         timeout: int,
     ) -> ProviderResponse:
+        request = dict(
+            model=model, instructions=system, input=user,
+            max_output_tokens=max_tokens,
+        )
+        # Use the reasoning model's API defaults. Sampling controls are optional
+        # and the funded Codex writer does not require a sampling override.
+        if model != "gpt-5.3-codex":
+            request["temperature"] = temperature
         response = await asyncio.wait_for(
-            self.client.responses.create(
-                model=model,
-                instructions=system,
-                input=user,
-                max_output_tokens=max_tokens,
-                temperature=temperature,
-            ),
+            self.client.responses.create(**request),
             timeout=timeout,
         )
         usage = getattr(response, "usage", None)
@@ -59,7 +61,7 @@ class OpenAIProvider(LLMProvider):
             content=content,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            model=model,
+            model=getattr(response, "model", None) or model,
         )
 
     def estimate_cost(self, model: str, tokens_in: int, tokens_out: int) -> float:
