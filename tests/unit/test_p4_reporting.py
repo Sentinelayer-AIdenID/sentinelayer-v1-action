@@ -54,3 +54,24 @@ def test_invalid_counts_cannot_fabricate_pass(tmp_path, bad):
 
 def test_historical_count_objects_default_p4_to_zero():
     assert Counts(p1=1).p4 == 0 and Counts(p1=1).total() == 1
+
+
+def test_separate_price_estimates_survive_tier1_payload_without_source_identity():
+    from omargate.telemetry.collector import TelemetryCollector
+    from omargate.telemetry.schemas import build_tier1_payload
+    collector = TelemetryCollector(run_id="cost-test", repo_full_name="private-owner/private-repo")
+    collector.review_cost_ledger = cost_ledger([
+        estimate_usage("typesafe", "jev-1.13.0", {"input_tokens": 1000, "output_tokens": 8}),
+        estimate_usage("openai", "gpt-6-sol", None),
+    ])
+    payload = build_tier1_payload(collector)
+    restored = json.loads(json.dumps(payload))["findings"]["model_cost_estimates"]
+    assert [row["provider"] for row in restored["calls"]] == ["typesafe", "openai"]
+    assert restored["estimated_total_usd"] is None
+    assert "private-owner" not in json.dumps(payload)
+    assert "private-repo" not in json.dumps(payload)
+
+
+def test_unexpected_model_text_is_not_copied_to_cost_artifacts():
+    record = estimate_usage("openai", "credential-shaped-untrusted-text", {"input_tokens": 1, "output_tokens": 1})
+    assert record["model"] == "unrecognized" and record["estimated_usd"] is None

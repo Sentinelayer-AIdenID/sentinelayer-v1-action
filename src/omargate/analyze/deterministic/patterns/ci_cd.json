@@ -2,49 +2,30 @@
   "schema_version": "1.0",
   "patterns": [
     {
-      "id": "CICD-001",
-      "name": "Workflow Injection",
-      "severity": "P0",
-      "category": "ci-cd",
-      "description": "User-controlled input used in workflow context",
-      "regex": "\\$\\{\\{\\s*github\\.event\\.(issue|comment|review)",
-      "file_patterns": [".github/workflows/*.yml", ".github/workflows/*.yaml"],
-      "exclude_patterns": ["*.md", "*.rst", "*.txt"],
-      "message": "Potential workflow injection detected",
-      "recommendation": "Sanitize inputs and avoid direct interpolation",
-      "fix_plan": "Do not interpolate untrusted GitHub event fields directly into shell commands. Move user input into validated allowlisted arguments or pass through action inputs with strict quoting/escaping and no eval-style expansion.",
-      "evidence_capture": "line",
-      "false_positive_hints": ["example", "docs", "test"]
-    },
-    {
-      "id": "CICD-002",
-      "name": "Unpinned Action",
-      "severity": "P2",
-      "category": "ci-cd",
-      "description": "GitHub Action uses an unpinned ref",
-      "regex": "uses:\\s*[^@]+@(main|master|latest)",
-      "file_patterns": [".github/workflows/*.yml", ".github/workflows/*.yaml"],
-      "exclude_patterns": ["*.md", "*.rst", "*.txt"],
-      "message": "Unpinned GitHub Action detected",
-      "recommendation": "Pin actions to a full commit SHA",
-      "fix_plan": "Replace floating action refs (main/master/latest) with immutable commit SHAs and document update cadence. Add a CI check that fails when workflows introduce non-SHA action references.",
-      "evidence_capture": "line",
-      "false_positive_hints": ["example", "docs", "test"]
-    },
-    {
       "id": "CICD-003",
       "name": "Excessive Permissions",
       "severity": "P2",
       "category": "ci-cd",
       "description": "Workflow requests write-all permissions",
       "regex": "permissions:\\s*write-all",
-      "file_patterns": [".github/workflows/*.yml", ".github/workflows/*.yaml"],
-      "exclude_patterns": ["*.md", "*.rst", "*.txt"],
+      "file_patterns": [
+        ".github/workflows/*.yml",
+        ".github/workflows/*.yaml"
+      ],
+      "exclude_patterns": [
+        "*.md",
+        "*.rst",
+        "*.txt"
+      ],
       "message": "Excessive permissions detected",
       "recommendation": "Restrict permissions to the minimum required",
       "fix_plan": "Replace write-all with explicit least-privilege permissions at workflow/job scope. Set default permissions: read-all and grant write permissions only to the specific jobs that require them.",
       "evidence_capture": "line",
-      "false_positive_hints": ["example", "docs", "test"]
+      "false_positive_hints": [
+        "example",
+        "docs",
+        "test"
+      ]
     },
     {
       "id": "CICD-004",
@@ -53,13 +34,38 @@
       "category": "ci-cd",
       "description": "Secrets are echoed into logs",
       "regex": "echo\\s+.*\\$\\{\\{\\s*secrets\\.",
-      "file_patterns": [".github/workflows/*.yml", ".github/workflows/*.yaml"],
-      "exclude_patterns": ["*.md", "*.rst", "*.txt"],
+      "file_patterns": [
+        ".github/workflows/*.yml",
+        ".github/workflows/*.yaml"
+      ],
+      "exclude_patterns": [
+        "*.md",
+        "*.rst",
+        "*.txt"
+      ],
       "message": "Secrets echoed to logs detected",
       "recommendation": "Avoid printing secrets to logs",
       "fix_plan": "Remove commands that echo or print secret values and use masked environment variables only where required. Pass secrets directly to tool inputs and confirm logs do not contain plaintext credentials.",
       "evidence_capture": "line",
-      "false_positive_hints": ["example", "docs", "test"]
+      "false_positive_hints": [
+        "example",
+        "docs",
+        "test"
+      ]
+    }
+  ],
+  "retired_patterns": [
+    {
+      "id": "CICD-001",
+      "replaced_by": "yaml.workflow.v2",
+      "reviewed": "2026-10-20",
+      "reason": "Context-aware script interpolation and lock-aware immutable dependencies replace broad regex."
+    },
+    {
+      "id": "CICD-002",
+      "replaced_by": "yaml.workflow.v2",
+      "reviewed": "2026-10-20",
+      "reason": "Context-aware script interpolation and lock-aware immutable dependencies replace broad regex."
     }
   ]
 }

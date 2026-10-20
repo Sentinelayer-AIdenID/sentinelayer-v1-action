@@ -21,7 +21,7 @@ def _count(value) -> bool:
 def estimate_usage(provider: str, model: str, usage: dict | None) -> dict:
     usage = usage or {}
     record = {
-        "provider": provider, "model": model, "kind": "estimated_not_billed",
+        "provider": provider, "model": model if re.fullmatch(r"(?:gpt-|jev-)[a-zA-Z0-9.-]{1,100}", model) else "unrecognized", "kind": "estimated_not_billed",
         "price_date": PRICE_DATE,
         "price_source": JEV_SOURCE if provider == "typesafe" else OPENAI_SOURCE,
         "input_tokens": usage.get("input_tokens"),

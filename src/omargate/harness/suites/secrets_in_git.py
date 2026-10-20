@@ -1,12 +1,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
+import re
 from typing import Dict, List, Optional
 
 from ...analyze.deterministic.pattern_scanner import Finding
 from ...analyze.deterministic.secret_scanner import scan_for_secrets
+from ...analyze.deterministic.eng_quality_helpers import is_test_file
 from ..runner import SecuritySuite, run_command
+
+
+# One reviewed synthetic value used by redaction/TypeSafe privacy regression
+# fixtures. This never exempts another key, production source or an entire test
+# directory. Keep it visible as P4, and keep mixed real/fixture lines blocking.
+_SYNTHETIC_AWS_FIXTURE_DIGESTS = frozenset({
+    "743554670c6065b3f7f13ac4f07e392f977b3556ceb7457411633c454bcbece8",
+})
+
+
+def _known_synthetic_fixture(finding: Finding, source_lines: list[str]) -> bool:
+    if finding.pattern_id != "SEC-004" or not is_test_file(finding.file_path):
+        return False
+    if not 1 <= finding.line_start <= len(source_lines):
+        return False
+    values = re.findall(r"AKIA[0-9A-Z]{16}", source_lines[finding.line_start - 1])
+    return bool(values) and all(hashlib.sha256(value.encode()).hexdigest() in _SYNTHETIC_AWS_FIXTURE_DIGESTS for value in values)
 
 
 def _is_diff_path_line(line: str) -> Optional[str]:
@@ -104,6 +124,9 @@ class SecretsInGitSuite(SecuritySuite):
                         severity = f.severity
                         confidence = f.confidence
                         message = f"{f.message} (found in git history)"
+                        if _known_synthetic_fixture(f, added_lines):
+                            severity = "P4"
+                            message = "Reviewed synthetic secret fixture in test history (advisory)"
 
                         # Historical entropy findings are high-noise; keep as advisory only.
                         if f.pattern_id == "SEC-ENTROPY":

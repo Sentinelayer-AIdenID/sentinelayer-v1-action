@@ -5,9 +5,66 @@ from dataclasses import dataclass
 import io
 import re
 import tokenize
-
 from .pattern_scanner import _truncate_snippet
 
+
+def bounded_python_deadline_loops(content: str) -> set[int]:
+    """Recognize a narrow, dominating monotonic deadline/exit pattern.
+
+    Unknown Python or a deadline reset/early continue stays unclassified. This
+    avoids treating arbitrary appearances of the word 'deadline' as a bound.
+    """
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, RecursionError):
+        return set()
+    constants = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            if isinstance(node.value, ast.Constant) and type(node.value.value) in {int, float} and 0 < node.value.value < 86400:
+                constants[node.targets[0].id] = node.value.value
+
+    def clock(node):
+        if isinstance(node, ast.Call) and not node.args and not node.keywords and isinstance(node.func, ast.Attribute):
+            if isinstance(node.func.value, ast.Name) and node.func.value.id == "time" and node.func.attr in {"monotonic", "perf_counter"}:
+                return node.func.attr
+        return None
+
+    bounded = set()
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        deadlines = {}
+        for statement in function.body:
+            if isinstance(statement, ast.Assign) and len(statement.targets) == 1 and isinstance(statement.targets[0], ast.Name):
+                name = statement.targets[0].id
+                deadlines.pop(name, None)
+                value = statement.value
+                if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add) and clock(value.left):
+                    timeout = value.right.value if isinstance(value.right, ast.Constant) else constants.get(value.right.id) if isinstance(value.right, ast.Name) else None
+                    if type(timeout) in {int, float} and 0 < timeout < 86400:
+                        deadlines[name] = clock(value.left)
+                continue
+            if not isinstance(statement, ast.While) or not isinstance(statement.test, ast.Constant) or statement.test.value is not True:
+                # A conditional reassignment does not establish a dominating bound.
+                for part in ast.walk(statement):
+                    if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Store):
+                        deadlines.pop(part.id, None)
+                continue
+            writes = {part.id for part in ast.walk(statement) if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Store)}
+            for guard in statement.body:
+                if any(isinstance(part, ast.Continue) for part in ast.walk(guard)):
+                    break
+                if not isinstance(guard, ast.If) or not isinstance(guard.test, ast.Compare):
+                    continue
+                condition = guard.test
+                if len(condition.ops) != 1 or not isinstance(condition.ops[0], (ast.Gt, ast.GtE)):
+                    continue
+                target = condition.comparators[0]
+                if isinstance(target, ast.Name) and target.id not in writes and deadlines.get(target.id) == clock(condition.left) and clock(condition.left):
+                    if any(isinstance(exit_node, (ast.Return, ast.Raise, ast.Break)) for exit_node in guard.body):
+                        bounded.add(statement.lineno)
+    return bounded
 
 @dataclass(frozen=True)
 class PythonHttpxCall:
@@ -171,10 +228,10 @@ _NON_CODE_TOKEN_TYPES = frozenset(
 
 
 def is_test_file(path: str) -> bool:
-    normalized = path.replace("\\", "/").lower()
+    normalized = "/" + path.replace("\\", "/").lower().lstrip("/")
     if "/tests/" in normalized or "/test/" in normalized or "__tests__" in normalized:
         return True
-    return bool(re.search(r"\.(test|spec)\.[a-z0-9]+$", normalized))
+    return bool(re.search(r"\.(test|spec)\.[a-z0-9]+$|/test_[^/]+\.py$", normalized))
 
 
 def index_to_line(content: str, idx: int) -> int:

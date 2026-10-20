@@ -721,6 +721,11 @@ async def async_main() -> int:
                 fallback_provider=provider_used if fallback_used else None,
                 fallback_model=model_used if fallback_used else None,
             )
+            if isinstance(analysis.llm_usage.get("cost_ledger"), dict):
+                collector.review_cost_ledger = analysis.llm_usage["cost_ledger"]
+                # Legacy numeric telemetry is the known subtotal. The canonical
+                # nullable total and partial status persist alongside it.
+                collector.estimated_cost_usd = collector.review_cost_ledger["known_estimated_usd"]
 
         ingest_stats = analysis.ingest_stats or {}
         collector.files_scanned = int(

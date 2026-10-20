@@ -550,10 +550,19 @@ def _load_pinned_requirements(
     except (OSError, UnicodeError):
         return None
     dependencies: dict[str, str] = {}
+    pending = ""
     for raw_line in content.splitlines():
         line = raw_line.split("#", 1)[0].strip()
         if not line:
             continue
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+        line, pending = pending + line, ""
+        parts = line.split()
+        if any(re.fullmatch(r"--hash=sha256:[a-fA-F0-9]{64}", flag) is None for flag in parts[1:]):
+            return None
+        line = parts[0]
         match = _PINNED_REQUIREMENT_RE.fullmatch(line)
         if match is None:
             return None
@@ -565,9 +574,52 @@ def _load_pinned_requirements(
         if name in dependencies:
             return None
         dependencies[name] = version
-    if not dependencies:
+    if pending or not dependencies:
         return None
     return frozenset(dependencies.items())
+
+
+def _tool_only_pyproject(path: Path) -> bool:
+    """Only known static-tool configuration is outside dependency declarations."""
+    try:
+        raw = path.read_bytes()
+        if len(raw) > _MAX_REQUIREMENTS_BYTES:
+            return False
+        value = tomllib.loads(raw.decode("utf-8", errors="strict"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        return False
+    tools = value.get("tool")
+    allowed = {"pytest", "ruff", "mypy", "black", "coverage", "isort", "bandit", "pyright", "pylint"}
+    return set(value) == {"tool"} and isinstance(tools, dict) and bool(tools) and set(tools) <= allowed
+
+
+def _prepare_python_pins(root: Path, manifests: tuple[Path, ...], scratch: Path) -> tuple[frozenset[tuple[str, str]] | None, str | None]:
+    """Snapshot and audit the union of declared pins; never install target code."""
+    dependencies: dict[str, str] = {}
+    for index, source in enumerate(manifests):
+        if source.name != "pyproject.toml" and not re.fullmatch(r"requirements(?:[-.][A-Za-z0-9_.-]+)?\.txt", source.name):
+            return None, "unsupported_pip_input"
+        copied = scratch / f"source-{index}.txt"
+        if not _copy_safe_project_file(root, source, copied, max_bytes=_MAX_REQUIREMENTS_BYTES):
+            return None, "unsafe_pip_input"
+        if source.name == "pyproject.toml":
+            if not _tool_only_pyproject(copied):
+                return None, "unsupported_pip_input"
+            continue
+        parsed = _load_pinned_requirements(scratch, copied)
+        if parsed is None:
+            return None, "unsafe_pip_input"
+        for name, version in parsed:
+            if name in dependencies and dependencies[name] != version:
+                return None, "unsupported_pip_input"
+            dependencies[name] = version
+    if not dependencies:
+        return None, "unsupported_pip_input"
+    (scratch / "requirements.txt").write_text(
+        "".join(f"{name}=={version}\n" for name, version in sorted(dependencies.items())),
+        encoding="utf-8",
+    )
+    return frozenset(dependencies.items()), None
 
 
 def _path_declared(path: Path) -> bool:
@@ -1124,12 +1176,6 @@ class DepAuditSuite(SecuritySuite):
             return _outcome_finding(outcome), outcome
         assert discovery.root is not None
         root = discovery.root
-        requirements = root / "requirements.txt"
-        if discovery.paths_for("pip") != (requirements,):
-            outcome = DependencyAuditOutcome.indeterminate(
-                "pip", "unsupported_pip_input"
-            )
-            return _outcome_finding(outcome), outcome
         if _has_pip_routing_configuration(root):
             outcome = DependencyAuditOutcome.indeterminate(
                 "pip", "unsupported_pip_input"
@@ -1144,23 +1190,14 @@ class DepAuditSuite(SecuritySuite):
                     outcome = DependencyAuditOutcome.indeterminate(
                         "pip", "unsafe_working_directory"
                     )
-                elif not _copy_safe_project_file(
-                    project_root,
-                    requirements,
-                    audit_cwd / "requirements.txt",
-                    max_bytes=_MAX_REQUIREMENTS_BYTES,
-                ):
-                    outcome = DependencyAuditOutcome.indeterminate(
-                        "pip", "unsafe_pip_input"
-                    )
                 else:
-                    audit_requirements = audit_cwd / "requirements.txt"
-                    expected_dependencies = _load_pinned_requirements(
-                        audit_cwd, audit_requirements
+                    expected_dependencies, input_error = _prepare_python_pins(
+                        project_root, discovery.paths_for("pip"), audit_cwd,
                     )
+                    audit_requirements = audit_cwd / "requirements.txt"
                     if expected_dependencies is None:
                         outcome = DependencyAuditOutcome.indeterminate(
-                            "pip", "unsafe_pip_input"
+                            "pip", input_error or "unsafe_pip_input"
                         )
                     else:
                         command = [

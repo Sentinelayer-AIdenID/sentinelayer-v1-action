@@ -87,7 +87,7 @@ class LLMClient:
         if self._client is None:
             from openai import AsyncOpenAI
 
-            self._client = AsyncOpenAI(api_key=self.api_key)
+            self._client = AsyncOpenAI(api_key=self.api_key, **({"max_retries": 0} if self.reasoning_effort else {}))
         return self._client
 
     def _get_provider(self, provider_name: str):
@@ -505,7 +505,8 @@ class LLMClient:
                     return LLMResponse(
                         content=content,
                         usage=usage,
-                        success=True,
+                        success=getattr(response, "completed", True),
+                        error=None if getattr(response, "completed", True) else "Provider response did not complete",
                     )
             except asyncio.TimeoutError:
                 last_error = f"Timeout after {self.timeout}s"

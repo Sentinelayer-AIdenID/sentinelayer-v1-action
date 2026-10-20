@@ -45,6 +45,7 @@ from .llm.response_parser import ParsedFinding
 from .typesafe_client import TypeSafeClient, TypeSafeError
 from .review_cascade import DEEP, MID, ReviewRoute, choose_route, excellence_coverage, triage_questions, response_model_matches
 from .review_costs import cost_ledger, estimate_usage
+from .deterministic.workflow_scanner import scan_workflow_files
 from .typesafe_review import (
     TypedReview,
     TypeSafeReviewIncomplete,
@@ -1369,6 +1370,9 @@ class AnalysisOrchestrator:
     def _run_deterministic_scans(self, ingest: dict) -> List[dict]:
         """Run all deterministic scanners."""
         findings: List[dict] = []
+        findings.extend(self._finding_to_dict(f) for f in scan_workflow_files(
+            ingest.get("files", []), self.repo_root,
+        ))
 
         pattern_findings = self.pattern_scanner.scan_files(
             ingest.get("files", []),

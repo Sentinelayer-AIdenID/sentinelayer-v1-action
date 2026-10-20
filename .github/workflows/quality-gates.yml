@@ -16,7 +16,7 @@ jobs:
       PYTHONPATH: src
       RUFF_VERSION: "0.15.0"
       MYPY_VERSION: "1.18.2"
-      PYTEST_VERSION: "8.4.2"
+      PYTEST_VERSION: "9.0.3"
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

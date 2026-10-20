@@ -29,7 +29,7 @@ class OpenAIProvider(LLMProvider):
         if self._client is None:
             from openai import AsyncOpenAI
 
-            self._client = AsyncOpenAI(api_key=self.api_key)
+            self._client = AsyncOpenAI(api_key=self.api_key, **({"max_retries": 0} if self.reasoning_effort else {}))
         return self._client
 
     async def call(
@@ -66,6 +66,7 @@ class OpenAIProvider(LLMProvider):
             output_tokens=output_tokens,
             model=getattr(response, "model", None) or model,
             raw_usage=usage.model_dump() if hasattr(usage, "model_dump") else None,
+            completed=getattr(response, "status", "completed") == "completed",
         )
 
     def estimate_cost(self, model: str, tokens_in: int, tokens_out: int) -> float:

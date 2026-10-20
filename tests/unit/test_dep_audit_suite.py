@@ -759,7 +759,7 @@ async def test_python_manifest_without_supported_pinned_input_fails_closed(
     assert finding is not None
     assert finding.id == "HARNESS-PIP-AUDIT-INCOMPLETE"
     assert finding.severity == "P0"
-    assert outcome.reason_code == "unsupported_pip_input"
+    assert outcome.reason_code == ("unsafe_pip_input" if manifest == "requirements-prod.txt" else "unsupported_pip_input")
     assert "PRIVATE_" not in json.dumps(asdict(finding), sort_keys=True)
 
 

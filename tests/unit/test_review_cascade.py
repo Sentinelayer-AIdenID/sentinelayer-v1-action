@@ -187,3 +187,26 @@ async def test_diff_truncation_cannot_generate_clean_review(configured, monkeypa
         changed_files=[], review_route=LOW)
     assert not result.success and result.failure_class == "cascade_context_incomplete"
     response.assert_not_awaited()
+
+
+async def test_incomplete_openai_response_keeps_cost_but_cannot_pass():
+    from omargate.analyze.llm.llm_client import LLMClient
+    usage = SimpleNamespace(input_tokens=10, output_tokens=20, model_dump=lambda: {"input_tokens": 10, "output_tokens": 20})
+    create = AsyncMock(return_value=SimpleNamespace(usage=usage, status="incomplete",
+        output_text='{"no_findings":true}', model="gpt-6-luna"))
+    client = LLMClient("test-only", primary_model="gpt-6-luna", fallback_model="gpt-6-luna",
+                       reasoning_effort="max", allow_fallback=False, max_retries=1)
+    client._client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    result = await client.analyze("review", "source")
+    assert not result.success and result.usage.raw_usage["input_tokens"] == 10
+    create.assert_awaited_once()
+
+
+def test_cascade_disables_hidden_sdk_retries(monkeypatch):
+    from omargate.analyze.llm.llm_client import LLMClient
+    import openai
+    received = []
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kwargs: received.append(kwargs) or object())
+    client = LLMClient("test-only", reasoning_effort="max")
+    assert client.client is not None
+    assert received == [{"api_key": "test-only", "max_retries": 0}]
