@@ -72,6 +72,7 @@ def write_step_summary(
             "P1": gate_result.counts.p1,
             "P2": gate_result.counts.p2,
             "P3": gate_result.counts.p3,
+            "P4": gate_result.counts.p4,
         }
 
     severity_gate = str(summary.get("severity_gate") or "P1").strip().upper() if summary else "P1"
@@ -102,8 +103,12 @@ def write_step_summary(
         f"| P1 (High) | {format_int(counts.get('P1', 0))} | {'Yes' if 'P1' in blocking else 'No'} |",
         f"| P2 (Medium) | {format_int(counts.get('P2', 0))} | {'Yes' if 'P2' in blocking else 'No'} |",
         f"| P3 (Low) | {format_int(counts.get('P3', 0))} | No |",
+        f"| P4 (Informational) | {format_int(counts.get('P4', 0))} | No |",
         "",
     ]
+
+    from ..analyze.review_costs import render_cost_ledger
+    md.extend(render_cost_ledger((summary.get("llm_usage") or {}).get("cost_ledger")))
 
     resolved_synopsis = (codebase_synopsis or "").strip()
     if not resolved_synopsis and codebase_snapshot:
@@ -115,7 +120,7 @@ def write_step_summary(
     if findings:
         md.append("### Top Findings")
         md.append("")
-        severity_order = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+        severity_order = {"P0": 0, "P1": 1, "P2": 2, "P3": 3, "P4": 4}
         top = sorted(
             (f for f in findings if isinstance(f, dict)),
             key=lambda f: (

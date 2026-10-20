@@ -10,6 +10,7 @@ class ProviderResponse:
     input_tokens: int
     output_tokens: int
     model: str
+    raw_usage: dict | None = None
 
 
 class LLMProvider(ABC):

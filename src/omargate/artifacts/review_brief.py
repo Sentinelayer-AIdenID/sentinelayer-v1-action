@@ -18,7 +18,7 @@ CATEGORY_ACTIONS = {
     "infrastructure": "Review CI/CD and infrastructure configs",
 }
 
-_SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+_SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3, "P4": 4}
 
 
 def generate_review_brief(
@@ -259,7 +259,7 @@ def _files_scanned(ingest: dict) -> int:
 
 
 def _count_by_severity(findings: Iterable[dict]) -> Dict[str, int]:
-    counts = {"P0": 0, "P1": 0, "P2": 0, "P3": 0}
+    counts = {"P0": 0, "P1": 0, "P2": 0, "P3": 0, "P4": 0}
     for finding in findings:
         sev = str(finding.get("severity", "")).upper()
         if sev in counts:
@@ -275,6 +275,7 @@ def _format_summary_table(counts: Dict[str, int]) -> List[str]:
         f"| 🟠 P1 (High) | {counts.get('P1', 0)} |",
         f"| 🟡 P2 (Medium) | {counts.get('P2', 0)} |",
         f"| ⚪ P3 (Low) | {counts.get('P3', 0)} |",
+        f"| ℹ️ P4 (Informational) | {counts.get('P4', 0)} |",
     ]
 
 
@@ -440,7 +441,7 @@ def _issue_summary(findings: List[dict]) -> str:
     counts = _count_by_severity(findings)
     parts = [
         f"{counts[severity]} {severity}"
-        for severity in ("P0", "P1", "P2", "P3")
+        for severity in ("P0", "P1", "P2", "P3", "P4")
         if counts.get(severity)
     ]
     return " • ".join(parts) if parts else "0"

@@ -29,6 +29,7 @@ class LLMUsage:
     provider: str = "openai"
     route: str = "byo"
     fallback_chain: Optional[str] = None
+    raw_usage: Optional[dict] = None
 
 
 @dataclass
@@ -57,6 +58,8 @@ class LLMClient:
         managed_capacity_fallback: bool = False,
         sentinelayer_token: str = "",
         managed_api_url: str = "https://api.sentinelayer.com",
+        reasoning_effort: str | None = None,
+        allow_fallback: bool = True,
     ) -> None:
         # Back-compat: api_key is the OpenAI key used for OpenAI calls and fallback.
         self.api_key = api_key
@@ -72,6 +75,8 @@ class LLMClient:
         self.managed_capacity_fallback = managed_capacity_fallback
         self.sentinelayer_token = sentinelayer_token
         self.managed_api_url = managed_api_url
+        self.reasoning_effort = reasoning_effort
+        self.allow_fallback = allow_fallback
         self._client = None
         self._providers: dict[str, object] = {}
         self._managed_oidc_token: Optional[str] = None
@@ -93,6 +98,7 @@ class LLMClient:
             provider = OpenAIProvider(
                 api_key=self.api_key,
                 client_getter=lambda: self.client,
+                reasoning_effort=self.reasoning_effort,
             )
         elif provider_name == "anthropic":
             provider = AnthropicProvider(api_key=self.anthropic_api_key)
@@ -384,7 +390,7 @@ class LLMClient:
             user_content,
             max_tokens,
         )
-        if primary_response.success:
+        if primary_response.success or not self.allow_fallback:
             return primary_response
 
         fallback_response = await self._call_with_retry(
@@ -493,6 +499,7 @@ class LLMClient:
                         ),
                         latency_ms=latency_ms,
                         provider=provider_name,
+                        raw_usage=getattr(response, "raw_usage", None),
                     )
                     content = getattr(response, "content", "") or ""
                     return LLMResponse(

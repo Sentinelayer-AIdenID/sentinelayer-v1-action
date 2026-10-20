@@ -16,10 +16,11 @@ class _OpenAIUsage:
 class OpenAIProvider(LLMProvider):
     """OpenAI Responses API provider."""
 
-    def __init__(self, api_key: str, *, client_getter: Optional[Callable[[], Any]] = None) -> None:
+    def __init__(self, api_key: str, *, client_getter: Optional[Callable[[], Any]] = None, reasoning_effort: str | None = None) -> None:
         self.api_key = api_key
         self._client_getter = client_getter
         self._client = None
+        self.reasoning_effort = reasoning_effort
 
     @property
     def client(self):
@@ -47,7 +48,9 @@ class OpenAIProvider(LLMProvider):
         )
         # Use the reasoning model's API defaults. Sampling controls are optional
         # and the funded Codex writer does not require a sampling override.
-        if model != "gpt-5.3-codex":
+        if self.reasoning_effort:
+            request["reasoning"] = {"effort": self.reasoning_effort}
+        elif model != "gpt-5.3-codex" and not model.startswith("gpt-6"):
             request["temperature"] = temperature
         response = await asyncio.wait_for(
             self.client.responses.create(**request),
@@ -62,9 +65,14 @@ class OpenAIProvider(LLMProvider):
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             model=getattr(response, "model", None) or model,
+            raw_usage=usage.model_dump() if hasattr(usage, "model_dump") else None,
         )
 
     def estimate_cost(self, model: str, tokens_in: int, tokens_out: int) -> float:
+        from ...review_costs import estimate_usage
+        current = estimate_usage("openai", model, {"input_tokens": tokens_in, "output_tokens": tokens_out})
+        if current["estimated_usd"] is not None:
+            return current["estimated_usd"]
         pricing = {
             "gpt-5.3-codex-spark": {"input": 0.00075, "output": 0.003},
             "gpt-5.3-codex": {"input": 0.00175, "output": 0.014},

@@ -291,7 +291,7 @@ async def review_inventory(
             for question in finding.question_ids
         ):
             raise TypeSafeReviewIncomplete("unbound_typed_finding")
-        if finding.severity not in {"P0", "P1", "P2", "P3"} or not all(
+        if finding.severity not in {"P0", "P1", "P2", "P3", "P4"} or not all(
             isinstance(value, str) and value.strip()
             for value in (finding.category, finding.message, finding.recommendation)
         ):

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal, Optional
 
-Severity = Literal["P0", "P1", "P2", "P3"]
+Severity = Literal["P0", "P1", "P2", "P3", "P4"]
 SeverityGate = Literal["P0", "P1", "P2", "none"]
 ScanMode = Literal["pr-diff", "deep", "nightly"]
 LLMFailurePolicy = Literal["block", "deterministic_only", "allow_with_warning"]
@@ -54,9 +54,10 @@ class Counts:
     p1: int = 0
     p2: int = 0
     p3: int = 0
+    p4: int = 0
 
     def total(self) -> int:
-        return self.p0 + self.p1 + self.p2 + self.p3
+        return self.p0 + self.p1 + self.p2 + self.p3 + self.p4
 
 @dataclass
 class GateConfig:

@@ -52,6 +52,11 @@ inputs:
     required: false
     default: '50'
 
+  review_routing:
+    description: 'Review routing policy: legacy or jev-cascade-v1 (requires TypeSafe and OpenAI keys)'
+    required: false
+    default: 'legacy'
+
   typesafe_fallback:
     description: 'Allow gpt-5.3-codex fallback when typed candidate review cannot complete. Transport success or zero candidates alone does not establish a complete review.'
     required: false
@@ -254,6 +259,9 @@ outputs:
   p2_count:
     description: 'Number of P2 findings'
     value: ${{ steps.omar.outputs.p2_count }}
+  p4_count:
+    description: 'Number of informational P4 findings'
+    value: ${{ steps.omar.outputs.p4_count }}
   p3_count:
     description: 'Number of P3 findings'
     value: ${{ steps.omar.outputs.p3_count }}
@@ -387,6 +395,7 @@ runs:
         INPUT_TYPESAFE_MODEL: ${{ inputs.typesafe_model }}
         INPUT_TYPESAFE_TIMEOUT: ${{ inputs.typesafe_timeout }}
         INPUT_TYPESAFE_MAX_CANDIDATES: ${{ inputs.typesafe_max_candidates }}
+        INPUT_REVIEW_ROUTING: ${{ inputs.review_routing }}
         INPUT_TYPESAFE_FALLBACK: ${{ inputs.typesafe_fallback }}
         INPUT_GITHUB_TOKEN: ${{ inputs.github_token || github.token }}
         INPUT_PR_NUMBER: ${{ inputs.pr_number }}

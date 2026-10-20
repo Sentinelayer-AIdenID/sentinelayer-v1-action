@@ -116,6 +116,8 @@ def _llm_display_cost(analysis) -> Optional[float]:
     if not analysis.llm_attempted and not analysis.llm_success:
         return 0.0
     usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
+    if isinstance(usage.get("cost_ledger"), dict):
+        return usage["cost_ledger"].get("estimated_total_usd")
     cost = usage.get("cost_usd")
     return float(cost) if cost is not None else None
 
@@ -178,6 +180,7 @@ def _short_circuit_with_gate_result(
                 "P1": gate_result.counts.p1,
                 "P2": gate_result.counts.p2,
                 "P3": gate_result.counts.p3,
+                "P4": gate_result.counts.p4,
             },
         },
         findings=[],
@@ -755,7 +758,7 @@ async def async_main() -> int:
                 write_findings_jsonl(findings_path, analysis.findings)
 
                 pack_counts = {
-                    key: analysis.counts[key] for key in ("P0", "P1", "P2", "P3")
+                    key: analysis.counts.get(key, 0) for key in ("P0", "P1", "P2", "P3", "P4")
                 }
                 fingerprint_count = sum(
                     1 for finding in analysis.findings if finding.get("fingerprint")
@@ -950,6 +953,7 @@ async def async_main() -> int:
                             dedupe_key=gate_result.dedupe_key or idem_key,
                             llm_model=llm_model_used,
                             actual_cost_usd=cost_usd,
+                            review_cost_ledger=(analysis.llm_usage or {}).get("cost_ledger"),
                             head_sha=ctx.head_sha,
                             server_url=server_url,
                             comment_tag=config.comment_tag,
@@ -983,6 +987,7 @@ async def async_main() -> int:
                             "P1": int(counts.get("P1", 0) or 0),
                             "P2": int(counts.get("P2", 0) or 0),
                             "P3": int(counts.get("P3", 0) or 0),
+                            "P4": int(counts.get("P4", 0) or 0),
                         },
                         separators=(",", ":"),
                         sort_keys=True,

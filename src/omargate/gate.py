@@ -77,6 +77,9 @@ def _validate_pack_summary(summary_path: Path) -> Tuple[bool, Optional[str], Opt
     missing_counts = [sev for sev in ("P0", "P1", "P2", "P3") if sev not in counts]
     if missing_counts:
         return False, f"FAIL-CLOSED: counts missing severities: {missing_counts}.", None
+    if any(type(counts.get(severity, 0)) is not int or counts.get(severity, 0) < 0
+           for severity in ("P0", "P1", "P2", "P3", "P4")):
+        return False, "FAIL-CLOSED: severity counts must be non-negative integers.", None
 
     findings_file = summary.get("findings_file")
     findings_path = summary_path.parent / findings_file
@@ -418,6 +421,7 @@ def evaluate_gate(run_dir: Path, config: GateConfig) -> GateResult:
         p1=int(summary.get("counts", {}).get("P1", 0)),
         p2=int(summary.get("counts", {}).get("P2", 0)),
         p3=int(summary.get("counts", {}).get("P3", 0)),
+        p4=int(summary.get("counts", {}).get("P4", 0)),
     )
     dedupe_key = summary.get("dedupe_key")
 

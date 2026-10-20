@@ -9,7 +9,7 @@ from ..formatting import humanize_duration_ms
 from ..ingest.codebase_snapshot import build_codebase_snapshot
 from ..redaction import sanitize_public_error, sanitize_untrusted_markdown_scalar
 
-SEVERITY_ICONS = {"P0": "🔴", "P1": "🟠", "P2": "🟡", "P3": "⚪"}
+SEVERITY_ICONS = {"P0": "🔴", "P1": "🟠", "P2": "🟡", "P3": "⚪", "P4": "ℹ️"}
 CATEGORY_ICONS = {
     "auth": "🔐",
     "payment": "💳",
@@ -106,6 +106,7 @@ def generate_audit_report(
             f"| {SEVERITY_ICONS['P1']} P1 | {counts.get('P1', 0)} | High - Action required before merge |",
             f"| {SEVERITY_ICONS['P2']} P2 | {counts.get('P2', 0)} | Medium - Should fix soon |",
             f"| {SEVERITY_ICONS['P3']} P3 | {counts.get('P3', 0)} | Low - Consider fixing |",
+            f"| {SEVERITY_ICONS['P4']} P4 | {counts.get('P4', 0)} | Informational - Advisory |",
             f"| **Total** | **{counts.get('total', 0)}** | |",
             "",
             "---",
@@ -186,7 +187,7 @@ def generate_audit_report(
     # Findings by Severity
     lines.extend(["## Findings Detail", ""])
 
-    for severity in ["P0", "P1", "P2", "P3"]:
+    for severity in ["P0", "P1", "P2", "P3", "P4"]:
         sev_findings = [f for f in findings if f.get("severity") == severity]
         if not sev_findings:
             continue
