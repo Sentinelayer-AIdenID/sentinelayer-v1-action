@@ -25,7 +25,8 @@ ledger in its findings metadata; the legacy numeric cost is only the known subto
 when the canonical total remains unknown.
 
 Repairing the input census exposed vulnerable declared package versions. The
-hash-locked runtime now uses aiohttp 3.14.4 and certifi 2026.10.19; development
+hash-locked runtime now uses aiohttp 3.14.4, its required yarl 1.25.1 dependency,
+and certifi 2026.10.19; development
 requirements and both native CI test jobs use pytest 9.0.3. A fresh public-metadata
 audit of all 65 declared pins reported zero advisories on 2026-10-20. This is a
 dated advisory result, not a guarantee about future disclosures or undeclared
