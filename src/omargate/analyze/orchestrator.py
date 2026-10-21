@@ -1029,6 +1029,7 @@ class AnalysisOrchestrator:
         inventory = None
         client = None
         source_verified = False
+        source_failure_reason = None
         triage_status = "source_scope_incomplete"
         try:
             inventory = build_inventory(
@@ -1044,6 +1045,9 @@ class AnalysisOrchestrator:
                 repo_root=self.repo_root, inventory=inventory, ingest=ingest,
                 diff_content=diff_content, deterministic_findings=deterministic_findings,
             ))
+            if any(hunk.get("source_redacted") for context in state["candidate_context"].values()
+                   for hunk in context.get("diff_hunks", [])):
+                raise TypeSafeReviewIncomplete("redacted_source")
             source_verified = True
             questions = triage_questions(self.config.review_policy)
             if len(json.dumps({"state": state, "questions": questions}).encode("utf-8")) > MAX_STATE_BYTES:
@@ -1057,18 +1061,24 @@ class AnalysisOrchestrator:
             verify_sources(self.repo_root, inventory)
             route = choose_route(self.config.review_policy, triage, paths=changed_files or [], findings=deterministic_findings)
             triage_status = "complete"
-        except Exception:
+        except Exception as exc:
             # Never expose source/provider exception bodies. A failed request may
             # have been billed, so its cost remains unknown rather than zero.
             if client is not None and client.attempted and not records:
                 records.append({**estimate_usage("typesafe", self.config.intent_model_pin.get_secret_value(),
                     client.observed_usage, intent_price_profile=self.config.intent_price_profile), "stage": "triage"})
             triage_status = "incomplete_requires_deep_review"
+            if not source_verified:
+                code = str(exc) if isinstance(exc, TypeSafeReviewIncomplete) else "source_scope_incomplete"
+                source_failure_reason = code if re.fullmatch(r"[a-z][a-z0-9_]{0,95}", code) else "source_scope_incomplete"
+                triage_status = "source_scope_incomplete"
 
         policy_findings, policy_assessment = await self._assess_cascade_policy(
             inventory=inventory if source_verified else None, ingest=ingest, diff_content=diff_content,
             deterministic_findings=deterministic_findings, records=records,
         )
+        if not source_verified:
+            policy_assessment.update(status="incomplete", reason_code=source_failure_reason)
         if not policy_assessment["complete"] or any(f.get("severity") in {"P0", "P1"} for f in policy_findings):
             route = DEEP
         elif route.tier == "low" and any(f.get("severity") == "P2" for f in policy_findings):
@@ -1096,7 +1106,8 @@ class AnalysisOrchestrator:
             except Exception:
                 result = self._llm_failure_result(
                     deterministic_findings=deterministic_findings, attempted=review_started,
-                    failure_class="cascade_review_failed",
+                    failure_class=("cascade_source_privacy_incomplete" if source_failure_reason == "redacted_source"
+                                   else "cascade_source_scope_incomplete" if not source_verified else "cascade_review_failed"),
                     public_error="Cascade review could not verify complete stable evidence",
                     usage=result.usage if result is not None else None,
                 )
@@ -1138,7 +1149,7 @@ class AnalysisOrchestrator:
                 result.findings = self._merge_findings(previous_findings, result.findings)
                 result.no_findings_reported = False
                 result.reported_finding_count = len(result.findings)
-            if not policy_assessment["complete"]:
+            if not policy_assessment["complete"] and source_verified:
                 result.success = False
                 result.output_valid = False
                 result.failure_class = "cascade_policy_incomplete"
@@ -1146,6 +1157,7 @@ class AnalysisOrchestrator:
             usage = dict(result.usage or {})
             usage["cost_ledger"] = cost_ledger(records)
             usage["review_routing"] = {"routes": routes, "triage_status": triage_status,
+                                       "source_failure_reason": source_failure_reason,
                                        "model": self.config.intent_model_reference,
                                        "answers": {(f"dimension-{list(self.config.review_policy.routing['domains']).index(key[4:]) + 1}" if key.startswith("gap_") else key):
                                                    value.as_dict() if hasattr(value, "as_dict") else value
@@ -1577,7 +1589,13 @@ class AnalysisOrchestrator:
                 failure_class="cascade_context_incomplete",
                 public_error="Generator context is incomplete; a clean verdict is unavailable",
             )
-        if review_route and contains_credential_material(context.content):
+        auxiliary_context = (
+            self.context_builder._build_quick_learn_context(quick_learn)
+            + (self.context_builder._build_spec_context_section(spec_context) if spec_context else "")
+            + self.context_builder._build_deterministic_context(context_findings)
+        ) if review_route else ""
+        if review_route and (contains_credential_material(auxiliary_context)
+                             or contains_credential_material(context.content, code_context=True)):
             return self._llm_failure_result(
                 deterministic_findings=deterministic_findings, attempted=False,
                 failure_class="cascade_source_privacy_incomplete",

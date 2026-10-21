@@ -495,7 +495,7 @@ The action sets these outputs (use in subsequent workflow steps via `${{ steps.<
 | `gate_status` | `passed`, `blocked`, `bypassed`, `needs_approval`, `error` |
 | `p0_count` / `p1_count` / `p2_count` / `p3_count` | Finding counts by severity |
 | `run_id` | Unique run identifier |
-| `estimated_cost_usd` | Actual-call token-rate USD estimate, or `unknown` for incomplete usage; not a bill. Inspect the cost ledger for each model and the known subtotal. |
+| `estimated_cost_usd` | With `intent-cascade-v1`, a token-rate estimate from observed model usage, or `unknown` for incomplete usage. Inspect its cost ledger for each model and the known subtotal. Legacy routing and pre-analysis rate-limit exits may report a PR-size forecast instead. Neither is a bill. |
 | `idempotency_key` | Idempotency key used for dedupe |
 | `findings_artifact` | Path to `FINDINGS.jsonl` |
 | `pack_summary_artifact` | Path to `PACK_SUMMARY.json` |

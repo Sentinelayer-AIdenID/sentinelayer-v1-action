@@ -203,6 +203,57 @@ def test_source_privacy_contract_invalidates_same_config_receipts(configured, mo
     assert module.review_config_digest(configured.config) != current
 
 
+def test_source_privacy_contract_does_not_stamp_legacy_routing_receipts(configured, monkeypatch):
+    import omargate.idempotency as module
+    legacy = configured.config.model_copy(update={"review_routing": "legacy"})
+    current = module.review_config_digest(legacy)
+    monkeypatch.setattr(module, "GENERATOR_SOURCE_BOUNDARY_VERSION", "another-cascade-contract")
+    assert module.review_config_digest(legacy) == current
+
+
+@pytest.mark.parametrize("failed_stage", ["triage", "source-policy"])
+async def test_orchestrator_keeps_validated_http_usage_when_answers_fail(configured, monkeypatch, failed_stage):
+    import httpx
+    original_client = httpx.AsyncClient
+    calls = []
+    observed = {"input_tokens": 1234, "output_tokens": 56}
+
+    def handler(request):
+        payload = json.loads(request.content)
+        stage = "triage" if "risk" in payload["questions"] else "source-policy"
+        calls.append(stage)
+        answers = {} if stage == failed_stage else {
+            name: answer.as_dict() if isinstance(answer, ChoiceAnswer) else {"type": "noul", "noul": answer}
+            for name, answer in triage().answers.items()
+        }
+        return httpx.Response(200, json={"model": payload["model"], "usage": observed, "answers": answers})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(transport=httpx.MockTransport(handler), **kwargs))
+    if failed_stage == "source-policy":
+        monkeypatch.setattr("omargate.analyze.orchestrator.review_inventory", real_review_inventory)
+    configured._run_llm_analysis = AsyncMock(return_value=generator_result(DEEP))
+    result = await run_review(configured)
+    assert calls == (["triage"] if failed_stage == "triage" else ["triage", "source-policy"])
+    record = next(row for row in result.usage["cost_ledger"]["calls"] if row["stage"] == failed_stage)
+    assert (record["input_tokens"], record["output_tokens"], record["status"]) == (1234, 56, "estimated")
+    assert record["estimated_usd"] == estimate_usage("typesafe", "model-under-test-1.13.0", observed,
+                                                   intent_price_profile=configured.config.intent_price_profile)["estimated_usd"]
+    if failed_stage == "source-policy":
+        assert not result.success and result.failure_class == "cascade_policy_incomplete"
+        assert result.usage["policy_assessment"]["reason_code"] == "typesafe_answers_invalid"
+
+
+async def test_unattempted_generator_refusal_has_no_fake_model_mismatch_or_cost(configured, monkeypatch):
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", AsyncMock(return_value=triage(sensitive=1)))
+    configured._run_llm_analysis = AsyncMock(return_value=LLMAnalysisResult(
+        [], False, None, None, attempted=False, failure_class="cascade_source_privacy_incomplete"))
+    result = await run_review(configured)
+    assert result.failure_class == "cascade_source_privacy_incomplete"
+    assert not result.attempted
+    assert all(row["provider"] == "typesafe" for row in result.usage["cost_ledger"]["calls"])
+    assert result.usage["review_routing"]["routes"][0]["identity_matches"] is False
+
+
 async def run_review(orchestrator, *, scan_mode="pr-diff", run_dir=None):
     return await orchestrator._run_cascade_analysis(ingest={"files": [{"path": "x.py"}]}, changed_files=["x.py"],
         scan_mode=scan_mode, deterministic_findings=[], quick_learn=None, spec_context=None,

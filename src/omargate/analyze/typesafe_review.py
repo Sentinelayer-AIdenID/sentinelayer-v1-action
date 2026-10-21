@@ -44,19 +44,19 @@ class ReviewCandidate:
     source_sha256: str
 
     def state(self) -> dict[str, Any]:
-        # Source redaction excludes complete secret-bearing lines before the
-        # general diagnostic redactor runs; raw evidence is never sent or logged.
+        # Source privacy is credential-only. Public-error identifier scrubbing
+        # must not alter ordinary source or its coverage/verification decision.
         source_safe, source_redacted = redact_secret_source(
             self.evidence, file_path=self.file_path
         )
-        safe = sanitize_public_error(source_safe)
+        safe = source_safe
         return {
             "candidate_id": self.candidate_id,
             "file_path": self.file_path,
             "line_start": self.line_start,
             "line_end": self.line_end,
             "evidence": safe,
-            "evidence_redacted": source_redacted or safe != self.evidence,
+            "evidence_redacted": source_redacted,
             "evidence_sha256": self.evidence_sha256,
             "source_sha256": self.source_sha256,
         }
@@ -136,7 +136,8 @@ def build_inventory(
     """Cover complete changed source files, without silently truncating a scope.
 
     Forty-line spans are bounded candidates, not claimed exact fault locations.
-    Broader scan modes and deleted/binary/oversize files use generator fallback.
+    Unsupported scopes and deleted/binary/oversize required files refuse review;
+    they cannot silently fall back to an incomplete generator context.
     """
     if scan_mode != "pr-diff" or not changed_files:
         raise TypeSafeReviewIncomplete("source_scope_unavailable")
