@@ -257,7 +257,7 @@ async def test_orchestrator_converts_harness_exception_to_exact_failure_evidence
     evidence = result.dependency_audit_evidence
 
     assert evidence is not None
-    assert evidence["schema_version"] == "1.1"
+    assert evidence["schema_version"] == "1.2"
     assert evidence["coverage_scope"] == {
         "npm": "package_lock_registry_graph",
         "pip": "declared_direct_pins",

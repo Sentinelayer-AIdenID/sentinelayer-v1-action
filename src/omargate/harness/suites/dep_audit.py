@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -175,6 +176,8 @@ class DependencyAuditOutcome:
 class DependencyAuditEvidence:
     outcomes: tuple[DependencyAuditOutcome, ...]
     enabled: bool = True
+    npm_projects: tuple[dict, ...] = ()
+    discovered_npm_manifests: tuple[str, ...] = ()
 
     @property
     def complete(self) -> bool:
@@ -196,6 +199,8 @@ class DependencyAuditEvidence:
             "complete": self.complete,
             "coverage_scope": dict(DEPENDENCY_AUDIT_COVERAGE_SCOPE),
             "outcomes": [outcome.to_dict() for outcome in self.outcomes],
+            "npm_projects": {"discovered_manifests": list(self.discovered_npm_manifests),
+                             "audits": list(self.npm_projects)},
         }
 
 
@@ -774,6 +779,20 @@ def _load_bounded_json_file(path: Path, max_bytes: int) -> object | None:
         return None
 
 
+def _npm_input_fingerprint(root: Path, path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        if (not _is_within(path.resolve(strict=True), root)
+                or not _is_safe_project_file(path.parent, path)
+                or path.stat().st_size > _MAX_NPM_INPUT_BYTES):
+            return None
+        raw = path.read_bytes()
+        return hashlib.sha256(raw).hexdigest() if len(raw) <= _MAX_NPM_INPUT_BYTES else None
+    except (OSError, RuntimeError):
+        return None
+
+
 def _dependency_mapping(
     payload: Mapping[str, object], key: str
 ) -> dict[str, str] | None:
@@ -1081,6 +1100,73 @@ class DepAuditSuite(SecuritySuite):
         self,
         root: Path,
         discovery: _ManifestDiscovery | None = None,
+        project_records: list[dict] | None = None,
+    ) -> tuple[Optional[Finding], DependencyAuditOutcome]:
+        """Audit every discovered independent npm project without executing it."""
+        discovery = discovery or _discover_manifests(root)
+        if not discovery.complete or discovery.root is None or not discovery.npm:
+            outcome = _layout_outcome(discovery, "npm")
+            assert outcome is not None
+            return _outcome_finding(outcome), outcome
+        if len(discovery.npm) > 32:
+            outcome = DependencyAuditOutcome.indeterminate("npm", "manifest_discovery_incomplete")
+            return _outcome_finding(outcome), outcome
+        root = discovery.root
+        records = project_records if project_records is not None else []
+        fingerprint = partial(_npm_input_fingerprint, root)
+        outcomes = []
+        for manifest in discovery.npm:
+            lock = next((path for path in (manifest.parent / "npm-shrinkwrap.json", manifest.parent / "package-lock.json")
+                         if _path_declared(path)), None)
+            manifest_hash, lock_hash = fingerprint(manifest), fingerprint(lock)
+            payload = _load_bounded_json_file(manifest, _MAX_NPM_INPUT_BYTES) if manifest_hash else None
+            empty = (isinstance(payload, dict)
+                     and not any(key in payload for key in ("workspaces", "bundleDependencies", "bundledDependencies"))
+                     and all(_dependency_mapping(payload, key) == {} for key in
+                             ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"))
+                     and payload.get("peerDependenciesMeta", {}) == {})
+            mode = "registry_graph"
+            if not isinstance(payload, dict):
+                outcome = DependencyAuditOutcome.indeterminate("npm", "unsafe_manifest")
+                mode = "incomplete"
+            elif lock is None and empty:
+                # No declared dependencies and no lock graph to audit. A lock,
+                # if present, must still be validated and audited normally.
+                outcome = DependencyAuditOutcome.clean("npm")
+                mode = "empty_declared_graph"
+            else:
+                _, outcome = await self._npm_audit_project(manifest.parent,
+                    _ManifestDiscovery(manifest.parent, True, (manifest,), (), ()))
+            unchanged = fingerprint(manifest) == manifest_hash and fingerprint(lock) == lock_hash
+            if outcome.state == "indeterminate":
+                mode = "incomplete"
+            records.append({"manifest_path": manifest.relative_to(root).as_posix(),
+                            "manifest_sha256": manifest_hash,
+                            "lockfile_path": lock.relative_to(root).as_posix() if lock else None,
+                            "lockfile_sha256": lock_hash, "mode": mode, "input_unchanged": unchanged,
+                            "outcome": outcome.to_dict()})
+            outcomes.append(outcome if unchanged else DependencyAuditOutcome.indeterminate("npm", "unsafe_manifest"))
+        after = _discover_manifests(root)
+        for row in records:
+            row["input_unchanged"] = (row["input_unchanged"]
+                and fingerprint(root / row["manifest_path"]) == row["manifest_sha256"]
+                and fingerprint(root / row["lockfile_path"] if row["lockfile_path"] else None) == row["lockfile_sha256"])
+        changed = any(not row["input_unchanged"] for row in records)
+        if changed:
+            outcome = DependencyAuditOutcome.indeterminate("npm", "unsafe_manifest")
+        elif not after.complete or after.npm != discovery.npm:
+            outcome = DependencyAuditOutcome.indeterminate("npm", "manifest_discovery_incomplete")
+        elif any(item.state == "indeterminate" for item in outcomes):
+            outcome = next(item for item in outcomes if item.state == "indeterminate")
+        else:
+            count = sum(item.vulnerability_count or 0 for item in outcomes)
+            outcome = DependencyAuditOutcome.vulnerable("npm", count) if count else DependencyAuditOutcome.clean("npm")
+        return _outcome_finding(outcome), outcome
+
+    async def _npm_audit_project(
+        self,
+        root: Path,
+        discovery: _ManifestDiscovery | None = None,
     ) -> tuple[Optional[Finding], DependencyAuditOutcome]:
         discovery = discovery or _discover_manifests(root)
         outcome = _layout_outcome(discovery, "npm")
@@ -1331,8 +1417,9 @@ class DepAuditSuite(SecuritySuite):
     async def run_with_evidence(self, project_root: str) -> DependencyAuditRun:
         root = Path(project_root)
         discovery = _discover_manifests(root)
+        npm_projects: list[dict] = []
         results = await asyncio.gather(
-            self._npm_audit(root, discovery),
+            self._npm_audit(root, discovery, npm_projects),
             self._pip_audit(root, discovery),
             self._cargo_audit(root, discovery),
             return_exceptions=True,
@@ -1354,7 +1441,9 @@ class DepAuditSuite(SecuritySuite):
             outcomes.append(outcome)
         return DependencyAuditRun(
             findings=findings,
-            evidence=DependencyAuditEvidence(tuple(outcomes)),
+            evidence=DependencyAuditEvidence(tuple(outcomes), npm_projects=tuple(npm_projects),
+                discovered_npm_manifests=tuple(path.relative_to(discovery.root).as_posix() for path in discovery.npm)
+                if discovery.root is not None else ()),
         )
 
     async def run(self, project_root: str) -> list[Finding]:

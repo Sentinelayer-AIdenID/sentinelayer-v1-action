@@ -69,8 +69,8 @@ def _valid_llm_evidence() -> dict:
 
 
 def _valid_dependency_audit_evidence() -> dict:
-    return {
-        "schema_version": "1.1",
+    evidence = {
+        "schema_version": DEPENDENCY_AUDIT_SCHEMA_VERSION,
         "enabled": True,
         "complete": True,
         "coverage_scope": {
@@ -102,6 +102,14 @@ def _valid_dependency_audit_evidence() -> dict:
             },
         ],
     }
+    # This fixture describes exactly one project, so its coherent global npm
+    # outcome is the same object. Tampering tests round-trip JSON before edits.
+    evidence["npm_projects"] = {"discovered_manifests": ["package.json"], "audits": [{
+        "manifest_path": "package.json", "manifest_sha256": "0" * 64,
+        "lockfile_path": "package-lock.json", "lockfile_sha256": "1" * 64,
+        "mode": "registry_graph", "input_unchanged": True, "outcome": evidence["outcomes"][0],
+    }]}
+    return evidence
 
 
 def _dependency_outcome(evidence: dict, ecosystem: str) -> dict:
@@ -172,7 +180,7 @@ def test_dependency_audit_indeterminate_reason_contract_is_fixed() -> None:
 
 
 def test_dependency_audit_coverage_contract_is_fixed() -> None:
-    assert DEPENDENCY_AUDIT_SCHEMA_VERSION == "1.1"
+    assert DEPENDENCY_AUDIT_SCHEMA_VERSION == "1.2"
     assert DEPENDENCY_AUDIT_COVERAGE_SCOPE == {
         "npm": "package_lock_registry_graph",
         "pip": "declared_direct_pins",

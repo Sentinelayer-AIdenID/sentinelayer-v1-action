@@ -66,8 +66,8 @@ from .utils import ensure_writable_dir, json_dumps
 ACTION_VERSION = "1.3.11"
 # Rotate this whenever a security-control contract changes so dedupe cannot
 # mirror a successful check produced under weaker semantics on the same head.
-ACTION_IDEMPOTENCY_VERSION = "2:dependency-audit-v1.1:private-policy:review-config:verified-model"
-DEPENDENCY_AUDIT_CONTRACT_VERSION = "dependency-audit-evidence-v1.1"
+ACTION_IDEMPOTENCY_VERSION = "3:dependency-audit-v1.2:project-coverage:private-policy:review-config:verified-model"
+DEPENDENCY_AUDIT_CONTRACT_VERSION = "dependency-audit-evidence-v1.2"
 CHECK_NAME_BASE = "Omar Gate"
 __all__ = [
     "main",
