@@ -283,12 +283,17 @@ docs/generated/**
 ### `run_harness` and dependency-audit evidence
 
 When `run_harness` is `true`, Omar Gate requires a complete, recognized audit result
-for each applicable ecosystem. Bounded no-follow discovery rejects nested manifests,
-symlink-ambiguous trees, and multi-project layouts as indeterminate rather than
-claiming that an ecosystem is absent.
+for each applicable ecosystem. Bounded no-follow discovery rejects symlink-ambiguous
+trees. Independent nested npm projects are audited individually; nested Python and
+Cargo layouts remain indeterminate rather than being claimed absent.
 
 npm requires `package.json` plus `package-lock.json` or `npm-shrinkwrap.json` at
-lockfile version 2 or 3. Workspaces, peer/peer-optional dependencies, linked packages,
+lockfile version 2 or 3 per project. A strict dependency-free manifest without a lock
+records an empty declared graph. Existing locks must still validate and be audited.
+The 32-project limit is checked before registry commands. Project input hashes are
+checked after every audit and again after the full set; changed inputs remain
+blocking while the earlier observed result is retained against its input hash.
+Workspaces, peer/peer-optional dependencies, linked packages,
 mixed registries, non-HTTPS sources, and credentialed or missing resolved URLs are
 unsupported. All packages
 must resolve through the exact canonical `https://registry.npmjs.org` origin. Custom
@@ -317,10 +322,15 @@ dependency count matches that copied lock. A separately provisioned, version-pin
 `cargo-audit` executable is required. The composite action does not install it, so an
 applicable Rust audit fails closed until the workflow provisions the reviewed version.
 
-Dependency-audit evidence schema `1.1` carries an exact coverage-scope map:
+Dependency-audit evidence schema `1.2` carries an exact coverage-scope map:
 `package_lock_registry_graph` for npm, `declared_direct_pins` for pip, and
 `cargo_lock_packages` for Cargo. The gate rejects missing, renamed, or additional
 scope entries before evaluating the finding-severity threshold.
+The required `npm_projects` object contains `discovered_manifests` and `audits`.
+Every declared manifest needs one project-local record with raw input hashes,
+review mode, stable-input flag and outcome. Missing, duplicate, escaping or
+contradictory records refuse a clean aggregate. Both idempotency contract tokens
+rotate with this schema, preventing replay of an older root-only audit receipt.
 
 Audit subprocesses use isolated home, config, cache, and temporary directories
 outside the scanned repository. They do not inherit provider credentials,
@@ -548,7 +558,14 @@ The repository also supplies a Docker image; it is not the current `runs.using` 
 
 Harness audit commands use an explicit environment allowlist and private home/config/cache/temp state from [`runner.py`](../src/omargate/harness/runner.py). Provider, GitHub/OIDC and `INPUT_*` credentials are excluded. Only validated credential-free proxy origins, bounded `NO_PROXY` entries and copies of CA material outside the scanned workspace may be forwarded. npm uses the canonical Node binary with copied validated inputs instead of repository `.npmrc` or a command wrapper; PATH/CA controls reject lexical and resolved workspace containment. These are configuration/process boundaries, not filesystem or network sandboxes. Live public advisory metadata egress and direct-only Python coverage are described under [`run_harness`](#run_harness-and-dependency-audit-evidence).
 
-Codex has a separate allowlist and receives the configured OpenAI/Codex credential and model for its review task. The dependency audit's schema 1.1 scope/outcome evidence and exact serialized audit finding identities are validated before required LLM evidence and the severity threshold. A valid clean outcome applies only to its declared scope; an environment filter or a missing finding alone is not completion evidence.
+Every nested npm project retains the original checkout root for process, PATH,
+CA and scratch isolation; its own directory is only the manifest/lock input
+location. Manifest discovery excludes only installed `node_modules` trees.
+Names such as `build`, `dist`, `vendor`, `target`, `venv` and cache names cannot
+hide application projects. If traversal exceeds its depth/entry bounds or cannot
+read required directories, coverage remains incomplete and the gate refuses.
+
+Codex has a separate allowlist and receives the configured OpenAI/Codex credential and model for its review task. The dependency audit's schema 1.2 project/scope/outcome evidence and exact serialized audit finding identities are validated before required LLM evidence and the severity threshold. A valid clean outcome applies only to its declared scope; an environment filter or a missing finding alone is not completion evidence.
 
 ## Data and Rendering Boundaries
 
