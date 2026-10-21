@@ -505,7 +505,7 @@ The action sets these outputs (use in subsequent workflow steps via `${{ steps.<
 | `gate_status` | `passed`, `blocked`, `bypassed`, `needs_approval`, `error` |
 | `p0_count` / `p1_count` / `p2_count` / `p3_count` | Finding counts by severity |
 | `run_id` | Unique run identifier |
-| `estimated_cost_usd` | Estimated LLM cost for this run |
+| `estimated_cost_usd` | Actual-call token-rate USD estimate, or `unknown` for incomplete usage; not a bill. Inspect the cost ledger for each model and the known subtotal. |
 | `idempotency_key` | Idempotency key used for dedupe |
 | `findings_artifact` | Path to `FINDINGS.jsonl` |
 | `pack_summary_artifact` | Path to `PACK_SUMMARY.json` |

@@ -1060,7 +1060,7 @@ class AnalysisOrchestrator:
             # have been billed, so its cost remains unknown rather than zero.
             if client is not None and client.attempted and not records:
                 records.append({**estimate_usage("typesafe", self.config.intent_model_pin.get_secret_value(),
-                    None, intent_price_profile=self.config.intent_price_profile), "stage": "triage"})
+                    client.observed_usage, intent_price_profile=self.config.intent_price_profile), "stage": "triage"})
             triage_status = "incomplete_requires_deep_review"
 
         policy_findings, policy_assessment = await self._assess_cascade_policy(
@@ -1102,7 +1102,7 @@ class AnalysisOrchestrator:
             if result.attempted:
                 records.append({**estimate_usage("openai", actual_model, raw_usage),
                                 "stage": "generator-" + route.tier, "effort": route.effort})
-            unexpected_model = not response_model_matches(actual_model, route.model)
+            unexpected_model = result.attempted and not response_model_matches(actual_model, route.model)
             if unexpected_model:
                 result = self._llm_failure_result(
                     deterministic_findings=deterministic_findings, attempted=True,
@@ -1111,7 +1111,7 @@ class AnalysisOrchestrator:
                     usage=result.usage,
                 )
             routes[-1].update(reported_model=(actual_model if response_model_matches(actual_model, route.model) else "unknown"),
-                              identity_matches=not unexpected_model, success=result.success)
+                              identity_matches=result.attempted and not unexpected_model, success=result.success)
             if result.success and result.attempted:
                 for finding in result.findings:
                     finding["model_source"] = actual_model
@@ -1203,11 +1203,11 @@ class AnalysisOrchestrator:
             return findings, assessment
         except Exception as exc:
             assessment["failure_class"] = type(exc).__name__
-            code = str(exc)
+            code = exc.reason_code if isinstance(exc, TypeSafeError) else str(exc)
             assessment["reason_code"] = code if re.fullmatch(r"[a-z][a-z0-9_]{0,95}", code) else "policy_assessment_failed"
             if client is not None and client.attempted and not recorded:
                 records.append({**estimate_usage("typesafe", self.config.intent_model_pin.get_secret_value(),
-                    None, intent_price_profile=self.config.intent_price_profile), "stage": "source-policy"})
+                    client.observed_usage, intent_price_profile=self.config.intent_price_profile), "stage": "source-policy"})
             return [], assessment
 
     async def _run_typesafe_analysis(
@@ -1542,9 +1542,21 @@ class AnalysisOrchestrator:
         review_route: Optional[ReviewRoute] = None,
     ) -> LLMAnalysisResult:
         """Run LLM analysis with fallback handling."""
+        context_ingest = ingest
+        context_findings = deterministic_findings
+        if review_route is not None and scan_mode == "pr-diff" and changed_files:
+            # Require every changed file, without importing unrelated whole-repo
+            # files that can exhaust this PR review's budget. Their native
+            # findings still remain in the global gate result.
+            required = set(changed_files)
+            context_ingest = {**ingest,
+                "files": [row for row in ingest.get("files", []) if row.get("path") in required],
+                "hotspots": {key: [path for path in paths if path in required]
+                             for key, paths in ingest.get("hotspots", {}).items()}}
+            context_findings = [row for row in deterministic_findings if row.get("file_path") in required]
         context = self.context_builder.build_context(
-            ingest=ingest,
-            deterministic_findings=deterministic_findings,
+            ingest=context_ingest,
+            deterministic_findings=context_findings,
             repo_root=self.repo_root,
             quick_learn=quick_learn,
             spec_context=spec_context,

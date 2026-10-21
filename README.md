@@ -271,7 +271,7 @@ Use these in subsequent workflow steps:
 | `gate_status` | `passed`, `blocked`, `bypassed`, or `error` |
 | `p0_count` / `p1_count` / `p2_count` / `p3_count` | Finding counts by severity |
 | `run_id` | Unique run identifier |
-| `estimated_cost_usd` | Estimated LLM cost for the run |
+| `estimated_cost_usd` | Actual-call token-rate USD estimate, or `unknown` when usage is incomplete; not a bill. The cost ledger retains separate model estimates and the known subtotal. |
 | `findings_artifact` | Path to findings JSONL |
 | `audit_report_artifact` | Path to `AUDIT_REPORT.md` |
 
