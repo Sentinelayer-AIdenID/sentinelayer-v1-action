@@ -77,3 +77,14 @@ unattempted, incomplete review with no invented provider cost; a sanitized subse
 cannot count as complete source coverage. Public project metadata alone does not
 trigger this credential check. The source-boundary contract participates in
 receipt identity so older same-head results cannot bypass the new boundary.
+
+Whole-source cascades also reserve a conservative token-rate envelope before
+each partition, including every possible low/mid/deep escalation and both intent
+requests. `max_review_estimate_usd` defaults to USD5 and is independent of
+`approval_mode`; zero refuses paid whole-source review. Actual reported usage
+replaces that partition's forecast. Unknown prior usage, an unknown price profile,
+or insufficient remaining budget stops further paid requests. The evidence keeps
+completed partitions, observed defects, actual-call estimates and explicit residual
+partition ids. Coverage remains incomplete and blocks the gate. Forecasts are
+recorded separately from provider usage and do not guarantee a provider bill or
+include non-token fees.

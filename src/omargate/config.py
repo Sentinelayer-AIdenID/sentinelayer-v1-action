@@ -153,6 +153,7 @@ class OmarGateConfig(BaseSettings):
     )
     max_input_tokens: conint(ge=0) = Field(default=100000)
     require_cost_confirmation: confloat(ge=0) = Field(default=5.00)
+    max_review_estimate_usd: confloat(ge=0, le=1000, allow_inf_nan=False) = Field(default=5.00)
     approval_mode: ApprovalMode = Field(default="pr_label")
     approval_label: str = Field(default="sentinelayer:approved")
 

@@ -45,7 +45,7 @@ from .llm.providers import detect_provider_from_model
 from .llm.response_parser import ParsedFinding
 from .typesafe_client import TypeSafeClient, TypeSafeError
 from .review_cascade import DEEP, MID, ReviewRoute, choose_route, excellence_coverage, triage_questions, response_model_matches
-from .review_costs import cost_ledger, estimate_usage
+from .review_costs import CASCADE_MAX_OUTPUT_TOKENS, cost_ledger, estimate_usage, partition_cost_reservation
 from .deterministic.workflow_scanner import scan_workflow_files
 from .typesafe_review import (
     TypedReview,
@@ -1197,6 +1197,7 @@ class AnalysisOrchestrator:
         requests = ()
         result = None
         reason = None
+        reservations = []
         try:
             census = ingest.get("stats", {})
             if any(census.get(key) for key in ("truncated", "too_large", "read_failures")):
@@ -1208,9 +1209,23 @@ class AnalysisOrchestrator:
                 max_candidates=self.config.typesafe_max_candidates,
                 max_generator_bytes=self.config.max_input_tokens)
             verify_source_scope(self.repo_root, scope)
+            system_prompt = self._generator_system_prompt(scan_mode, DEEP)
             for request in requests:
                 validate_scope_coverage(scope, requests)
                 verify_scope_partition(self.repo_root, scope, request.inventory)
+                ledger = cost_ledger(records)
+                if records and not ledger["complete"]:
+                    raise TypeSafeReviewIncomplete("prior_model_cost_unknown")
+                reservation = partition_cost_reservation(request.generator_context, system_prompt,
+                    intent_price_profile=self.config.intent_price_profile)
+                if reservation is None:
+                    raise TypeSafeReviewIncomplete("review_price_unknown")
+                from decimal import Decimal
+                committed = Decimal(str(ledger["known_estimated_usd"])) + Decimal(str(reservation))
+                if committed > Decimal(str(self.config.max_review_estimate_usd)):
+                    raise TypeSafeReviewIncomplete("review_estimate_budget_exceeded")
+                reservations.append({"partition_id": request.partition_id, "estimated_reserve_usd": reservation,
+                                     "known_estimated_before_usd": ledger["known_estimated_usd"]})
                 partition_dir = run_dir / "partitions" / request.partition_id if run_dir else None
                 result = await self._run_cascade_analysis(
                     ingest=ingest, changed_files=sorted(dict(request.inventory.source_hashes)),
@@ -1246,6 +1261,8 @@ class AnalysisOrchestrator:
                                    for r in requests],
             "residual_partition_ids": [r.partition_id for r in requests[len(completed):]],
             "cost_ledger": cost_ledger(records),
+            "estimate_budget": {"ceiling_usd": self.config.max_review_estimate_usd,
+                                "kind": "token_rate_forecast_not_billing_cap", "admissions": reservations},
         }
         if result is None:
             result = self._llm_failure_result(deterministic_findings=deterministic_findings,
@@ -1651,6 +1668,15 @@ class AnalysisOrchestrator:
                 pass
         return files
 
+    def _generator_system_prompt(self, scan_mode: str, review_route: Optional[ReviewRoute]) -> str:
+        prompt = self.prompt_loader.get_prompt(scan_mode=scan_mode)
+        if review_route:
+            private_policy = self.config.review_policy
+            dimensions = [criterion for _, criterion in private_policy.routing["domains"].values()]
+            prompt += ("\n" + private_policy.generator_instructions + "\nReview dimensions: "
+                       + json.dumps(dimensions) + "\nReport source defects; do not quote private configuration.")
+        return prompt
+
     async def _run_llm_analysis(
         self,
         ingest: dict,
@@ -1708,12 +1734,7 @@ class AnalysisOrchestrator:
                 failure_class="cascade_source_privacy_incomplete",
                 public_error="Generator source privacy verification is incomplete; review remains unknown",
             )
-        system_prompt = self.prompt_loader.get_prompt(scan_mode=scan_mode)
-        if review_route:
-            private_policy = self.config.review_policy
-            dimensions = [criterion for _, criterion in private_policy.routing["domains"].values()]
-            system_prompt += ("\n" + private_policy.generator_instructions + "\nReview dimensions: "
-                              + json.dumps(dimensions) + "\nReport source defects; do not quote private configuration.")
+        system_prompt = self._generator_system_prompt(scan_mode, review_route)
 
         client = LLMClient(
             api_key=self.config.openai_api_key.get_secret_value(),
@@ -1736,7 +1757,7 @@ class AnalysisOrchestrator:
         response = await client.analyze(
             system_prompt=system_prompt,
             user_content=context.content,
-            max_tokens=16384 if review_route else 4096,
+            max_tokens=CASCADE_MAX_OUTPUT_TOKENS if review_route else 4096,
         )
 
         if not response.success:
