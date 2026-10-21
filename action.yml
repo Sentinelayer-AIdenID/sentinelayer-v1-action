@@ -53,7 +53,7 @@ inputs:
     default: '50'
 
   review_routing:
-    description: 'Review routing policy: legacy or jev-cascade-v1 (requires TypeSafe and OpenAI keys)'
+    description: 'Review routing policy: legacy or intent-cascade-v1 (requires TypeSafe and OpenAI keys)'
     required: false
     default: 'legacy'
 

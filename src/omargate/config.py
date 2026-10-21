@@ -69,7 +69,7 @@ class OmarGateConfig(BaseSettings):
         default=True,
         description="Allow gpt-5.3-codex fallback when typed candidate review cannot complete",
     )
-    review_routing: Literal["legacy", "jev-cascade-v1"] = Field(default="legacy")
+    review_routing: Literal["legacy", "intent-cascade-v1"] = Field(default="legacy")
 
     # Codex CLI path (OpenAI-only); wiring added later.
     use_codex: bool = Field(default=True, description="Use Codex CLI for deep audit (falls back to API)")
@@ -184,11 +184,11 @@ class OmarGateConfig(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_review_routing(self) -> "OmarGateConfig":
-        if self.review_routing == "jev-cascade-v1":
+        if self.review_routing == "intent-cascade-v1":
             if self.llm_provider != "typesafe":
-                raise ValueError("jev-cascade-v1 requires llm_provider=typesafe")
+                raise ValueError("intent-cascade-v1 requires llm_provider=typesafe")
             if self.llm_failure_policy != "block":
-                raise ValueError("jev-cascade-v1 requires llm_failure_policy=block")
+                raise ValueError("intent-cascade-v1 requires llm_failure_policy=block")
         return self
 
     @field_validator("severity_gate", mode="before")
@@ -268,10 +268,10 @@ class OmarGateConfig(BaseSettings):
                 )
             if self.codex_only:
                 raise ValueError("codex_only cannot be true when llm_provider=typesafe")
-            if self.review_routing == "jev-cascade-v1":
+            if self.review_routing == "intent-cascade-v1":
                 for name in ("model", "model_fallback", "codex_model"):
                     if name in self.model_fields_set and getattr(self, name) not in {"", "gpt-6-sol"}:
-                        raise ValueError("jev-cascade-v1 owns model selection; remove model overrides")
+                        raise ValueError("intent-cascade-v1 owns model selection; remove model overrides")
                     object.__setattr__(self, name, "gpt-6-sol")
                 return self
             for name in ("model", "model_fallback", "codex_model"):

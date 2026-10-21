@@ -354,7 +354,7 @@ The "Verify LLM CLIs" step prints binary paths and versions. If a CLI fails to i
 | Secret | Scope | Where |
 |---|---|---|
 | `OPENAI_API_KEY` | OpenAI API + Codex CLI; fixed-verdict writer/generator with TypeSafe | Repo secret |
-| `TYPESAFE_API_KEY` | Pinned Jev candidate assessment | Repo secret |
+| `TYPESAFE_API_KEY` | Pinned intent model candidate assessment | Repo secret |
 | `ANTHROPIC_API_KEY` | Anthropic API | Repo secret |
 | `GOOGLE_API_KEY` | Google AI API | Repo secret |
 | `XAI_API_KEY` | xAI API | Repo secret |

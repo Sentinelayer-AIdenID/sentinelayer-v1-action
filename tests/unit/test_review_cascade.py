@@ -68,13 +68,13 @@ def test_actual_response_model_identity(actual, expected):
 
 
 def test_separate_costs_cache_and_unknowns():
-    jev = estimate_usage("typesafe", "jev-1.13.0", {"input_tokens": 1_000_000, "output_tokens": 1000})
+    intent = estimate_usage("typesafe", "jev-1.13.0", {"input_tokens": 1_000_000, "output_tokens": 1000})
     sol = estimate_usage("openai", "gpt-6.1-sol", {"input_tokens": 100000, "output_tokens": 10000,
         "input_tokens_details": {"cached_tokens": 20000}, "output_tokens_details": {"reasoning_tokens": 9000}})
-    assert jev["estimated_usd"] == .042
+    assert intent["estimated_usd"] == .042
     assert sol["estimated_usd"] == .262  # reasoning already part of output
-    assert cost_ledger([jev, sol])["estimated_total_usd"] == .304
-    assert cost_ledger([jev, estimate_usage("openai", "gpt-6-sol", None)])["estimated_total_usd"] is None
+    assert cost_ledger([intent, sol])["estimated_total_usd"] == .304
+    assert cost_ledger([intent, estimate_usage("openai", "gpt-6-sol", None)])["estimated_total_usd"] is None
     assert estimate_usage("openai", "unknown", {"input_tokens": 1, "output_tokens": 1})["estimated_usd"] is None
     assert estimate_usage("openai", "gpt-6-sol", {"input_tokens": True, "output_tokens": 1})["status"] == "usage_unknown"
     assert estimate_usage("openai", "gpt-6-sol", {"input_tokens": 2, "output_tokens": 1, "input_tokens_details": {"cached_tokens": 3}})["status"] == "usage_invalid"
@@ -99,7 +99,7 @@ def configured(tmp_path, monkeypatch):
             monkeypatch.delenv(key)
     monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
     config = OmarGateConfig(llm_provider="typesafe", typesafe_api_key="test-only", openai_api_key="test-only",
-                            review_routing="jev-cascade-v1", run_harness=False)
+                            review_routing="intent-cascade-v1", run_harness=False)
     assert config.model == "gpt-6-sol"
     (tmp_path / "x.py").write_text("value = 1\n")
     return AnalysisOrchestrator(config, OmarLogger("test-cascade"), tmp_path)
@@ -146,7 +146,7 @@ async def test_low_defect_escalates_and_later_clean_cannot_erase(configured, mon
     assert len(result.usage["cost_ledger"]["calls"]) == 3
 
 
-async def test_missing_scope_goes_direct_to_deep_and_no_fake_jev_cost(configured, monkeypatch):
+async def test_missing_scope_goes_direct_to_deep_and_no_fake_intent_cost(configured, monkeypatch):
     rate = AsyncMock(side_effect=AssertionError("must not call"))
     monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", rate)
     configured._run_llm_analysis = AsyncMock(return_value=generator_result(DEEP))
@@ -171,10 +171,10 @@ async def test_source_change_during_triage_fails_closed(configured, monkeypatch)
 
 def test_cascade_cannot_ignore_failures_or_override_tiers():
     with pytest.raises(ValidationError):
-        OmarGateConfig(review_routing="jev-cascade-v1")
+        OmarGateConfig(review_routing="intent-cascade-v1")
     with pytest.raises(ValidationError):
         OmarGateConfig(llm_provider="typesafe", typesafe_api_key="test-only", openai_api_key="test-only",
-                       review_routing="jev-cascade-v1", model="gpt-4.1-mini")
+                       review_routing="intent-cascade-v1", model="gpt-4.1-mini")
 
 
 async def test_diff_truncation_cannot_generate_clean_review(configured, monkeypatch):

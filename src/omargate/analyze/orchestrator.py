@@ -753,7 +753,7 @@ class AnalysisOrchestrator:
                     )
 
         typed_result: Optional[LLMAnalysisResult] = None
-        cascade = self.config.review_routing == "jev-cascade-v1"
+        cascade = self.config.review_routing == "intent-cascade-v1"
         if cascade and self.allow_llm:
             generator_result_recorded = True
             result = await self._run_cascade_analysis(
@@ -1018,7 +1018,7 @@ class AnalysisOrchestrator:
         spec_context: Optional[dict], diff_content: Optional[str],
         run_dir: Optional[Path],
     ) -> LLMAnalysisResult:
-        """One Jev triage and bounded generator review; no silent downgrade."""
+        """One intent model triage and bounded generator review; no silent downgrade."""
         from .typesafe_review import MAX_STATE_BYTES
 
         records: list[dict] = []

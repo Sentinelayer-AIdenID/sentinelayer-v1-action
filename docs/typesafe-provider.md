@@ -4,7 +4,7 @@ The full-engine action accepts `llm_provider: typesafe` for its typed candidate
 assessment path. Supply both `typesafe_api_key` and `openai_api_key` through GitHub
 secrets. TypeSafe assesses candidates; the OpenAI key funds the writer and fallback.
 Both keys are held as secret configuration values. `typesafe_model` defaults to the pinned
-`jev-1.13.0`; mutable aliases and incomplete version strings are rejected.
+`pinned provider version`; mutable aliases and incomplete version strings are rejected.
 
 The remaining inputs are `typesafe_timeout` (1–120 seconds, default 30),
 `typesafe_max_candidates` (1–200, default 50), and `typesafe_fallback` (default true).

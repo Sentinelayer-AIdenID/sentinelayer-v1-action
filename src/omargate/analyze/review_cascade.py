@@ -9,7 +9,7 @@ from typing import Any
 
 from .typesafe_client import ChoiceAnswer, TypeSafeResult, validate_answers
 
-POLICY_VERSION = "omargate.jev-cascade.v1"
+POLICY_VERSION = "omargate.intent-cascade.v1"
 CALIBRATION = "conservative-unvalidated-2026-10-20"
 
 # PlexAura Technical DD Protocol, AI-Era v1. Evidence coverage is separate from

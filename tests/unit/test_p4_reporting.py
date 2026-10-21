@@ -32,7 +32,7 @@ def test_p4_survives_parse_pack_gate_summary_and_download(tmp_path, monkeypatch)
     write_step_summary(result, json.loads(summary_path.read_text()), [finding], "p4-test", "test")
     text = html.unescape(output.read_text(encoding="utf-8"))
     assert "P4 (Informational) | 1 | No" in text
-    assert "typesafe / jev-1.13.0" in text and "openai / gpt-6-luna" in text
+    assert "typesafe / intent model" in text and "openai / gpt-6-luna" in text
     assert "unknown (partial usage)" in text and "not billed charges" in text
     (tmp_path / "REVIEW_ROUTING.json").write_text('{"test":true}')
     prepare_artifacts_for_upload(tmp_path, tmp_path / "download")
