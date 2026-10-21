@@ -24,7 +24,7 @@ from ..harness import HarnessRunner
 from ..logging import OmarLogger
 from ..package.fingerprint import add_fingerprints_to_findings
 from ..fix_plan import ensure_fix_plan
-from ..redaction import sanitize_public_error
+from ..redaction import contains_credential_material, sanitize_public_error
 from .codex import CodexPromptBuilder, CodexRunner
 from .deterministic import (
     ConfigScanner,
@@ -1028,6 +1028,7 @@ class AnalysisOrchestrator:
         triage = None
         inventory = None
         client = None
+        source_verified = False
         triage_status = "source_scope_incomplete"
         try:
             inventory = build_inventory(
@@ -1043,6 +1044,7 @@ class AnalysisOrchestrator:
                 repo_root=self.repo_root, inventory=inventory, ingest=ingest,
                 diff_content=diff_content, deterministic_findings=deterministic_findings,
             ))
+            source_verified = True
             questions = triage_questions(self.config.review_policy)
             if len(json.dumps({"state": state, "questions": questions}).encode("utf-8")) > MAX_STATE_BYTES:
                 raise TypeSafeReviewIncomplete("triage_budget_exceeded")
@@ -1064,7 +1066,7 @@ class AnalysisOrchestrator:
             triage_status = "incomplete_requires_deep_review"
 
         policy_findings, policy_assessment = await self._assess_cascade_policy(
-            inventory=inventory, ingest=ingest, diff_content=diff_content,
+            inventory=inventory if source_verified else None, ingest=ingest, diff_content=diff_content,
             deterministic_findings=deterministic_findings, records=records,
         )
         if not policy_assessment["complete"] or any(f.get("severity") in {"P0", "P1"} for f in policy_findings):
@@ -1078,6 +1080,8 @@ class AnalysisOrchestrator:
             review_started = False
             result = None
             try:
+                if not source_verified:
+                    raise TypeSafeReviewIncomplete("source_scope_incomplete")
                 if inventory is not None:
                     verify_sources(self.repo_root, inventory)
                 review_started = True
@@ -1572,6 +1576,12 @@ class AnalysisOrchestrator:
                 deterministic_findings=deterministic_findings, attempted=False,
                 failure_class="cascade_context_incomplete",
                 public_error="Generator context is incomplete; a clean verdict is unavailable",
+            )
+        if review_route and contains_credential_material(context.content):
+            return self._llm_failure_result(
+                deterministic_findings=deterministic_findings, attempted=False,
+                failure_class="cascade_source_privacy_incomplete",
+                public_error="Generator source privacy verification is incomplete; review remains unknown",
             )
         system_prompt = self.prompt_loader.get_prompt(scan_mode=scan_mode)
         if review_route:

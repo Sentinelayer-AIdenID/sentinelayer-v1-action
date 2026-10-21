@@ -118,6 +118,91 @@ def generator_result(route, findings=None, success=True):
         reported_finding_count=len(findings))
 
 
+@pytest.fixture
+def generator_transport(monkeypatch):
+    usage = SimpleNamespace(input_tokens=10, output_tokens=5,
+                            model_dump=lambda: {"input_tokens": 10, "output_tokens": 5})
+    create = AsyncMock(return_value=SimpleNamespace(
+        usage=usage, output_text='{"no_findings":true}', model=DEEP.model))
+    sdk = SimpleNamespace(responses=SimpleNamespace(create=create))
+    monkeypatch.setattr(OpenAIProvider, "client", property(lambda self: sdk))
+    return create
+
+
+async def test_rejected_changed_source_never_reaches_generator_sdk(configured, monkeypatch, generator_transport):
+    # Construct credential-shaped bytes at runtime; never publish key-shaped fixtures.
+    source = 'api_key = "' + 'sk' + '-' + 'A' * 32 + '"\n'
+    (configured.repo_root / "x.py").write_text(source)
+    rate = AsyncMock(side_effect=AssertionError("rejected source must not leave the runner"))
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", rate)
+    result = await configured._run_cascade_analysis(
+        ingest={"files": [{"path": "x.py"}]}, changed_files=["x.py"], scan_mode="pr-diff",
+        deterministic_findings=[], quick_learn=None, spec_context=None, run_dir=None,
+        diff_content="diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -0,0 +1 @@\n+" + source)
+    rate.assert_not_awaited()
+    generator_transport.assert_not_awaited()
+    assert not result.success
+    assert not result.attempted
+    assert not result.usage["cost_ledger"]["calls"]
+
+
+@pytest.mark.parametrize("auxiliary", ["readme", "spec", "finding"])
+@pytest.mark.parametrize("secret_kind", ["provider", "json", "url"])
+async def test_auxiliary_secret_never_reaches_generator_sdk(
+    configured, generator_transport, auxiliary, secret_kind,
+):
+    from omargate.ingest.quick_learn import QuickLearnSummary
+    secrets = {
+        "provider": 'sk' + '-' + 'A' * 32,
+        "json": '{"token": "' + 'Z' * 32 + '"}',
+        "url": "https://example.invalid/?access_token=" + 'Z' * 32,
+    }
+    material = secrets[secret_kind]
+    quick = QuickLearnSummary("Sample", "Project description", [], "", [], "README.md", material)
+    result = await configured._run_llm_analysis(
+        ingest={"files": [{"path": "x.py"}]},
+        deterministic_findings=[{"file_path": "x.py", "message": material, "severity": "P2",
+                                 "category": "fixture", "line_start": 1}]
+        if auxiliary == "finding" else [],
+        quick_learn=quick if auxiliary == "readme" else None,
+        spec_context={"security_rules": material} if auxiliary == "spec" else None,
+        scan_mode="pr-diff", diff_content="+value = 1\n", changed_files=["x.py"], review_route=DEEP)
+    generator_transport.assert_not_awaited()
+    assert not result.success and not result.attempted
+    assert result.failure_class == "cascade_source_privacy_incomplete"
+
+
+async def test_public_project_metadata_still_reaches_generator_sdk(configured, generator_transport):
+    from omargate.ingest.quick_learn import QuickLearnSummary
+    quick = QuickLearnSummary("PublicProject", "A public project", [], "", [], "README.md",
+                              "Project: PublicProject\nconsumer project: public-example\n")
+    await configured._run_llm_analysis(
+        ingest={"files": [{"path": "x.py"}]}, deterministic_findings=[], quick_learn=quick,
+        spec_context=None, scan_mode="pr-diff", diff_content="+value = 1\n",
+        changed_files=["x.py"], review_route=DEEP)
+    generator_transport.assert_awaited_once()
+    assert "Project: PublicProject" in generator_transport.call_args.kwargs["input"]
+
+
+async def test_verified_source_can_still_escalate_after_intent_transport_failure(
+    configured, monkeypatch, generator_transport,
+):
+    from omargate.analyze.typesafe_client import TypeSafeError
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate",
+                        AsyncMock(side_effect=TypeSafeError("request_failed")))
+    result = await run_review(configured)
+    generator_transport.assert_awaited_once()
+    assert generator_transport.call_args.kwargs["model"] == DEEP.model
+    assert result.attempted
+
+
+def test_source_privacy_contract_invalidates_same_config_receipts(configured, monkeypatch):
+    import omargate.idempotency as module
+    current = module.review_config_digest(configured.config)
+    monkeypatch.setattr(module, "GENERATOR_SOURCE_BOUNDARY_VERSION", "pre-source-privacy")
+    assert module.review_config_digest(configured.config) != current
+
+
 async def run_review(orchestrator, *, scan_mode="pr-diff", run_dir=None):
     return await orchestrator._run_cascade_analysis(ingest={"files": [{"path": "x.py"}]}, changed_files=["x.py"],
         scan_mode=scan_mode, deterministic_findings=[], quick_learn=None, spec_context=None,
@@ -159,15 +244,16 @@ async def test_low_defect_escalates_and_later_clean_cannot_erase(configured, mon
     assert result.findings[0]["review_tier"] == "low"
 
 
-async def test_missing_scope_goes_direct_to_deep_and_no_fake_intent_cost(configured, monkeypatch):
+async def test_missing_scope_refuses_before_any_model_or_fake_cost(configured, monkeypatch):
     rate = AsyncMock(side_effect=AssertionError("must not call"))
     monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", rate)
     configured._run_llm_analysis = AsyncMock(return_value=generator_result(DEEP))
     result = await run_review(configured, scan_mode="deep")
     rate.assert_not_awaited()
-    assert configured._run_llm_analysis.call_args.kwargs["review_route"] == DEEP
+    configured._run_llm_analysis.assert_not_awaited()
+    assert not result.success and not result.attempted
     assert result.usage["excellence"]["domains"][0]["status"] == "unassessed"
-    assert [r["provider"] for r in result.usage["cost_ledger"]["calls"]] == ["openai"]
+    assert result.usage["cost_ledger"]["calls"] == []
 
 
 async def test_source_change_during_triage_fails_closed(configured, monkeypatch):

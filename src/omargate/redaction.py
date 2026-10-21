@@ -194,6 +194,22 @@ def sanitize_public_error(value: object) -> str:
     return _GOOGLE_PROJECT_RESOURCE_RE.sub("projects/[redacted]", text)
 
 
+def contains_credential_material(value: object) -> bool:
+    """Check outbound source without treating public project metadata as a secret.
+
+    Keep the source rules and credential-specific diagnostic backstops together:
+    quoted JSON keys and shorter key-like values also need protection. Provider
+    project/account identifiers belong to public error sanitization, not this
+    source-content decision. A match refuses the request; it never sends a
+    redacted subset and calls that a complete review.
+    """
+    text = str(value or "")
+    return (redact_secret_source(text)[1]
+            or bool(_QUERY_SECRET_RE.search(text))
+            or bool(_JSON_SECRET_RE.search(text))
+            or bool(_KEYLIKE_RE.search(text)))
+
+
 def sanitize_untrusted_markdown_scalar(value: object) -> str:
     """Return inert, single-line text for a Markdown/HTML scalar position.
 
