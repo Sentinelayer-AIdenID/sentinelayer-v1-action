@@ -161,3 +161,16 @@ async def test_empty_parent_cannot_ignore_a_present_but_invalid_lock_graph(proje
     parent_row = result.evidence.to_dict()["npm_projects"]["audits"][-1]
     assert parent_row["outcome"]["reason_code"] == "unsafe_lockfile"
     assert evaluate(root, result.evidence.to_dict()).block_merge
+
+
+async def test_project_evidence_uses_portable_order_for_mixed_case_paths(projects):
+    root, parent, _ = projects
+    for name in ("Zeta", "alpha"):
+        leaf = parent / "deploy" / name
+        leaf.mkdir()
+        fixture._prepare_project(leaf, "npm")
+    result = await run(projects)
+    proof = result.evidence.to_dict()["npm_projects"]
+    assert proof["discovered_manifests"] == sorted(proof["discovered_manifests"])
+    assert [row["manifest_path"] for row in proof["audits"]] == proof["discovered_manifests"]
+    assert evaluate(root, result.evidence.to_dict()).status == GateStatus.PASSED

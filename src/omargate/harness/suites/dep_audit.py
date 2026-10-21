@@ -1115,7 +1115,7 @@ class DepAuditSuite(SecuritySuite):
         records = project_records if project_records is not None else []
         fingerprint = partial(_npm_input_fingerprint, root)
         outcomes = []
-        for manifest in discovery.npm:
+        for manifest in sorted(discovery.npm, key=lambda path: path.relative_to(root).as_posix()):
             lock = next((path for path in (manifest.parent / "npm-shrinkwrap.json", manifest.parent / "package-lock.json")
                          if _path_declared(path)), None)
             manifest_hash, lock_hash = fingerprint(manifest), fingerprint(lock)
@@ -1442,7 +1442,7 @@ class DepAuditSuite(SecuritySuite):
         return DependencyAuditRun(
             findings=findings,
             evidence=DependencyAuditEvidence(tuple(outcomes), npm_projects=tuple(npm_projects),
-                discovered_npm_manifests=tuple(path.relative_to(discovery.root).as_posix() for path in discovery.npm)
+                discovered_npm_manifests=tuple(sorted(path.relative_to(discovery.root).as_posix() for path in discovery.npm))
                 if discovery.root is not None else ()),
         )
 
