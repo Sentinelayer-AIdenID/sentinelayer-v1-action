@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -26,6 +26,7 @@ class BuiltContext:
     files_truncated: List[str]
     files_skipped: List[str]
     hotspots_included: List[str]
+    sections_incomplete: List[str] = field(default_factory=list)
 
 
 class ContextBuilder:
@@ -65,6 +66,7 @@ class ContextBuilder:
         files_truncated: List[str] = []
         files_skipped: List[str] = []
         hotspots_included: List[str] = []
+        sections_incomplete: List[str] = []
 
         def add_with_budget(text: str, allow_truncate: bool = False) -> tuple[bool, bool, int]:
             nonlocal used_tokens
@@ -93,22 +95,27 @@ class ContextBuilder:
             used_tokens += truncated_tokens
             return True, True, truncated_tokens
 
+        def add_section(name: str, text: str, *, allow_truncate: bool = False) -> None:
+            added, truncated, _ = add_with_budget(text, allow_truncate)
+            if text and (not added or truncated):
+                sections_incomplete.append(name)
+
         quick_learn_context = self._build_quick_learn_context(quick_learn)
-        add_with_budget(quick_learn_context, allow_truncate=True)
+        add_section("quick_learn", quick_learn_context, allow_truncate=True)
 
         if spec_context:
             spec_context_section = self._build_spec_context_section(spec_context)
-            add_with_budget(spec_context_section, allow_truncate=True)
+            add_section("spec", spec_context_section, allow_truncate=True)
 
         system_context = self._build_system_context(ingest)
-        add_with_budget(system_context)
+        add_section("system", system_context)
 
         deterministic_context = self._build_deterministic_context(deterministic_findings)
-        add_with_budget(deterministic_context)
+        add_section("deterministic", deterministic_context)
 
         if scan_mode == "pr-diff" and diff_content:
             diff_section = f"## PR Diff\n{diff_content.strip()}\n"
-            add_with_budget(diff_section, allow_truncate=True)
+            add_section("diff", diff_section, allow_truncate=True)
 
         priority_files = self._prioritize_files(ingest, changed_files, scan_mode)
         hotspot_set = set()
@@ -159,6 +166,7 @@ class ContextBuilder:
             files_truncated=files_truncated,
             files_skipped=files_skipped,
             hotspots_included=hotspots_included,
+            sections_incomplete=sections_incomplete,
         )
 
     def _build_quick_learn_context(self, quick_learn: Optional[QuickLearnSummary]) -> str:

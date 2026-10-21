@@ -35,6 +35,7 @@ class TelemetryCollector:
     tokens_in: int = 0
     tokens_out: int = 0
     estimated_cost_usd: float = 0.0
+    review_cost_ledger: Optional[Dict[str, Any]] = None
     llm_latency_ms: int = 0
 
     # Scan metrics

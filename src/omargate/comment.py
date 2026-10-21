@@ -13,11 +13,11 @@ from .formatting import (
 from .fix_plan import ensure_fix_plan
 from .ingest.codebase_snapshot import build_codebase_synopsis, render_codebase_snapshot_md
 from .models import GateResult, GateStatus
-from .redaction import sanitize_public_error
+from .redaction import sanitize_public_error, sanitize_untrusted_markdown_scalar
 
 MARKER_PREFIX = "<!-- sentinelayer:omar-gate:v1:"
 
-_SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+_SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3, "P4": 4}
 
 
 def _normalize_comment_tag(comment_tag: str = "") -> str:
@@ -167,12 +167,14 @@ def _top_findings_section(
         severity = str(finding.get("severity") or "?").upper()
         file_path = str(finding.get("file_path") or "?").replace("\\", "/")
         line_start = finding.get("line_start")
-        category = str(finding.get("category") or "Issue")
+        category = sanitize_untrusted_markdown_scalar(
+            finding.get("category") or "Issue"
+        )
         raw_message = sanitize_public_error(
             str(finding.get("message") or "No description").strip()
         )
-        message = truncate(raw_message, 220)
-        fix_plan = truncate(
+        message = sanitize_untrusted_markdown_scalar(truncate(raw_message, 220))
+        raw_fix_plan = truncate(
             ensure_fix_plan(
                 fix_plan=sanitize_public_error(finding.get("fix_plan", "")),
                 recommendation=sanitize_public_error(finding.get("recommendation", "")),
@@ -180,6 +182,7 @@ def _top_findings_section(
             ),
             600,
         )
+        fix_plan = sanitize_untrusted_markdown_scalar(raw_fix_plan)
 
         loc = f"{file_path}:{line_start}" if line_start else file_path
         link = None
@@ -244,6 +247,7 @@ def render_pr_comment(
     llm_engine: str = "disabled",
     llm_model: str = "n/a",
     actual_cost_usd: Optional[float] = None,
+    review_cost_ledger: Optional[dict] = None,
     deterministic_count: int = 0,
     llm_count: int = 0,
     dedupe_key: Optional[str] = None,
@@ -267,6 +271,8 @@ def render_pr_comment(
     duration_value = humanize_duration_ms(duration_ms)
     estimated_cost_value = format_usd(estimated_cost_usd)
     actual_cost_value = format_usd(actual_cost_usd)
+    from .analyze.review_costs import render_cost_ledger
+    model_cost_section = "\n".join(render_cost_ledger(review_cost_ledger))
 
     blocking = set(_blocking_severities(severity_gate))
 
@@ -339,7 +345,8 @@ def render_pr_comment(
         + (f" • **Files:** `{format_int(int(files_scanned))}`" if files_scanned is not None else "")
         + f" • **LLM:** `{llm_engine}` (`{llm_model}`)"
         + f" • **Cost (est.):** `{estimated_cost_value}`"
-        + (f" • **Cost (actual):** `{actual_cost_value}`" if actual_cost_usd is not None else ""),
+        + (f" • **Cost (usage estimate):** `{actual_cost_value}`" if actual_cost_usd is not None else ""),
+        model_cost_section,
         "",
         f"**Result:** {result.reason}",
         "",
@@ -349,6 +356,7 @@ def render_pr_comment(
         f"| P1 (High) | {format_int(result.counts.p1)} | {'Yes' if 'P1' in blocking else 'No'} |",
         f"| P2 (Medium) | {format_int(result.counts.p2)} | {'Yes' if 'P2' in blocking else 'No'} |",
         f"| P3 (Low) | {format_int(result.counts.p3)} | No |",
+        f"| P4 (Informational) | {format_int(result.counts.p4)} | No |",
         "",
     ]
 

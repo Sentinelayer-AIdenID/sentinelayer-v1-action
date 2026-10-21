@@ -311,6 +311,7 @@ def _write_github_outputs(
         output_file.write(f"p1_count={gate_result.counts.p1}\n")
         output_file.write(f"p2_count={gate_result.counts.p2}\n")
         output_file.write(f"p3_count={gate_result.counts.p3}\n")
+        output_file.write(f"p4_count={gate_result.counts.p4}\n")
         output_file.write(f"findings_artifact={_to_workspace_relative(findings_path)}\n")
         output_file.write(f"pack_summary_artifact={_to_workspace_relative(pack_summary_path)}\n")
 

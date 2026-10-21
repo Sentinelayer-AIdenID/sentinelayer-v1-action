@@ -14,6 +14,7 @@ DEFAULT_ARTIFACTS = [
     "CODEBASE_INGEST.md",
     "REVIEW_BRIEF.md",
     "AUDIT_REPORT.md",
+    "REVIEW_ROUTING.json",
     "ARTIFACT_MANIFEST.json",
 ]
 

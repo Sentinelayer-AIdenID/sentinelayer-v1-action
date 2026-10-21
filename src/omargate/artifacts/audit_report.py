@@ -7,9 +7,9 @@ from typing import List, Optional
 from ..fix_plan import ensure_fix_plan
 from ..formatting import humanize_duration_ms
 from ..ingest.codebase_snapshot import build_codebase_snapshot
-from ..redaction import sanitize_public_error
+from ..redaction import sanitize_public_error, sanitize_untrusted_markdown_scalar
 
-SEVERITY_ICONS = {"P0": "🔴", "P1": "🟠", "P2": "🟡", "P3": "⚪"}
+SEVERITY_ICONS = {"P0": "🔴", "P1": "🟠", "P2": "🟡", "P3": "⚪", "P4": "ℹ️"}
 CATEGORY_ICONS = {
     "auth": "🔐",
     "payment": "💳",
@@ -106,6 +106,7 @@ def generate_audit_report(
             f"| {SEVERITY_ICONS['P1']} P1 | {counts.get('P1', 0)} | High - Action required before merge |",
             f"| {SEVERITY_ICONS['P2']} P2 | {counts.get('P2', 0)} | Medium - Should fix soon |",
             f"| {SEVERITY_ICONS['P3']} P3 | {counts.get('P3', 0)} | Low - Consider fixing |",
+            f"| {SEVERITY_ICONS['P4']} P4 | {counts.get('P4', 0)} | Informational - Advisory |",
             f"| **Total** | **{counts.get('total', 0)}** | |",
             "",
             "---",
@@ -186,7 +187,7 @@ def generate_audit_report(
     # Findings by Severity
     lines.extend(["## Findings Detail", ""])
 
-    for severity in ["P0", "P1", "P2", "P3"]:
+    for severity in ["P0", "P1", "P2", "P3", "P4"]:
         sev_findings = [f for f in findings if f.get("severity") == severity]
         if not sev_findings:
             continue
@@ -198,7 +199,9 @@ def generate_audit_report(
         ])
 
         for idx, finding in enumerate(sev_findings, start=1):
-            cat_icon = CATEGORY_ICONS.get(str(finding.get("category", "")).lower(), "📋")
+            raw_category = str(finding.get("category", "Unknown"))
+            cat_icon = CATEGORY_ICONS.get(raw_category.lower(), "📋")
+            category = sanitize_untrusted_markdown_scalar(raw_category)
             confidence = finding.get("confidence")
             if isinstance(confidence, (int, float)):
                 confidence_display = f"{confidence:.0%}"
@@ -207,19 +210,24 @@ def generate_audit_report(
 
             line_start = finding.get("line_start", 0)
             line_end = finding.get("line_end", line_start)
-            message = sanitize_public_error(finding.get("message", "No description"))
-            recommendation = sanitize_public_error(
+            raw_message = sanitize_public_error(
+                finding.get("message", "No description")
+            )
+            raw_recommendation = sanitize_public_error(
                 str(finding.get("recommendation", "") or "").strip()
             )
-            fix_plan = ensure_fix_plan(
+            raw_fix_plan = ensure_fix_plan(
                 fix_plan=sanitize_public_error(finding.get("fix_plan", "")),
-                recommendation=recommendation,
-                message=message,
+                recommendation=raw_recommendation,
+                message=raw_message,
             )
+            message = sanitize_untrusted_markdown_scalar(raw_message)
+            recommendation = sanitize_untrusted_markdown_scalar(raw_recommendation)
+            fix_plan = sanitize_untrusted_markdown_scalar(raw_fix_plan)
 
             lines.extend(
                 [
-                    f"#### {idx}. {cat_icon} {finding.get('category', 'Unknown')}",
+                    f"#### {idx}. {cat_icon} {category}",
                     "",
                     f"**File:** `{finding.get('file_path', 'unknown')}:{line_start}-{line_end}`",
                     f"**Source:** {finding.get('source', 'unknown')}",

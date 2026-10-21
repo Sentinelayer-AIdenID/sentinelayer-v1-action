@@ -29,6 +29,7 @@ class LLMUsage:
     provider: str = "openai"
     route: str = "byo"
     fallback_chain: Optional[str] = None
+    raw_usage: Optional[dict] = None
 
 
 @dataclass
@@ -57,6 +58,8 @@ class LLMClient:
         managed_capacity_fallback: bool = False,
         sentinelayer_token: str = "",
         managed_api_url: str = "https://api.sentinelayer.com",
+        reasoning_effort: str | None = None,
+        allow_fallback: bool = True,
     ) -> None:
         # Back-compat: api_key is the OpenAI key used for OpenAI calls and fallback.
         self.api_key = api_key
@@ -72,6 +75,8 @@ class LLMClient:
         self.managed_capacity_fallback = managed_capacity_fallback
         self.sentinelayer_token = sentinelayer_token
         self.managed_api_url = managed_api_url
+        self.reasoning_effort = reasoning_effort
+        self.allow_fallback = allow_fallback
         self._client = None
         self._providers: dict[str, object] = {}
         self._managed_oidc_token: Optional[str] = None
@@ -82,7 +87,7 @@ class LLMClient:
         if self._client is None:
             from openai import AsyncOpenAI
 
-            self._client = AsyncOpenAI(api_key=self.api_key)
+            self._client = AsyncOpenAI(api_key=self.api_key, **({"max_retries": 0} if self.reasoning_effort else {}))
         return self._client
 
     def _get_provider(self, provider_name: str):
@@ -93,6 +98,7 @@ class LLMClient:
             provider = OpenAIProvider(
                 api_key=self.api_key,
                 client_getter=lambda: self.client,
+                reasoning_effort=self.reasoning_effort,
             )
         elif provider_name == "anthropic":
             provider = AnthropicProvider(api_key=self.anthropic_api_key)
@@ -384,7 +390,7 @@ class LLMClient:
             user_content,
             max_tokens,
         )
-        if primary_response.success:
+        if primary_response.success or not self.allow_fallback:
             return primary_response
 
         fallback_response = await self._call_with_retry(
@@ -484,19 +490,26 @@ class LLMClient:
                     latency_ms = int((time.time() - start) * 1000)
                     input_tokens = int(getattr(response, "input_tokens", 0) or 0)
                     output_tokens = int(getattr(response, "output_tokens", 0) or 0)
+                    reported_model = getattr(response, "model", None)
+                    identity_valid = isinstance(reported_model, str) and bool(reported_model.strip())
                     usage = LLMUsage(
-                        model=model,
+                        model=reported_model if identity_valid else "unknown",
                         tokens_in=input_tokens,
                         tokens_out=output_tokens,
-                        cost_usd=provider.estimate_cost(model, input_tokens, output_tokens),
+                        cost_usd=provider.estimate_cost(
+                            reported_model, input_tokens, output_tokens
+                        ) if identity_valid else 0.0,
                         latency_ms=latency_ms,
                         provider=provider_name,
+                        raw_usage=getattr(response, "raw_usage", None),
                     )
                     content = getattr(response, "content", "") or ""
                     return LLMResponse(
                         content=content,
                         usage=usage,
-                        success=True,
+                        success=identity_valid and getattr(response, "completed", True),
+                        error=("Provider response did not report model identity" if not identity_valid else
+                               None if getattr(response, "completed", True) else "Provider response did not complete"),
                     )
             except asyncio.TimeoutError:
                 last_error = f"Timeout after {self.timeout}s"

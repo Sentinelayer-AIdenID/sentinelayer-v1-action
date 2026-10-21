@@ -36,6 +36,7 @@ def generate_artifact_manifest(
         ("CODEBASE_INGEST.md", "text/markdown"),
         ("REVIEW_BRIEF.md", "text/markdown"),
         ("AUDIT_REPORT.md", "text/markdown"),
+        ("TYPESAFE_REVIEW.json", "application/json"),
     ]
 
     for filename, content_type in artifact_files:

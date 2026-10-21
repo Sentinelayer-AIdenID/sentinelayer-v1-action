@@ -241,6 +241,7 @@ def findings_to_annotations(findings: List[Dict[str, Any]], max_annotations: int
         "P1": "failure",
         "P2": "warning",
         "P3": "notice",
+        "P4": "notice",
     }
     annotations: List[Dict[str, Any]] = []
     for finding in findings:

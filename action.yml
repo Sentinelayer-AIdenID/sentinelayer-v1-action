@@ -8,12 +8,12 @@ branding:
 inputs:
   # Required
   openai_api_key:
-    description: 'OpenAI API key for LLM calls (BYO)'
+    description: 'OpenAI API key (BYO); required for the gpt-5.3-codex writer and fallback when llm_provider=typesafe'
     required: false
     default: ''
 
   llm_provider:
-    description: 'LLM provider: openai, anthropic, google, xai'
+    description: 'LLM provider: openai, anthropic, google, xai, typesafe. TypeSafe assesses source-backed candidates under the configured coverage/policy contract; generator fallback remains separate.'
     required: false
     default: 'openai'
 
@@ -31,6 +31,46 @@ inputs:
     description: 'xAI API key (required if llm_provider=xai)'
     required: false
     default: ''
+
+  typesafe_api_key:
+    description: 'TypeSafe API key (required if llm_provider=typesafe)'
+    required: false
+    default: ''
+
+  intent_model_pin:
+    description: 'Private pinned intent-model identifier; map from an Actions variable or secret. Required with typesafe; never reported verbatim.'
+    required: false
+    default: ''
+
+  typesafe_timeout:
+    description: 'TypeSafe request timeout in seconds (1-120)'
+    required: false
+    default: '30'
+
+  typesafe_max_candidates:
+    description: 'Maximum source-backed candidates assessed per scan (1-200); reaching this cap does not establish complete source coverage'
+    required: false
+    default: '50'
+
+  intent_price_profile:
+    description: 'Explicit dated price profile bound by the operator to the private intent pin; empty keeps the price unknown.'
+    required: false
+    default: ''
+
+  review_routing:
+    description: 'Review routing policy: legacy or intent-cascade-v1 (requires TypeSafe and OpenAI keys)'
+    required: false
+    default: 'legacy'
+
+  intent_policy:
+    description: 'Private bounded review-policy JSON. Map from an operator-owned Actions secret; missing or invalid policy refuses typed/cascade review.'
+    required: false
+    default: ''
+
+  typesafe_fallback:
+    description: 'Allow gpt-5.3-codex fallback when typed candidate review cannot complete. Transport success or zero candidates alone does not establish a complete review.'
+    required: false
+    default: 'true'
 
   # GitHub integration (recommended)
   github_token:
@@ -103,14 +143,14 @@ inputs:
     default: 'P1'
 
   model:
-    description: 'LLM API model (used when Codex CLI is unavailable). Default is gpt-4.1-mini.'
+    description: 'LLM API model; empty selects the provider default: gpt-5.3-codex for TypeSafe, legacy gpt-4.1-mini otherwise. TypeSafe rejects other explicit models.'
     required: false
-    default: 'gpt-4.1-mini'
+    default: ''
 
   model_fallback:
-    description: 'Fallback LLM API model (if primary model fails or quota exceeded)'
+    description: 'Fallback LLM API model; empty selects gpt-5.3-codex for TypeSafe, legacy gpt-4.1-mini otherwise. TypeSafe rejects other explicit models.'
     required: false
-    default: 'gpt-4.1-mini'
+    default: ''
 
   llm_failure_policy:
     description: 'If LLM call fails: block (fail-closed), deterministic_only, allow_with_warning'
@@ -128,7 +168,7 @@ inputs:
     default: 'false'
 
   codex_model:
-    description: 'Model for Codex CLI'
+    description: 'Model for Codex CLI; TypeSafe requires exactly gpt-5.3-codex'
     required: false
     default: 'gpt-5.3-codex'
 
@@ -229,6 +269,9 @@ outputs:
   p2_count:
     description: 'Number of P2 findings'
     value: ${{ steps.omar.outputs.p2_count }}
+  p4_count:
+    description: 'Number of informational P4 findings'
+    value: ${{ steps.omar.outputs.p4_count }}
   p3_count:
     description: 'Number of P3 findings'
     value: ${{ steps.omar.outputs.p3_count }}
@@ -329,10 +372,11 @@ runs:
 
     - name: Install Omar Gate dependencies
       shell: bash
+      working-directory: ${{ github.action_path }}
       run: |
         set -euo pipefail
-        python -m pip install --upgrade pip
-        python -m pip install --no-cache-dir --require-hashes -r "${GITHUB_ACTION_PATH}/requirements.lock.txt"
+        python -P -m pip install --upgrade pip
+        python -P -m pip install --no-cache-dir --require-hashes -r "${GITHUB_ACTION_PATH}/requirements.lock.txt"
 
     - name: Install Codex CLI
       shell: bash
@@ -357,6 +401,14 @@ runs:
         INPUT_ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
         INPUT_GOOGLE_API_KEY: ${{ inputs.google_api_key }}
         INPUT_XAI_API_KEY: ${{ inputs.xai_api_key }}
+        INPUT_TYPESAFE_API_KEY: ${{ inputs.typesafe_api_key }}
+        INPUT_INTENT_MODEL_PIN: ${{ inputs.intent_model_pin }}
+        INPUT_TYPESAFE_TIMEOUT: ${{ inputs.typesafe_timeout }}
+        INPUT_TYPESAFE_MAX_CANDIDATES: ${{ inputs.typesafe_max_candidates }}
+        INPUT_INTENT_PRICE_PROFILE: ${{ inputs.intent_price_profile }}
+        INPUT_INTENT_POLICY: ${{ inputs.intent_policy }}
+        INPUT_REVIEW_ROUTING: ${{ inputs.review_routing }}
+        INPUT_TYPESAFE_FALLBACK: ${{ inputs.typesafe_fallback }}
         INPUT_GITHUB_TOKEN: ${{ inputs.github_token || github.token }}
         INPUT_PR_NUMBER: ${{ inputs.pr_number }}
         INPUT_COMMENT_TAG: ${{ inputs.comment_tag }}
@@ -395,5 +447,9 @@ runs:
         INPUT_POLICY_PACK_VERSION: ${{ inputs.policy_pack_version }}
       run: |
         set -euo pipefail
-        export PYTHONPATH="${GITHUB_ACTION_PATH}/src:${PYTHONPATH:-}"
-        python -m omargate.main
+        # The scanned workspace is untrusted.  Do not let its cwd or an inherited
+        # PYTHONPATH shadow the action-owned omargate package while secrets exist.
+        export PYTHONPATH="${GITHUB_ACTION_PATH}/src"
+        export PYTHONSAFEPATH=1
+        python -P -m omargate.mask_inputs
+        python -P -m omargate.main

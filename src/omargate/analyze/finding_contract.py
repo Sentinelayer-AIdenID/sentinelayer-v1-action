@@ -20,7 +20,7 @@ _OPTIONAL_STRING_FIELDS = {
 }
 _OPTIONAL_FIELDS = _OPTIONAL_STRING_FIELDS | {"confidence", "line_end"}
 _ALLOWED_FIELDS = _REQUIRED_FIELDS | _OPTIONAL_FIELDS
-_VALID_SEVERITIES = {"P0", "P1", "P2", "P3"}
+_VALID_SEVERITIES = {"P0", "P1", "P2", "P3", "P4"}
 _FULL_CODE_FENCE = re.compile(
     r"\A```(?:json|jsonl)?[ \t]*\r?\n(?P<body>.*?)\r?\n?```[ \t]*\Z",
     re.DOTALL,
@@ -96,7 +96,7 @@ def _validate_finding(value: Any) -> str | None:
             return f"{field} must be a non-empty string"
 
     if value["severity"] not in _VALID_SEVERITIES:
-        return "severity must be one of P0, P1, P2, or P3"
+        return "severity must be one of P0, P1, P2, P3, or P4"
 
     line_start = value["line_start"]
     if type(line_start) is not int or line_start <= 0:

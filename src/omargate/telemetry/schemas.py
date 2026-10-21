@@ -60,7 +60,8 @@ def build_tier1_payload(collector: "TelemetryCollector") -> dict:
             "llm_fallback_model": collector.fallback_model,
             "files_scanned": collector.files_scanned,
         },
-        "findings": collector.counts,
+        "findings": {**collector.counts, **({"model_cost_estimates": collector.review_cost_ledger}
+                                         if collector.review_cost_ledger is not None else {})},
         "gate": {
             "result": collector.gate_status,
             "exit_code": collector.exit_code,
@@ -157,6 +158,8 @@ def build_tier2_payload(
                 for f in findings_summary
             ],
             "counts": collector.counts,
+            **({"model_cost_estimates": collector.review_cost_ledger}
+               if collector.review_cost_ledger is not None else {}),
         },
         "gate": {
             "severity_threshold": severity_threshold,

@@ -8,10 +8,84 @@ from pathlib import Path
 import shutil
 import tempfile
 import time
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from ...fix_plan import ensure_fix_plan
 from ..finding_contract import parse_finding_payload
+
+
+# Codex needs a small amount of host process context to locate its runtime,
+# configuration and temporary files.  Passing the complete Action environment
+# would also pass every provider credential and GitHub/OIDC token.  Keep this
+# list explicit: do not add language loader paths, proxy credentials, or broad
+# prefixes such as INPUT_ / GITHUB_ / *_TOKEN.
+_CODEX_PROCESS_ENV_KEYS = frozenset(
+    {
+        # Executable and shell discovery.
+        "PATH",
+        "PATHEXT",
+        "COMSPEC",
+        "SHELL",
+        # Home/config and temporary directories.
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMDATA",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_RUNTIME_DIR",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        # Windows runtime discovery.
+        "SYSTEMROOT",
+        "WINDIR",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMW6432",
+        "OS",
+        "PROCESSOR_ARCHITECTURE",
+        "PROCESSOR_IDENTIFIER",
+        "PROCESSOR_LEVEL",
+        "PROCESSOR_REVISION",
+        "NUMBER_OF_PROCESSORS",
+        # Locale/terminal behavior.  These values are not credential sources.
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "TERM",
+        "COLORTERM",
+        "NO_COLOR",
+        "FORCE_COLOR",
+        # Codex's own configuration root is intentionally available.
+        "CODEX_HOME",
+    }
+)
+
+
+def _codex_child_env(
+    *, api_key: str, model: str, inherited: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Build the complete, bounded environment passed to the Codex child."""
+    source = os.environ if inherited is None else inherited
+    child = {
+        key: value
+        for key, value in source.items()
+        if key in _CODEX_PROCESS_ENV_KEYS
+    }
+    # These values come from validated runtime configuration, never the ambient
+    # Action environment.  Both key names are required across Codex CLI builds.
+    child["OPENAI_API_KEY"] = api_key
+    child["CODEX_API_KEY"] = api_key
+    child["CODEX_MODEL"] = model
+    return child
 
 
 @dataclass(frozen=True)
@@ -109,17 +183,12 @@ class CodexRunner:
     def _resolve_codex_bin(self, working_dir: Path) -> Optional[str]:
         path = shutil.which("codex")
         if path:
+            try:
+                if Path(path).resolve().is_relative_to(working_dir.resolve()):
+                    return None
+            except (OSError, ValueError):
+                return None
             return path
-
-        # Allow local installs in the repo (e.g. npm i -D @openai/codex).
-        candidates = [
-            working_dir / "node_modules" / ".bin" / "codex",
-            working_dir / "node_modules" / ".bin" / "codex.cmd",
-            working_dir / "node_modules" / ".bin" / "codex.ps1",
-        ]
-        for cand in candidates:
-            if cand.exists():
-                return str(cand)
         return None
 
     async def run_audit(
@@ -167,10 +236,7 @@ class CodexRunner:
             "-",
         ]
 
-        env = os.environ.copy()
-        env["OPENAI_API_KEY"] = self.api_key
-        env["CODEX_API_KEY"] = self.api_key
-        env["CODEX_MODEL"] = self.model
+        env = _codex_child_env(api_key=self.api_key, model=self.model)
 
         try:
             proc = await asyncio.create_subprocess_exec(

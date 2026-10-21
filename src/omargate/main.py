@@ -16,7 +16,11 @@ from .config import OmarGateConfig
 from .context import GitHubContext
 from .gate import evaluate_gate
 from .github import GitHubClient, findings_to_annotations
-from .idempotency import compute_idempotency_key
+from .idempotency import (
+    compute_idempotency_key,
+    dependency_audit_freshness_epoch,
+    review_config_digest,
+)
 from .ingest.codebase_snapshot import (
     build_codebase_snapshot,
     build_codebase_synopsis,
@@ -36,8 +40,6 @@ from .runtime_helpers import (
     _gate_result_from_check_run,
     _latest_completed_check_run,
     _map_category_to_spec_sections,
-    _select_check_run_for_dedupe,
-    _select_check_run_for_mirror,
     _write_preflight_artifacts,
 )
 from .telemetry_runtime import (
@@ -48,7 +50,6 @@ from .telemetry_runtime import (
 from .preflight import (
     check_branch_protection,
     check_cost_approval,
-    check_dedupe,
     check_fork_policy,
     check_rate_limits,
 )
@@ -65,7 +66,8 @@ from .utils import ensure_writable_dir, json_dumps
 ACTION_VERSION = "1.3.11"
 # Rotate this whenever a security-control contract changes so dedupe cannot
 # mirror a successful check produced under weaker semantics on the same head.
-ACTION_IDEMPOTENCY_VERSION = "1:llm-evidence-v1"
+ACTION_IDEMPOTENCY_VERSION = "2:dependency-audit-v1.1:private-policy:review-config:verified-model"
+DEPENDENCY_AUDIT_CONTRACT_VERSION = "dependency-audit-evidence-v1.1"
 CHECK_NAME_BASE = "Omar Gate"
 __all__ = [
     "main",
@@ -77,6 +79,7 @@ __all__ = [
     "_map_category_to_spec_sections",
     "_build_spec_compliance_from_findings",
     "_github_publish_enabled",
+    "DEPENDENCY_AUDIT_CONTRACT_VERSION",
 ]
 
 
@@ -94,6 +97,27 @@ def _llm_fallback_used(llm_usage: dict, model_fallback: str) -> bool:
         (model_used and model_used == model_fallback)
         or route_used.startswith("managed_after_byo_capacity")
     )
+
+
+def _llm_display_identity(analysis) -> tuple[str, str]:
+    """Display observed execution identity, without substituting request config."""
+    if not analysis.llm_attempted and not analysis.llm_success:
+        return "disabled", "n/a"
+    usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
+    engine = str(usage.get("engine") or usage.get("provider") or "llm").strip() or "llm"
+    model = str(usage.get("model") or "").strip() or "unknown"
+    return engine, model
+
+
+def _llm_display_cost(analysis) -> Optional[float]:
+    """Keep an attempted review's unreported cost unknown, including failures."""
+    if not analysis.llm_attempted and not analysis.llm_success:
+        return 0.0
+    usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
+    if isinstance(usage.get("cost_ledger"), dict):
+        return usage["cost_ledger"].get("estimated_total_usd")
+    cost = usage.get("cost_usd")
+    return float(cost) if cost is not None else None
 
 
 def _build_llm_evidence(analysis, config: OmarGateConfig) -> dict:
@@ -154,6 +178,7 @@ def _short_circuit_with_gate_result(
                 "P1": gate_result.counts.p1,
                 "P2": gate_result.counts.p2,
                 "P3": gate_result.counts.p3,
+                "P4": gate_result.counts.p4,
             },
         },
         findings=[],
@@ -190,52 +215,6 @@ def _short_circuit_with_gate_result(
         pass
 
     return _exit_code_from_gate_result(gate_result)
-
-
-def _short_circuit_mirror_prior_check_run(
-    *,
-    gh: GitHubClient,
-    head_sha: str,
-    idem_key: str,
-    check_name: str,
-    select: str,  # "dedupe" or "latest"
-    fallback_reason: str,
-    note_prefix: str,
-    run_dir: Path,
-    run_id: str,
-    config: OmarGateConfig,
-    skip_label: str,
-    explicit_url: Optional[str] = None,
-) -> int:
-    if not gh.token:
-        raise RuntimeError("GitHub token missing; cannot resolve prior check run outcome")
-
-    runs = gh.list_check_runs(head_sha, check_name)
-    if select == "dedupe":
-        run = _select_check_run_for_dedupe(runs, idem_key)
-    else:
-        run = _select_check_run_for_mirror(runs)
-
-    if not run:
-        raise RuntimeError("Unable to resolve a prior Omar Gate check run to mirror")
-
-    link_url = explicit_url or run.get("html_url") or run.get("details_url")
-    note = note_prefix + (f" See: {link_url}" if link_url else "")
-    gate_result = _gate_result_from_check_run(
-        run,
-        fallback_reason=fallback_reason,
-        extra_note=note,
-    )
-
-    return _short_circuit_with_gate_result(
-        run_dir=run_dir,
-        run_id=run_id,
-        gate_result=gate_result,
-        config=config,
-        idem_key=idem_key,
-        skip_label=skip_label,
-        link_url=link_url,
-    )
 
 
 def main() -> int:
@@ -363,6 +342,15 @@ async def async_main() -> int:
             policy_pack_version=config.policy_pack_version,
             action_major_version=ACTION_IDEMPOTENCY_VERSION,
             comment_tag=config.comment_tag,
+            config_digest=review_config_digest(config),
+            audit_contract_version=DEPENDENCY_AUDIT_CONTRACT_VERSION,
+            run_harness=config.run_harness,
+            pip_audit_ignore_ids=config.pip_audit_ignore_ids,
+            audit_freshness_epoch=(
+                dependency_audit_freshness_epoch()
+                if config.run_harness
+                else None
+            ),
         )
 
         token = config.github_token.get_secret_value() or os.environ.get("GITHUB_TOKEN", "")
@@ -389,37 +377,8 @@ async def async_main() -> int:
         collector.stage_start("preflight")
         try:
             with logger.stage("preflight"):
-                should_skip, existing_url = await check_dedupe(
-                    gh, ctx.head_sha, idem_key, check_name
-                )
-                if should_skip:
-                    collector.dedupe_skipped = True
-                    preflight_success = False
-                    logger.info("Skipping - already analyzed", existing_url=existing_url)
-
-                    try:
-                        exit_code = _short_circuit_mirror_prior_check_run(
-                            gh=gh,
-                            head_sha=ctx.head_sha,
-                            idem_key=idem_key,
-                            check_name=check_name,
-                            select="dedupe",
-                            fallback_reason="Deduped",
-                            note_prefix="Deduped (already analyzed). Mirroring prior Omar Gate result.",
-                            run_dir=run_dir,
-                            run_id=run_id,
-                            config=config,
-                            skip_label="dedupe",
-                            explicit_url=existing_url,
-                        )
-                    except Exception as exc:
-                        print(f"::error::Dedupe short-circuit failed: {exc}")
-                        collector.record_error("preflight", str(exc))
-                        exit_code = 2
-
-                    collector.record_preflight_exit(reason="dedupe", exit_code=exit_code)
-                    return exit_code
-
+                # Remote check names, markers and external IDs are untrusted.
+                # Every run must obtain fresh source-bound review evidence.
                 proceed, scan_mode_override, fork_reason = check_fork_policy(ctx, config)
                 if not proceed:
                     collector.fork_blocked = True
@@ -453,80 +412,37 @@ async def async_main() -> int:
                     collector.rate_limit_skipped = True
                     preflight_success = False
                     logger.info("Rate limited", reason=rate_reason)
-                    if rate_reason == "api_error_require_approval":
-                        gate_result = GateResult(
-                            status=GateStatus.NEEDS_APPROVAL,
-                            reason=(
-                                "Rate limit enforcement unavailable due to GitHub API error; "
-                                "approval required to proceed. "
-                                "Set rate_limit_fail_mode=open to skip enforcement."
-                            ),
-                            block_merge=True,
-                            counts=Counts(),
-                            dedupe_key=idem_key,
-                        )
-                        status_value = (
-                            gate_result.status.value
-                            if hasattr(gate_result.status, "value")
-                            else str(gate_result.status)
-                        )
-                        collector.record_gate_result(status_value, gate_result.reason)
-                        exit_code = _short_circuit_with_gate_result(
-                            run_dir=run_dir,
-                            run_id=run_id,
-                            gate_result=gate_result,
-                            config=config,
-                            idem_key=idem_key,
-                            skip_label=f"rate_limit:{rate_reason}",
-                            link_url=None,
-                            estimated_cost_usd=estimated_cost,
-                        )
-                        collector.record_preflight_exit(reason="rate_limit", exit_code=exit_code)
-                        return exit_code
-
-                    try:
-                        exit_code = _short_circuit_mirror_prior_check_run(
-                            gh=gh,
-                            head_sha=ctx.head_sha,
-                            idem_key=idem_key,
-                            check_name=check_name,
-                            select="latest",
-                            fallback_reason="Rate limited",
-                            note_prefix=f"Rate limited ({rate_reason}). Mirroring latest Omar Gate result.",
-                            run_dir=run_dir,
-                            run_id=run_id,
-                            config=config,
-                            skip_label=f"rate_limit:{rate_reason}",
-                        )
-                    except Exception:
-                        # No prior check to mirror — create a clear neutral result.
-                        wait_mins = config.min_scan_interval_minutes
+                    if config.run_harness:
                         reason_msg = (
-                            f"Rate limited ({rate_reason}). "
-                            f"Please wait ~{wait_mins} min before re-running."
+                            f"Rate limited ({rate_reason}); the required dependency audit "
+                            "has not completed for this audit contract and UTC day. "
+                            "A fresh review is required; check-run metadata cannot satisfy it."
                         )
-                        print(f"::warning::{reason_msg}")
-                        gate_result = GateResult(
-                            status=GateStatus.BYPASSED,
-                            reason=reason_msg,
-                            block_merge=False,
-                            counts=Counts(),
-                            dedupe_key=idem_key,
+                    elif rate_reason.endswith("require_approval"):
+                        reason_msg = "Rate limit enforcement unavailable; approval required to proceed."
+                    else:
+                        reason_msg = (
+                            f"Rate limited ({rate_reason}); a fresh review is required. "
+                            "Unverified prior check runs cannot authorize a pass."
                         )
-                        if _github_publish_enabled(config):
-                            try:
-                                gh.create_check_run(
-                                    name=check_name,
-                                    head_sha=ctx.head_sha,
-                                    conclusion="neutral",
-                                    summary=reason_msg,
-                                    title="Omar Gate: RATE LIMITED",
-                                    text=f"Scan skipped — cooldown period ({wait_mins} min) not met.",
-                                )
-                            except Exception:
-                                pass
-                        exit_code = 0
-
+                    gate_result = GateResult(
+                        status=GateStatus.NEEDS_APPROVAL,
+                        reason=reason_msg,
+                        block_merge=True,
+                        counts=Counts(),
+                        dedupe_key=idem_key,
+                    )
+                    collector.record_gate_result(gate_result.status.value, gate_result.reason)
+                    exit_code = _short_circuit_with_gate_result(
+                        run_dir=run_dir,
+                        run_id=run_id,
+                        gate_result=gate_result,
+                        config=config,
+                        idem_key=idem_key,
+                        skip_label=f"rate_limit:{rate_reason}",
+                        link_url=None,
+                        estimated_cost_usd=estimated_cost,
+                    )
                     collector.record_preflight_exit(reason="rate_limit", exit_code=exit_code)
                     return exit_code
 
@@ -675,6 +591,11 @@ async def async_main() -> int:
                 fallback_provider=provider_used if fallback_used else None,
                 fallback_model=model_used if fallback_used else None,
             )
+            if isinstance(analysis.llm_usage.get("cost_ledger"), dict):
+                collector.review_cost_ledger = analysis.llm_usage["cost_ledger"]
+                # Legacy numeric telemetry is the known subtotal. The canonical
+                # nullable total and partial status persist alongside it.
+                collector.estimated_cost_usd = collector.review_cost_ledger["known_estimated_usd"]
 
         ingest_stats = analysis.ingest_stats or {}
         collector.files_scanned = int(
@@ -712,7 +633,7 @@ async def async_main() -> int:
                 write_findings_jsonl(findings_path, analysis.findings)
 
                 pack_counts = {
-                    key: analysis.counts[key] for key in ("P0", "P1", "P2", "P3")
+                    key: analysis.counts.get(key, 0) for key in ("P0", "P1", "P2", "P3", "P4")
                 }
                 fingerprint_count = sum(
                     1 for finding in analysis.findings if finding.get("fingerprint")
@@ -741,6 +662,7 @@ async def async_main() -> int:
                     severity_gate=config.severity_gate,
                     llm_usage=analysis.llm_usage,
                     llm_evidence=_build_llm_evidence(analysis, config),
+                    dependency_audit_evidence=analysis.dependency_audit_evidence,
                     fingerprint_count=fingerprint_count,
                     dedupe_key=idem_key,
                     policy_pack=config.policy_pack,
@@ -815,6 +737,7 @@ async def async_main() -> int:
                     GateConfig(
                         severity_gate=config.severity_gate,
                         require_llm_success=config.llm_failure_policy == "block",
+                        require_dependency_audit_success=config.run_harness,
                     ),
                 )
         except Exception as exc:
@@ -854,14 +777,8 @@ async def async_main() -> int:
         try:
             with logger.stage("publish"):
                 publish_github = _github_publish_enabled(config)
-                # Avoid misleading "$0.00" when the engine cannot report usage (e.g. Codex CLI).
-                if not analysis.llm_success and int(analysis.llm_count or 0) == 0:
-                    cost_usd = 0.0
-                elif analysis.llm_usage:
-                    cost_raw = analysis.llm_usage.get("cost_usd")
-                    cost_usd = float(cost_raw) if cost_raw is not None else None
-                else:
-                    cost_usd = None
+                # An unsuccessful attempt can still incur an unreported cost.
+                cost_usd = _llm_display_cost(analysis)
 
                 if not publish_github:
                     logger.info("GitHub PR comment publish disabled by input")
@@ -873,23 +790,7 @@ async def async_main() -> int:
                     analysis.warnings.append(message)
                 elif ctx.pr_number:
                     try:
-                        llm_engine_used = "disabled"
-                        llm_model_used = "n/a"
-                        # Show LLM engine/model when analysis ran, even if it found 0 findings.
-                        _llm_ran = analysis.llm_success or analysis.llm_usage is not None
-                        if _llm_ran:
-                            if analysis.llm_usage:
-                                llm_engine_used = str(
-                                    analysis.llm_usage.get("engine")
-                                    or analysis.llm_usage.get("provider")
-                                    or "llm"
-                                ).strip() or "llm"
-                                llm_model_used = str(
-                                    analysis.llm_usage.get("model") or config.model
-                                ).strip() or config.model
-                            else:
-                                llm_engine_used = "llm"
-                                llm_model_used = str(config.model).strip() or "unknown"
+                        llm_engine_used, llm_model_used = _llm_display_identity(analysis)
 
                         review_brief_md = None
                         try:
@@ -927,6 +828,7 @@ async def async_main() -> int:
                             dedupe_key=gate_result.dedupe_key or idem_key,
                             llm_model=llm_model_used,
                             actual_cost_usd=cost_usd,
+                            review_cost_ledger=(analysis.llm_usage or {}).get("cost_ledger"),
                             head_sha=ctx.head_sha,
                             server_url=server_url,
                             comment_tag=config.comment_tag,
@@ -960,6 +862,7 @@ async def async_main() -> int:
                             "P1": int(counts.get("P1", 0) or 0),
                             "P2": int(counts.get("P2", 0) or 0),
                             "P3": int(counts.get("P3", 0) or 0),
+                            "P4": int(counts.get("P4", 0) or 0),
                         },
                         separators=(",", ":"),
                         sort_keys=True,

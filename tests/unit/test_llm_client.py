@@ -11,7 +11,7 @@ from omargate.analyze.llm.llm_client import LLMClient, LLMResponse, LLMUsage
 
 def _make_response(content: str = "ok", input_tokens: int = 10, output_tokens: int = 5):
     usage = SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens)
-    return SimpleNamespace(usage=usage, output_text=content)
+    return SimpleNamespace(usage=usage, output_text=content, model="gpt-5.3-codex")
 
 
 @pytest.mark.anyio

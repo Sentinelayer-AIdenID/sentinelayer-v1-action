@@ -1,5 +1,8 @@
-import pytest
+from copy import deepcopy
 from pathlib import Path
+
+import pytest
+
 from omargate.artifacts.audit_report import generate_audit_report, write_audit_report
 
 
@@ -99,3 +102,30 @@ def test_report_redacts_provider_error_details(sample_data):
     assert "my-prod-project" not in report
     assert "AIza" not in report
     assert "sk-testtesttesttest" not in report
+
+
+def test_report_neutralizes_untrusted_finding_markdown_without_mutation(sample_data):
+    finding = sample_data["findings"][0]
+    finding["category"] = "auth\n# forged category"
+    finding["message"] = "</details>\r\n## forged [click](https://evil.test)\x00\u202e"
+    finding["recommendation"] = "Use [patch](javascript:alert(1))\n<details>"
+    finding["fix_plan"] = "</details>\n# forged fix <script>alert(1)</script>"
+    finding["snippet"] = ""
+    original = deepcopy(sample_data["findings"])
+
+    report = generate_audit_report(**sample_data)
+
+    assert sample_data["findings"] == original
+    assert "\n# forged category" not in report
+    assert "\n## forged" not in report
+    assert "\n# forged fix" not in report
+    assert "[click](" not in report
+    assert "[patch](" not in report
+    assert "<details>" not in report
+    assert "</details>" not in report
+    assert "<script>" not in report
+    assert "\x00" not in report
+    assert "\u202e" not in report
+    assert "auth &#35; forged category" in report
+    assert "&#60;&#47;details&#62;" in report
+    assert "&#60;script&#62;alert&#40;1&#41;&#60;&#47;script&#62;" in report

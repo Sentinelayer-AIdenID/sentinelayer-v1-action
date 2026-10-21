@@ -7,7 +7,7 @@ from typing import Dict, Iterable, List, Optional
 from .priority_ranker import CATEGORY_SCORE, CATEGORIES, SEVERITY_SCORE, detect_categories, rank_files
 from ..fix_plan import ensure_fix_plan
 from ..ingest.codebase_snapshot import build_codebase_snapshot, build_codebase_synopsis
-from ..redaction import sanitize_public_error
+from ..redaction import sanitize_public_error, sanitize_untrusted_markdown_scalar
 
 CATEGORY_ACTIONS = {
     "auth": "Review auth and session controls",
@@ -18,7 +18,7 @@ CATEGORY_ACTIONS = {
     "infrastructure": "Review CI/CD and infrastructure configs",
 }
 
-_SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+_SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3, "P4": 4}
 
 
 def generate_review_brief(
@@ -167,16 +167,21 @@ def _format_fix_plan_section(findings: List[dict]) -> List[str]:
     lines: List[str] = []
     for idx, finding in enumerate(sorted_findings, start=1):
         severity = str(finding.get("severity") or "P3").upper()
-        category = str(finding.get("category") or "issue")
+        category = sanitize_untrusted_markdown_scalar(
+            finding.get("category") or "issue"
+        )
         path = str(finding.get("file_path") or "unknown").replace("\\", "/")
         line = int(finding.get("line_start") or 1)
         raw_message = sanitize_public_error(str(finding.get("message") or "No description"))
-        message = _truncate_message(raw_message, 220)
-        fix_plan = ensure_fix_plan(
+        message = sanitize_untrusted_markdown_scalar(
+            _truncate_message(raw_message, 220)
+        )
+        raw_fix_plan = ensure_fix_plan(
             fix_plan=sanitize_public_error(finding.get("fix_plan", "")),
             recommendation=sanitize_public_error(finding.get("recommendation", "")),
             message=raw_message,
         )
+        fix_plan = sanitize_untrusted_markdown_scalar(raw_fix_plan)
         lines.append(
             f"{idx}. **{severity}** `{path}:{line}` · **{category}**: {message}"
         )
@@ -254,7 +259,7 @@ def _files_scanned(ingest: dict) -> int:
 
 
 def _count_by_severity(findings: Iterable[dict]) -> Dict[str, int]:
-    counts = {"P0": 0, "P1": 0, "P2": 0, "P3": 0}
+    counts = {"P0": 0, "P1": 0, "P2": 0, "P3": 0, "P4": 0}
     for finding in findings:
         sev = str(finding.get("severity", "")).upper()
         if sev in counts:
@@ -270,6 +275,7 @@ def _format_summary_table(counts: Dict[str, int]) -> List[str]:
         f"| 🟠 P1 (High) | {counts.get('P1', 0)} |",
         f"| 🟡 P2 (Medium) | {counts.get('P2', 0)} |",
         f"| ⚪ P3 (Low) | {counts.get('P3', 0)} |",
+        f"| ℹ️ P4 (Informational) | {counts.get('P4', 0)} |",
     ]
 
 
@@ -435,7 +441,7 @@ def _issue_summary(findings: List[dict]) -> str:
     counts = _count_by_severity(findings)
     parts = [
         f"{counts[severity]} {severity}"
-        for severity in ("P0", "P1", "P2", "P3")
+        for severity in ("P0", "P1", "P2", "P3", "P4")
         if counts.get(severity)
     ]
     return " • ".join(parts) if parts else "0"

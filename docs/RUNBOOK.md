@@ -29,7 +29,8 @@ This runbook covers incident response, release engineering, CI/CD pipeline opera
 3. Open the PR comment and the GitHub Check Run named `Omar Gate` (if enabled).
 4. Locate run artifacts under `.sentinelayer/runs/<run_id>/` (or uploaded job artifacts).
 5. Check `REVIEW_BRIEF.md` for a prioritized summary; `AUDIT_REPORT.md` for full details.
-6. Decide the response: fix code, approve cost, adjust configuration, or enforce fork policy.
+6. For TypeSafe, inspect `TYPESAFE_REVIEW.json`: `generator_required_clean_candidates`, `generator_required_categories`, `unresolved_candidates` and policy-versus-review completeness distinguish required confirmation from a completed review. A mixed review with findings can still need generator confirmation for other clean spans.
+7. Decide the response: fix code, approve cost, adjust configuration, or enforce fork policy. A warning-mode pass is not proof that required review coverage completed.
 
 ---
 
@@ -37,13 +38,13 @@ This runbook covers incident response, release engineering, CI/CD pipeline opera
 
 | Code | Meaning | Response |
 |---:|---|---|
-| `0` | Passed | No action required. |
-| `1` | Blocked by severity gate | Fix blocking findings or adjust `severity_gate` per policy. |
+| `0` | Passed or explicitly bypassed | Inspect the gate status and any preflight short-circuit reason. |
+| `1` | Blocked by severity or required integrity | Fix the findings or missing/invalid audit/LLM evidence; `severity_gate: none` does not disable integrity checks. |
 | `2` | Configuration/context error | Fix missing/invalid inputs or missing GitHub context. |
 | `12` | Fork blocked | Use fork-safe workflow patterns or skip fork PRs. |
-| `13` | Approval required | Add approval label, re-run via approved trigger, or raise the threshold. |
+| `13` | Blocking approval/preflight result | Follow the recorded reason: resolve cost approval, or wait/adjust limits so a required fresh audit can actually run. |
 
-**Note:** On dedupe or cooldown, the action short-circuits and mirrors the most recent `Omar Gate` check run result for the same PR head SHA. It exits `0`/`1`/`13` based on that prior result — not a failure code.
+Every run requires fresh source-bound review evidence. The run key binds effective review settings, private configuration hashes, dependency-audit contract and UTC day. Remote check names, summaries and external IDs are not authenticated reusable receipts; no prior check can authorize a skipped run.
 
 ---
 
@@ -91,6 +92,12 @@ Omar Gate's CI runs as three parallel jobs inside `security-review.yml`:
   6. Publish codebase snapshot to GitHub Step Summary
   7. Upload all run artifacts
 
+### Composite Action Import Boundary
+
+The current [`action.yml`](../action.yml) uses `runs.using: composite`. Its pip upgrade and locked install run from `${{ github.action_path }}` using `python -P -m pip`. The analysis step keeps the target workspace as cwd but sets action-owned `PYTHONPATH`, exports `PYTHONSAFEPATH=1` and invokes `python -P -m omargate.main`. This is distinct from the generic standalone workflow outline above; standalone commands must establish the same intended package/import ownership themselves. The Docker image's normal entry sets `/app/src` and safe-path behavior separately.
+
+Harness audit children inherit only the explicit environment allowlist in [`runner.py`](../src/omargate/harness/runner.py). Do not pass all action credentials to an audit command to repair authentication. Codex's separately configured review credential does not authorize harness children to receive TypeSafe, provider, GitHub or OIDC variables. An environment filter is not a filesystem/network sandbox; self-hosted proxy/CA and private-registry requirements need their own approved configuration. Do not infer dependency coverage from a gate pass, process return or empty findings alone: require independently validated execution and result completeness for each manifest-selected audit tool.
+
 ### Standalone Quality Gates Workflow
 
 `quality-gates.yml` runs on all PRs and push to `main`. Adds `mypy` type checking on critical modules beyond what `security-review.yml` runs. This is the fast-feedback loop for developers.
@@ -112,6 +119,7 @@ Default run directory: `.sentinelayer/runs/<run_id>/`
 | `CODEBASE_INGEST.md` | Markdown | Bounded source index |
 | `CODEBASE_INGEST.json` | JSON | Full ingest payload + file inventory |
 | `ARTIFACT_MANIFEST.json` | JSON | SHA-256 hashes of all artifacts |
+| `TYPESAFE_REVIEW.json` | JSON | TypeSafe candidate/source bindings, answers, clean/category generator triggers, unresolved reasons and writer/completion metadata |
 
 ### Artifact Integrity
 
@@ -139,14 +147,33 @@ Default run directory: `.sentinelayer/runs/<run_id>/`
 2. Open `REVIEW_BRIEF.md` for prioritized risk hotspots and suggested review order.
 3. Open `AUDIT_REPORT.md` for full details on each finding.
 4. Fix the findings and push a commit.
-5. Re-run the workflow. If deduped, confirm the head SHA changed.
+5. Re-run the workflow when the scan limits permit a fresh review.
+
+### TypeSafe confirmation or incomplete review
+
+- Any candidate span resolved clean needs generator confirmation, including a review with findings in other spans. `generator_required_clean_candidates` records those bound IDs; a complete policy decision returns `typesafe_clean_requires_generator` until the generator path handles the required review.
+- An incomplete policy retains confirmed findings and `unresolved_candidates`. Unsupported scope/budgets/source integrity and four typed blocking categories (`availability`, `infrastructure`, `race-condition`, `other-security`) also require fallback or the configured failure policy.
+- Keep `typesafe_fallback: true` and `llm_failure_policy: block` for default fail-closed handling. Disabling fallback does not confirm clean spans. Explicit warning/deterministic-only exceptions must not be reported as complete source coverage.
+- Compare `policy_decision_complete` / `typed_assessment_complete` with `complete` / `review_complete`, the resulting `llm_*` outputs and the fallback chain. Do not equate a policy-complete mixed review, writer success or transport success with completed confirmation.
+- Final collisions retain the strongest guarded severity for a full file/span/category key; alternate provenance is bounded to eight records with a truncation flag. Consult original assessment/evidence rather than assuming all alternates are separate final findings.
+
+See [TypeSafe configuration](CONFIGURATION.md#typesafe-review) and the [provider note](typesafe-provider.md).
+
+### Dependency audit incomplete
+
+Inspect `PACK_SUMMARY.json.dependency_audit_evidence`: schema `1.1` requires the exact `package_lock_registry_graph`, `declared_direct_pins` and `cargo_lock_packages` scope map, plus one outcome for each ecosystem. An applicable outcome must be clean or vulnerable; indeterminate results use fixed reason codes and block before required LLM evidence or finding-severity thresholds. Vulnerable outcomes require their exact serialized harness findings; an unrelated P1 cannot stand in for them.
+
+For npm, provision a supported root v2/v3 package lock with canonical public-registry packages; workspaces, links and peer dependencies are unsupported. Python accepts only a nonempty root `requirements.txt` of exact direct pins, with no alternate/nested manifest or private-index routing; it does not cover transitive closure. Cargo needs a valid copied lock and a separately provisioned reviewed `cargo-audit`. See [the full scope and metadata-egress contract](CONFIGURATION.md#run_harness-and-dependency-audit-evidence).
+
+Missing tools/locks, unsafe inputs, malformed/contradictory JSON, timeouts or unproven process teardown remain incomplete. A containment failure retains private scratch because a child may still be alive; use the runner's process evidence before cleanup. Restore a supported input/tool/connection and rerun. Do not classify an empty output as clean or use `severity_gate: none` to bypass the failure.
 
 ### Dedupe short-circuit
 
-Dedupe means the same PR head SHA + idempotency inputs were already analyzed. The action mirrors the prior result.
+Dedupe reuses a prior verdict for the same complete idempotency key, rather than treating any successful check on that head as current evidence. Enabled audits add the versioned audit contract, harness setting, canonical pip ignore IDs and UTC calendar day to the existing head/policy inputs.
 
-- Verify the workflow is running on the latest commit SHA.
-- To force re-analysis without code changes, change an idempotency input (`scan_mode`, `policy_pack_version`).
+- Verify the head, configured audit scope and referenced prior verdict before relying on the reuse.
+- Crossing midnight UTC changes an enabled audit's key even if source is unchanged. Daily freshness is bounded; it is not continuous advisory monitoring.
+- A new key still must pass preflight limits and execute the required audit. Changing an input or pushing an empty commit does not itself supply successful audit evidence.
 
 ### Rate limited / cooldown
 
@@ -159,7 +186,7 @@ with:
   max_daily_scans: 0
 ```
 
-Rate limits are enforced via Check Run history. A new commit SHA resets counters.
+Rate limits use check history only to enforce cooldown and the rolling daily cap. A limit that prevents a fresh review returns a blocking result with artifacts and telemetry, including when `run_harness: false`. Wait for an allowed scan or adjust the rate-limit policy; skipped reviews cannot inherit a prior pass.
 
 ### Fork blocked (exit `12`)
 
@@ -219,6 +246,7 @@ The `v1` floating tag always points to the latest `v1.x.x` release.
 8. **Docker build succeeds:** `docker build -t omar-gate .`
 9. **README badges updated:** Test count, version.
 10. **RUNBOOK.md updated:** If pipeline or artifacts changed.
+11. **Review-boundary evidence:** For the exact release revision, retain independent evidence for mixed clean/finding generator confirmation, legacy versus typed corroboration, pip import isolation, audit-child env filtering, recognized source redaction and inert Step Summary scalars. Passing unrelated checks or an existing prose-only renderer key does not establish these boundaries.
 
 ### Release Steps
 
@@ -242,7 +270,7 @@ git push -f origin v1  # Force-update floating tag
 
 1. Create a test PR in a consumer repo using `uses: mrrCarter/sentinelayer-v1-action@v1`.
 2. Confirm the action runs, posts a PR comment, and uploads artifacts.
-3. Confirm the codebase snapshot appears in the Step Summary.
+3. Confirm the codebase snapshot appears in the Step Summary and compare its status/counts with canonical artifacts. Validate untrusted finding/snapshot display text separately from the fixed status template; visibility alone does not demonstrate inert rendering.
 
 ---
 
@@ -325,7 +353,8 @@ The "Verify LLM CLIs" step prints binary paths and versions. If a CLI fails to i
 
 | Secret | Scope | Where |
 |---|---|---|
-| `OPENAI_API_KEY` | OpenAI API + Codex CLI | Repo secret |
+| `OPENAI_API_KEY` | OpenAI API + Codex CLI; fixed-verdict writer/generator with TypeSafe | Repo secret |
+| `TYPESAFE_API_KEY` | Pinned intent model candidate assessment | Repo secret |
 | `ANTHROPIC_API_KEY` | Anthropic API | Repo secret |
 | `GOOGLE_API_KEY` | Google AI API | Repo secret |
 | `XAI_API_KEY` | xAI API | Repo secret |
@@ -374,12 +403,14 @@ Omar Gate uses a layered approach to minimize false positives:
 
 ### Layer 3: LLM Guardrails (Corroboration Requirement)
 
-At [orchestrator.py:560](src/omargate/analyze/orchestrator.py#L560), `_apply_llm_guardrails()` enforces:
+In [`orchestrator.py`](../src/omargate/analyze/orchestrator.py), `_apply_llm_guardrails()` enforces:
 
 - **File validation:** LLM findings pointing to files not in the ingest are dropped.
 - **Line clamping:** Line numbers are clamped to actual file bounds.
-- **Corroboration requirement:** LLM/Codex P0/P1 findings require a deterministic or harness finding within 5 lines of the same file and category. Without corroboration, the finding is **downgraded to P2 advisory**.
-- This prevents LLM hallucinations from blocking merges while preserving them as review hints.
+- **Legacy generator corroboration:** Codex/OpenAI P0/P1 findings retain the established broad contract: any deterministic or harness finding in the same file, with the exact emitted category, and within 5 lines of the generator finding's starting line can corroborate them. The TypeSafe producer allowlist does not apply to this lane.
+- **Typed corroboration:** Source-bound TypeSafe P0/P1 findings use canonical category aliases and only reviewed producer/rule/emitted-category tuples. Proximity covers the complete bound typed span plus 5 lines on either side; an unreviewed producer leaves the finding at P2.
+- **Clean-span confirmation:** A generator run is required for every TypeSafe candidate span resolved clean, including mixed reviews where another span emitted a finding. Disabling `typesafe_fallback` leaves the review incomplete; it does not convert the clean span into confirmed coverage.
+- Uncorroborated P0/P1 becomes P2. This is advisory at the default P1 gate; a P2 gate also blocks P2 findings. Typed aliases/full-span producer binding must not be applied to the legacy lane, and generator-controlled end lines must not expand its first-line window.
 
 ### Gitleaks Allowlist
 
@@ -398,7 +429,7 @@ At [orchestrator.py:560](src/omargate/analyze/orchestrator.py#L560), `_apply_llm
 If a finding is a verified false positive:
 1. Check if the deterministic scanner rule needs refinement (open an issue or PR).
 2. For entropy findings, check if the candidate should be excluded by the identifier filter.
-3. For LLM findings, they should already be downgraded to P2 by guardrails. If not, check corroboration logic.
+3. For uncorroborated LLM P0/P1, check the P2 downgrade and selected gate threshold; a P2 gate intentionally blocks P2. Distinguish legacy broad rule eligibility from typed-only producer binding.
 4. Document the rationale in the PR and follow your exception workflow.
 
 ---
@@ -435,15 +466,20 @@ If a Codex CLI update breaks the audit:
 2. Or downgrade the CLI version in `security-review.yml` env vars.
 3. The npm cache will auto-invalidate on version change.
 
-### Emergency: Disable Omar Gate
+### Emergency: Report-Only Findings or Explicit Job Disablement
 
-To unblock all PRs while debugging:
+`severity_gate: none` disables finding-severity blocks. Required dependency-audit and LLM integrity checks still apply, including incomplete audits and the fresh-audit preflight requirement.
 
 ```yaml
-# Option 1: Set severity gate to none
-INPUT_SEVERITY_GATE: none
+with:
+  severity_gate: none
+```
 
-# Option 2: Skip the job
+`run_harness: false` is an explicit opt-out from dependency audits, not evidence that they passed. It does not disable required LLM integrity. Use any opt-out only under the repository's review policy.
+
+Disabling the whole job is a separate workflow/protection decision; a skipped job does not provide an Omar Gate pass or acceptance evidence. Review required-check rules before using a temporary condition:
+
+```yaml
 omar-review:
   if: false
 ```
@@ -492,7 +528,7 @@ gh run rerun <run-id> --failed
 
 ## Security & Privacy
 
-- **LLM context:** A bounded code context is sent to your LLM provider using your own API key. Context size is controlled by `max_input_tokens` (default: 100,000).
+- **LLM context:** Selected providers receive bounded context. Legacy API context uses `max_input_tokens`; typed review separately bounds complete candidates and source/state/question bytes (see [configuration](CONFIGURATION.md#typesafe-review)). Recognized secret-source lines are excluded from typed candidate/diff context, but fingerprints of original source/evidence/diff bytes remain in provider state. Do not treat redacted text or hashes as proof of zero sensitive egress, or infer provider retention from runner-local execution.
 - **Telemetry tiers:**
   - Tier 0: Off.
   - Tier 1: Aggregate counts only, anonymous, no auth required.
@@ -500,8 +536,8 @@ gh run rerun <run-id> --failed
   - Tier 3: Full artifact upload, requires explicit opt-in.
 - **OIDC for Tier 2+:** Use `id-token: write` permission. Never send Bearer tokens for Tier 1 (causes spurious 401s if OIDC verification fails server-side).
 - **Fork PRs:** Treat as untrusted. Default `fork_policy: block` prevents running LLM analysis on fork PRs (which don't have access to secrets). Use `pull_request_target` only with strict workflow hardening.
-- **Docker action:** Runs as root inside an ephemeral container. GitHub Actions mounts `/github/workspace`, `/github/file_commands`, and other paths owned by the host runner UID; dropping to a non-root user breaks post-step writes (`GITHUB_OUTPUT`, `GITHUB_STEP_SUMMARY`). The container is destroyed after the job step. For host-runner execution (`python -m omargate.main`), the runner's own user context applies.
-- **Secrets in findings:** All secrets in finding snippets are masked with `****` by `mask_secret_in_snippet()`.
+- **Runtime:** `action.yml` currently uses the composite runner path. Its dependency install and action import boundaries are described above. The separately supplied Docker image uses an ephemeral root container and an image-owned normal Python entry; neither mode label proves safety of arbitrary overridden or standalone commands.
+- **Secrets and display:** Recognized secret-source lines/paths and diagnostic token patterns have explicit exclusion/redaction rules; this is not complete arbitrary-secret discovery or a promise that every snippet/log is secret-free. Keep provider-state, artifact, diagnostic and display-rendering boundaries separate. The Step Summary encodes untrusted scalar display values, while fixed template structure remains authored by the action; other renderers require their own review.
 - **Artifact integrity:** `PACK_SUMMARY.json` contains SHA-256 of `FINDINGS.jsonl`. Gate validates checksums before evaluating.
 
 ---
