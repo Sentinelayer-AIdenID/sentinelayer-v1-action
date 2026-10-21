@@ -18,6 +18,7 @@ _JSON_SECRET_RE = re.compile(
       ["']?\s*[:=]\s*["']?
     )
     (?!\[redacted(?:-secret|-provider-id)?\](?:["',\s}\]]|$))
+    (?!\$\{\{\s*secrets\.[A-Za-z_][A-Za-z0-9_]*\s*\}\}(?:["',\s}\]]|$))
     (?P<value>[^"',\s}\]]{8,})
     """
 )
@@ -100,6 +101,12 @@ _SOURCE_SECRET_LINE_RE = re.compile(
     """
 )
 _SECRET_SOURCE_MARKER = "[secret-bearing source excluded]"
+_SYMBOLIC_SECRET_ASSIGNMENT_RE = re.compile(
+    r"""^(?P<prefix>\s*[+-]?\s*(?:export\s+)?[\w.-]+\s*[:=]\s*)
+    (?P<quote>["']?)\$\{\{\s*secrets\.[A-Za-z_][A-Za-z0-9_]*\s*\}\}(?P=quote)
+    (?P<suffix>[ \t]*(?:\#.*)?)$""",
+    re.VERBOSE,
+)
 
 
 def is_sensitive_source_path(file_path: object) -> bool:
@@ -140,11 +147,17 @@ def redact_secret_source(value: object, *, file_path: object = "") -> tuple[str,
     for line in text.splitlines(keepends=True):
         begins_private_key = bool(_PRIVATE_KEY_BEGIN_RE.search(line))
         ends_private_key = bool(_PRIVATE_KEY_END_RE.search(line))
+        symbolic = _SYMBOLIC_SECRET_ASSIGNMENT_RE.fullmatch(line.rstrip("\r\n"))
+        # A whole static GitHub secret reference contains no credential bytes.
+        # Replace it only for detection, retaining the original source and its
+        # hash. Keep comments visible to the detector; mixed/dynamic values,
+        # sensitive files and PEM blocks receive no exemption.
+        detection_line = (symbolic["prefix"] + "placeholder" + symbolic["suffix"]) if symbolic else line
         exclude_line = (
             exclude_all
             or private_key_block
             or begins_private_key
-            or bool(_SOURCE_SECRET_LINE_RE.search(line))
+            or bool(_SOURCE_SECRET_LINE_RE.search(detection_line))
         )
         if exclude_line:
             newline = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
