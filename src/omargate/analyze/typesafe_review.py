@@ -239,10 +239,17 @@ async def review_inventory(
     *, repo_root: Path, inventory: ReviewInventory, policy: ReviewPolicy,
     client: TypeSafeClient, model: str,
     context: dict[str, Any] | None = None,
+    source_scope=None,
 ) -> TypedReview:
     if not inventory.candidates or not policy.policy_id or not policy.calibration_id:
         raise TypeSafeReviewIncomplete("review_policy_or_coverage_unavailable")
-    verify_sources(repo_root, inventory)
+    def verify():
+        if source_scope is None:
+            verify_sources(repo_root, inventory)
+        else:
+            from .source_scope import verify_scope_partition
+            verify_scope_partition(repo_root, source_scope, inventory)
+    verify()
     by_id = {candidate.candidate_id: candidate for candidate in inventory.candidates}
     if len(by_id) != len(inventory.candidates):
         raise TypeSafeReviewIncomplete("duplicate_source_candidate")
@@ -254,7 +261,7 @@ async def review_inventory(
     ):
         raise TypeSafeReviewIncomplete("incomplete_question_coverage")
     state = {
-        "scope": inventory.scan_mode,
+        "scope": source_scope.scan_mode if source_scope is not None else inventory.scan_mode,
         "policy_id": policy.policy_id,
         "calibration_id": policy.calibration_id,
         "candidates": [candidate.state() for candidate in inventory.candidates],
@@ -267,7 +274,7 @@ async def review_inventory(
     if len(request_bytes) > 48_000:
         raise TypeSafeReviewIncomplete("typed_question_budget_exceeded")
     response = await client.rate(state=state, questions=plan.questions, model=model)
-    verify_sources(repo_root, inventory)
+    verify()
     try:
         validate_answers(response.answers, plan.questions)
     except TypeSafeError:

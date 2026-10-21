@@ -64,6 +64,7 @@ def run_ingest(
     files_out: List[Dict[str, Any]] = []
     total_lines = 0
     in_scope_files = 0
+    read_failures = int(node_stats.get("read_failures", 0))
 
     for item in raw_files:
         rel_path = item.get("path")
@@ -79,6 +80,7 @@ def run_ingest(
         try:
             content = safe_read_text(file_path, max_bytes=max_file_size_bytes)
         except (OSError, ValueError) as exc:
+            read_failures += 1
             if logger:
                 logger.warning("ingest_file_read_failed", path=str(rel_path), error=str(exc))
             continue
@@ -122,6 +124,9 @@ def run_ingest(
             "binary_files": binary_files,
             "in_scope_files": in_scope_files,
             "total_lines": total_lines,
+            "truncated": truncated,
+            "too_large": too_large_files,
+            "read_failures": read_failures,
         },
         "files": files_out,
         "hotspots": hotspots,
@@ -218,11 +223,8 @@ _EXCLUDED_DIRS = {
 
 
 def _is_binary_file(path: Path) -> bool:
-    try:
-        with path.open("rb") as f:
-            chunk = f.read(4096)
-    except OSError:
-        return True
+    with path.open("rb") as f:
+        chunk = f.read(4096)
     if not chunk:
         return False
     if b"\x00" in chunk:
@@ -241,10 +243,14 @@ def _run_python_mapper(repo_root: Path, max_files: int, max_file_size_bytes: int
         "binary_files": 0,
         "too_large": 0,
         "truncated": False,
+        "read_failures": 0,
     }
     files: List[Dict[str, Any]] = []
 
-    for dirpath, dirnames, filenames in os.walk(root):
+    def unreadable_directory(_error):
+        stats["read_failures"] += 1
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=unreadable_directory):
         # Mutate dirnames in-place to prune traversal (os.walk contract).
         dirnames[:] = [
             d
@@ -264,6 +270,7 @@ def _run_python_mapper(repo_root: Path, max_files: int, max_file_size_bytes: int
             try:
                 st = full_path.stat()
             except OSError:
+                stats["read_failures"] += 1
                 continue
 
             stats["total_files"] += 1
@@ -272,7 +279,12 @@ def _run_python_mapper(repo_root: Path, max_files: int, max_file_size_bytes: int
                 stats["too_large"] += 1
                 continue
 
-            if _is_binary_file(full_path):
+            try:
+                binary = _is_binary_file(full_path)
+            except OSError:
+                stats["read_failures"] += 1
+                continue
+            if binary:
                 stats["binary_files"] += 1
                 continue
 

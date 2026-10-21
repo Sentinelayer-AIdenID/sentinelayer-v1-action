@@ -244,7 +244,7 @@ async def test_low_defect_escalates_and_later_clean_cannot_erase(configured, mon
     assert result.findings[0]["review_tier"] == "low"
 
 
-async def test_missing_scope_refuses_before_any_model_or_fake_cost(configured, monkeypatch):
+async def test_missing_whole_scope_refuses_before_any_paid_request(configured, monkeypatch):
     rate = AsyncMock(side_effect=AssertionError("must not call"))
     monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", rate)
     configured._run_llm_analysis = AsyncMock(return_value=generator_result(DEEP))
@@ -252,8 +252,9 @@ async def test_missing_scope_refuses_before_any_model_or_fake_cost(configured, m
     rate.assert_not_awaited()
     configured._run_llm_analysis.assert_not_awaited()
     assert not result.success and not result.attempted
-    assert result.usage["excellence"]["domains"][0]["status"] == "unassessed"
+    assert result.usage["source_scope"]["complete"] is False
     assert result.usage["cost_ledger"]["calls"] == []
+    assert result.usage["cost_ledger"]["estimated_total_usd"] is None
 
 
 async def test_source_change_during_triage_fails_closed(configured, monkeypatch):

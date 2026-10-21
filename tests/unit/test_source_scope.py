@@ -1,0 +1,87 @@
+import subprocess
+
+import pytest
+
+from omargate.analyze.source_scope import build_source_scope, verify_source_scope
+from omargate.analyze.typesafe_review import TypeSafeReviewIncomplete
+
+
+@pytest.fixture
+def tracked(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    def add(name, raw=b"value = 1\n"):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        subprocess.run(["git", "-C", str(tmp_path), "add", "--", name], check=True)
+    add("src/x.py")
+    return tmp_path, add
+
+
+@pytest.mark.parametrize("mode", ["deep", "nightly"])
+def test_whole_tracked_scope_retains_last_file_empty_hash_and_declared_exclusions(tracked, mode):
+    root, add = tracked
+    add("src/z.py", b"last_file = True\n")
+    add("src/empty.py", b"")
+    add("tests/test_x.py")
+    (root / "untracked.py").write_text("outside = True\n")
+    scope = build_source_scope(root, mode)
+    assert set(dict(scope.source_hashes)) == {"src/x.py", "src/z.py", "src/empty.py"}
+    assert {c.file_path for c in scope.inventory.candidates} == {"src/x.py", "src/z.py"}
+    assert scope.exclusions == (("tests/test_x.py", "declared_ignore_policy"),)
+    assert scope.manifest()["untracked_files"] == "outside_declared_scope"
+    assert build_source_scope(root, mode) == scope
+    verify_source_scope(root, scope)
+
+
+def test_required_tail_mutation_and_new_tracked_file_cannot_pass(tracked):
+    root, add = tracked
+    add("src/z.py")
+    scope = build_source_scope(root, "deep")
+    (root / "src/z.py").write_text("changed = True\n")
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_changed"):
+        verify_source_scope(root, scope)
+    (root / "src/z.py").write_bytes(b"value = 1\n")
+    add("src/new.py")
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_scope_changed"):
+        verify_source_scope(root, scope)
+
+
+def test_ignore_policy_changes_cannot_silently_reduce_coverage(tracked):
+    root, _ = tracked
+    scope = build_source_scope(root, "deep")
+    (root / ".sentinelayerignore").write_text("src/**\n")
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_scope_changed"):
+        verify_source_scope(root, scope)
+
+
+@pytest.mark.parametrize("raw,code", [(b"x\0y", "unsupported_source_bytes"), (b"\xff", "unsupported_source_encoding")])
+def test_required_unreadable_bytes_do_not_become_clean(tracked, raw, code):
+    root, add = tracked
+    add("src/z.py", raw)
+    with pytest.raises(TypeSafeReviewIncomplete, match=code):
+        build_source_scope(root, "deep")
+
+
+def test_binary_exclusion_cannot_be_replaced_by_text(tracked):
+    root, add = tracked
+    add("icon.png", b"image\0data")
+    scope = build_source_scope(root, "deep")
+    assert ("icon.png", "binary_non_text") in scope.exclusions
+    (root / "icon.png").write_text("now code\n")
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_scope_changed"):
+        verify_source_scope(root, scope)
+
+
+@pytest.mark.parametrize("budget,kwargs", [("byte", {"max_total_bytes": 5}), ("candidate", {"max_candidates": 1})])
+def test_scope_budgets_refuse_instead_of_dropping_tail(tracked, budget, kwargs):
+    root, add = tracked
+    add("src/z.py")
+    with pytest.raises(TypeSafeReviewIncomplete, match="budget_exceeded"):
+        build_source_scope(root, "deep", **kwargs)
+
+
+def test_no_git_inventory_is_unknown(tmp_path):
+    (tmp_path / "x.py").write_text("x = 1\n")
+    with pytest.raises(TypeSafeReviewIncomplete, match="inventory_unavailable"):
+        build_source_scope(tmp_path, "deep")
