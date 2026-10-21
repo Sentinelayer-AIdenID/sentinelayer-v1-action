@@ -77,24 +77,10 @@ _MANIFESTS_BY_ECOSYSTEM: dict[AuditEcosystem, frozenset[str]] = {
     "pip": frozenset(_PYTHON_MANIFESTS),
     "cargo": frozenset({"Cargo.toml"}),
 }
-_DISCOVERY_EXCLUDED_DIRECTORIES = frozenset(
-    {
-        ".git",
-        ".hg",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".svn",
-        ".tox",
-        ".venv",
-        "__pycache__",
-        "build",
-        "dist",
-        "node_modules",
-        "target",
-        "vendor",
-        "venv",
-    }
-)
+# Installed npm dependencies are not independent application projects. Every
+# other directory name may contain required manifests; bounded traversal must
+# either discover them or refuse completeness, never infer generated content.
+_DISCOVERY_EXCLUDED_DIRECTORIES = frozenset({"node_modules"})
 _PIP_ROUTING_CONFIG_PATHS = (
     "pip.conf",
     "pip.ini",
@@ -1136,7 +1122,7 @@ class DepAuditSuite(SecuritySuite):
                 mode = "empty_declared_graph"
             else:
                 _, outcome = await self._npm_audit_project(manifest.parent,
-                    _ManifestDiscovery(manifest.parent, True, (manifest,), (), ()))
+                    _ManifestDiscovery(manifest.parent, True, (manifest,), (), ()), workspace_root=root)
             unchanged = fingerprint(manifest) == manifest_hash and fingerprint(lock) == lock_hash
             if outcome.state == "indeterminate":
                 mode = "incomplete"
@@ -1167,6 +1153,7 @@ class DepAuditSuite(SecuritySuite):
         self,
         root: Path,
         discovery: _ManifestDiscovery | None = None,
+        *, workspace_root: Path,
     ) -> tuple[Optional[Finding], DependencyAuditOutcome]:
         discovery = discovery or _discover_manifests(root)
         outcome = _layout_outcome(discovery, "npm")
@@ -1187,7 +1174,12 @@ class DepAuditSuite(SecuritySuite):
             return _outcome_finding(outcome), outcome
 
         try:
-            project_root = root.resolve(strict=True)
+            # The input directory can be nested. Process tools, PATH, CA files
+            # and scratch must still exclude the entire untrusted checkout.
+            project_root = workspace_root.resolve(strict=True)
+            if not _is_within(root.resolve(strict=True), project_root):
+                outcome = DependencyAuditOutcome.indeterminate("npm", "unsafe_manifest")
+                return _outcome_finding(outcome), outcome
             with _PrivateScratch(prefix="omargate-npm-audit-") as audit_scratch:
                 audit_cwd = audit_scratch.path.resolve(strict=True)
                 if _is_within(audit_cwd, project_root):
@@ -1195,7 +1187,7 @@ class DepAuditSuite(SecuritySuite):
                         "npm", "unsafe_working_directory"
                     )
                 elif not _copy_safe_project_file(
-                    project_root,
+                    root,
                     root / "package.json",
                     audit_cwd / "package.json",
                     max_bytes=_MAX_NPM_INPUT_BYTES,
@@ -1204,7 +1196,7 @@ class DepAuditSuite(SecuritySuite):
                         "npm", "unsafe_manifest"
                     )
                 elif not _copy_safe_project_file(
-                    project_root,
+                    root,
                     lockfile,
                     audit_cwd / lockfile.name,
                     max_bytes=_MAX_NPM_INPUT_BYTES,

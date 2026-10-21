@@ -183,6 +183,7 @@ def _validate_npm_project_evidence(evidence: dict, aggregate: dict) -> bool:
         if (not path_ok(path) or not digest_ok(audit["manifest_sha256"]) or audit["input_unchanged"] is not True
                 or not isinstance(outcome, dict) or set(outcome) != _DEPENDENCY_AUDIT_OUTCOME_KEYS
                 or outcome["ecosystem"] != "npm" or outcome["applicable"] is not True
+                or not isinstance(outcome["state"], str)
                 or outcome["state"] not in {"clean", "vulnerable"} or outcome["reason_code"] is not None
                 or type(outcome["vulnerability_count"]) is not int or outcome["vulnerability_count"] < 0):
             return False
