@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 from dataclasses import replace
 from unittest.mock import AsyncMock
@@ -42,6 +43,71 @@ async def run_full(orchestrator, **kwargs):
     return await orchestrator._run_cascade_analysis(ingest={"files": [{"path": "x.py"}]},
         changed_files=None, scan_mode=kwargs.pop("scan_mode", "deep"), deterministic_findings=kwargs.pop("deterministic_findings", []),
         quick_learn=None, spec_context=None, diff_content=None, run_dir=kwargs.pop("run_dir", None))
+
+
+@pytest.mark.parametrize("name,prefix", [("payload.gif", "GIF89a = 0;"),
+                                        ("payload.webp", "RIFF=0; WEBP=0;")])
+async def test_executable_utf8_image_header_cannot_waive_provider_coverage(full, name, prefix):
+    payload = prefix + "\nconsole.log('owned_source_fixture');\n"
+    root = full.repo_root
+    (root / name).write_bytes(payload.encode("utf-8"))
+    (root / "entry.cjs").write_bytes(f"require('./{name}');\n".encode())
+    subprocess.run(["git", "-C", str(root), "add", "--", name, "entry.cjs"], check=True)
+    commit(root)
+    node = shutil.which("node")
+    if node:
+        execution = subprocess.run([node, "entry.cjs"], cwd=root, capture_output=True,
+                                   text=True, check=True, timeout=30)
+        assert "owned_source_fixture" in execution.stdout
+    result = await run_full(full)
+    assert result.success, result.usage
+    contexts = [json.loads(call.kwargs["source_context"]) for call in full._run_llm_analysis.call_args_list]
+    assert any(candidate["file_path"] == name and candidate["evidence"] == payload
+               for context in contexts for candidate in context["candidates"])
+    assert not result.usage["source_scope"]["scope"]["exclusions"]
+
+
+@pytest.mark.parametrize("name,prefix", [("payload.gif", b"GIF89a = 0;"),
+                                        ("payload.webp", b"RIFF=0; WEBP=0;")])
+async def test_tolerant_runtime_image_script_cannot_be_waived_as_binary(full, name, prefix):
+    from omargate.analyze.typesafe_client import TypeSafeClient
+    # Node replaces invalid UTF8 inside this comment and still executes it.
+    payload = prefix + b" //\xff\nconsole.log('owned_source_fixture');\n"
+    root = full.repo_root
+    (root / name).write_bytes(payload)
+    (root / "entry.cjs").write_bytes(f"require('./{name}');\n".encode())
+    subprocess.run(["git", "-C", str(root), "add", "--", name, "entry.cjs"], check=True)
+    commit(root)
+    node = shutil.which("node")
+    if node:
+        execution = subprocess.run([node, "entry.cjs"], cwd=root, capture_output=True,
+                                   text=True, check=True, timeout=30)
+        assert "owned_source_fixture" in execution.stdout
+    result = await run_full(full)
+    assert not result.success and not result.attempted
+    assert result.usage["source_scope"]["reason_code"] == "unsupported_source_encoding"
+    TypeSafeClient.rate.assert_not_awaited()
+    full._run_llm_analysis.assert_not_awaited()
+
+
+@pytest.mark.parametrize("raw", [b"safe_value = 1\n", b"", b"\x89PNG\r\n\x1a\n\0"])
+async def test_late_credential_filename_refuses_whole_plan_and_artifacts_before_providers(full, tmp_path, raw):
+    from omargate.analyze.typesafe_client import TypeSafeClient
+    credential = "sk-" + "OWNEDFAKETOKEN0123456789"
+    name = "zzzz/" + credential + (".png" if raw.startswith(b"\x89PNG") else ".py")
+    target = full.repo_root / name
+    target.parent.mkdir()
+    target.write_bytes(raw)
+    subprocess.run(["git", "-C", str(full.repo_root), "add", "--", name], check=True)
+    commit(full.repo_root)
+    result = await run_full(full, run_dir=tmp_path / "evidence")
+    assert not result.success and not result.attempted
+    assert result.usage["source_scope"]["reason_code"] == "redacted_source"
+    assert result.usage["source_scope"]["scope"] is None
+    TypeSafeClient.rate.assert_not_awaited()
+    full._run_llm_analysis.assert_not_awaited()
+    assert credential not in json.dumps(result.usage)
+    assert credential not in (tmp_path / "evidence/SOURCE_SCOPE.json").read_text()
 
 
 @pytest.mark.parametrize("name", ["tail.mjs", "tail.cjs", "scripts/tail"])

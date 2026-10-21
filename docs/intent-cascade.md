@@ -93,9 +93,14 @@ Whole-source deep/nightly coverage includes every tracked UTF-8 text file,
 including tests, build/dist directories and a tracked `.sentinelayerignore`.
 Neither that PR-controlled file nor the legacy ingest defaults waive tracked
 text coverage. Untracked files remain outside the declared scope. A binary
-exclusion requires both a recognized image extension (PNG, JPEG, GIF, WebP or
-ICO) and its matching magic signature; this classification is not an image
-security audit. NUL-bearing scripts, other undeclared binary formats and
+exclusion requires bytes that fail strict UTF-8 decoding, a recognized image
+extension (PNG, JPEG or ICO), and its matching magic signature; this
+classification is not an image security audit. UTF-8 text is reviewed regardless
+of its image extension/header; UTF-8 NUL-bearing files refuse rather than vanish.
+GIF/WebP headers can begin executable JavaScript even when the loader replaces
+invalid UTF-8 inside comments, so those files must be reviewed as exact UTF-8 or
+refuse. Undecodable GIF/WebP images therefore block this bounded text review.
+NUL-bearing scripts, other undeclared binary formats and
 unsupported text encodings refuse the complete plan before providers. Text
 and excluded image bytes are bound to committed Git blobs and rechecked around
 provider calls. A changed image cannot remain excluded merely by retaining a
@@ -104,6 +109,8 @@ NUL or its magic header.
 Scanner auxiliary context applies the credential-only redactor before public
 diagnostic sanitization. Secret-category hits stay in local deterministic
 evidence and do not enter whole-source provider state. These rules do not waive
-source privacy or native gates. The existing native census and per-file/total
+source privacy or native gates. Recognized credentials in source paths refuse the
+whole plan before providers or a source manifest; coordinates are never rewritten
+to manufacture source coverage. The existing native census and per-file/total
 byte/candidate/request/spend limits can still refuse a large repository; a
 refusal is incomplete coverage, never permission to silently clip its tail.

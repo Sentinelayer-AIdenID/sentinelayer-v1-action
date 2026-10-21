@@ -29,6 +29,13 @@ class TypeSafeReviewIncomplete(ValueError):
     """A bounded reason, safe to retain without source or credential bodies."""
 
 
+def verify_source_path_privacy(relative: str) -> None:
+    # Coordinates are source too. Refuse instead of rewriting a path and
+    # breaking its binding to the committed file/line evidence.
+    if redact_secret_source(relative, code_context=False)[1]:
+        raise TypeSafeReviewIncomplete("redacted_source")
+
+
 def _digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -44,6 +51,7 @@ class ReviewCandidate:
     source_sha256: str
 
     def state(self) -> dict[str, Any]:
+        verify_source_path_privacy(self.file_path)
         # Source privacy is credential-only. Public-error identifier scrubbing
         # must not alter ordinary source or its coverage/verification decision.
         source_safe, source_redacted = redact_secret_source(
@@ -123,6 +131,7 @@ def _source_path(repo_root: Path, relative: str) -> Path:
     logical = PurePosixPath(relative)
     if logical.is_absolute() or any(part in {".", ".."} for part in relative.split("/")):
         raise TypeSafeReviewIncomplete("unsupported_source_path")
+    verify_source_path_privacy(relative)
     target = (repo_root / relative).resolve()
     if not target.is_relative_to(repo_root.resolve()) or not target.is_file():
         raise TypeSafeReviewIncomplete("source_unavailable")

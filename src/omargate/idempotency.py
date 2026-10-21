@@ -5,7 +5,7 @@ import json
 import re
 from datetime import date, datetime, timezone
 
-GENERATOR_SOURCE_BOUNDARY_VERSION = "generator-source-privacy-v4:complete-tracked-text:image-magic:scanner-credential-backstop"
+GENERATOR_SOURCE_BOUNDARY_VERSION = "generator-source-privacy-v5:complete-tracked-text:non-utf8-png-jpeg-ico:private-coordinates:scanner-credential-backstop"
 
 
 def review_config_digest(config) -> str:

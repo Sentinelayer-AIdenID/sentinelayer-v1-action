@@ -9,7 +9,7 @@ import subprocess
 
 from .typesafe_review import (
     MAX_FILE_BYTES, ReviewInventory, TypeSafeReviewIncomplete, _source_path,
-    build_inventory, verify_sources,
+    build_inventory, verify_sources, verify_source_path_privacy,
 )
 
 
@@ -27,12 +27,15 @@ class SourceScope:
     git_blobs: tuple[tuple[str, str], ...]
 
     def manifest(self) -> dict:
+        for path in (*self.tracked_paths, *(path for path, _ in self.source_hashes),
+                     *(path for path, _ in self.exclusions), *(path for path, _ in self.git_blobs)):
+            verify_source_path_privacy(path)
         return {
             "scope_id": self.scope_id, "scan_mode": self.scan_mode,
             "source_head": self.source_head,
             "coverage": "all tracked text; ignore patterns cannot waive coverage",
             "ignore_policy": "no_tracked_text_exemptions",
-            "binary_exclusion_policy": "image-extension-and-magic-v1",
+            "binary_exclusion_policy": "non-utf8-png-jpeg-ico-magic-v2",
             "untracked_files": "outside_declared_scope",
             "source_hashes": dict(self.source_hashes),
             "exclusions": [{"file_path": path, "reason": reason} for path, reason in self.exclusions],
@@ -81,16 +84,15 @@ def _verify_blob(raw: bytes, expected: str) -> None:
 
 
 def _declared_image(relative: str, raw: bytes) -> bool:
-    """A NUL alone never establishes that executable source is a binary asset."""
+    """Called only after UTF8 decoding fails; header text cannot waive review."""
     suffix = Path(relative).suffix.lower()
     if suffix == ".png":
         return raw.startswith(b"\x89PNG\r\n\x1a\n")
     if suffix in {".jpg", ".jpeg"}:
         return raw.startswith(b"\xff\xd8\xff")
-    if suffix == ".gif":
-        return raw.startswith((b"GIF87a", b"GIF89a"))
-    if suffix == ".webp":
-        return raw.startswith(b"RIFF") and raw[8:12] == b"WEBP"
+    # GIF/WebP ASCII headers can also begin executable JavaScript. A tolerant
+    # loader still executes it with invalid UTF8 bytes inside a comment. Such
+    # files must be reviewed as exact UTF8 or refuse; never infer a waiver.
     if suffix == ".ico":
         return raw.startswith(b"\x00\x00\x01\x00")
     return False
@@ -129,17 +131,17 @@ def build_source_scope(
             raise TypeSafeReviewIncomplete("source_budget_exceeded")
         _verify_blob(raw, blobs[relative])
         hashes.append((relative, hashlib.sha256(raw).hexdigest()))
-        if _declared_image(relative, raw):
-            excluded.append((relative, "binary_non_text"))
-            continue
-        if b"\0" in raw:
-            raise TypeSafeReviewIncomplete("unsupported_source_bytes")
         try:
             raw.decode("utf-8")
         except UnicodeDecodeError:
+            if _declared_image(relative, raw):
+                excluded.append((relative, "binary_non_text"))
+                continue
             # Unlike a declared binary, an undecodable required text file may
             # contain code. It cannot silently disappear from the review.
             raise TypeSafeReviewIncomplete("unsupported_source_encoding") from None
+        if b"\0" in raw:
+            raise TypeSafeReviewIncomplete("unsupported_source_bytes")
         total += len(raw)
         if total > max_total_bytes:
             raise TypeSafeReviewIncomplete("full_source_byte_budget_exceeded")

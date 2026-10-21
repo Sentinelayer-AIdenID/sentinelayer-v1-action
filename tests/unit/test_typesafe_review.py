@@ -178,6 +178,17 @@ def test_inventory_requires_explicit_supported_source_scope(tmp_path: Path, mode
                         scan_mode=mode, max_candidates=50)
 
 
+def test_credential_coordinates_are_refused_in_inventory_and_candidate_state(tmp_path):
+    name = "sk-" + "OWNEDFAKETOKEN0123456789" + ".py"
+    (tmp_path / name).write_bytes(b"safe_value = 1\n")
+    with pytest.raises(TypeSafeReviewIncomplete, match="redacted_source"):
+        build_inventory(repo_root=tmp_path, ingest={"files": [{"path": name}]},
+                        changed_files=[name], scan_mode="pr-diff", max_candidates=50)
+    candidate = source_inventory(tmp_path, "safe_value = 1\n").candidates[0]
+    with pytest.raises(TypeSafeReviewIncomplete, match="redacted_source"):
+        replace(candidate, file_path=name).state()
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("forgery", ["quote", "line", "id", "source-hash", "evidence-hash", "gap"])
 async def test_forged_inventory_refuses_before_client(tmp_path: Path, forgery: str):

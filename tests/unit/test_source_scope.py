@@ -1,3 +1,4 @@
+from dataclasses import replace
 import subprocess
 
 import pytest
@@ -117,15 +118,14 @@ def test_untracked_ignore_policy_cannot_hide_required_source(tracked):
 
 @pytest.mark.parametrize("name,header", [
     ("icon.png", b"\x89PNG\r\n\x1a\n"), ("icon.jpg", b"\xff\xd8\xff"),
-    ("icon.jpeg", b"\xff\xd8\xff"), ("icon.gif", b"GIF89a"),
-    ("icon.webp", b"RIFF" + b"\0" * 4 + b"WEBP"), ("icon.ico", b"\0\0\x01\0"),
+    ("icon.jpeg", b"\xff\xd8\xff"), ("icon.ico", b"\0\0\x01\0"),
 ])
 def test_only_declared_images_are_excluded_and_their_exact_bytes_stay_bound(tracked, name, header):
     root, add = tracked
-    add(name, header + b"\0" * 12)
+    add(name, header + b"\xff" + b"\0" * 12)
     scope = build_source_scope(root, "deep")
     assert scope.exclusions == ((name, "binary_non_text"),)
-    (root / name).write_bytes(header + b"\0" * 11 + b"x")
+    (root / name).write_bytes(header + b"\xff" + b"\0" * 11 + b"x")
     with pytest.raises(TypeSafeReviewIncomplete, match="source_changed_during_review"):
         verify_source_scope(root, scope)
 
@@ -139,3 +139,23 @@ def test_nul_and_image_extension_or_magic_alone_do_not_establish_a_binary(tracke
     add(name, raw)
     with pytest.raises(TypeSafeReviewIncomplete, match="unsupported_source_bytes"):
         build_source_scope(root, "deep")
+
+
+@pytest.mark.parametrize("name,raw", [("icon.gif", b"GIF89a\0"),
+                                    ("icon.webp", b"RIFF\0\0\0\0WEBP"),
+                                    ("icon.ico", b"\0\0\x01\0")])
+def test_utf8_nul_bytes_under_image_magic_refuse_instead_of_excluding(tracked, name, raw):
+    root, add = tracked
+    add(name, raw)
+    with pytest.raises(TypeSafeReviewIncomplete, match="unsupported_source_bytes"):
+        build_source_scope(root, "deep")
+
+
+@pytest.mark.parametrize("field", ["tracked_paths", "source_hashes", "exclusions", "git_blobs"])
+def test_scope_manifest_never_serializes_credential_coordinates(tracked, field):
+    root, _ = tracked
+    scope = build_source_scope(root, "deep")
+    name = "sk-" + "OWNEDFAKETOKEN0123456789" + ".py"
+    value = (name,) if field == "tracked_paths" else ((name, "fixture"),)
+    with pytest.raises(TypeSafeReviewIncomplete, match="redacted_source"):
+        replace(scope, **{field: value}).manifest()
