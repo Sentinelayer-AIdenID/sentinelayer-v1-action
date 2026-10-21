@@ -114,11 +114,11 @@ def test_dependency_audit_contract_and_harness_mode_are_bound() -> None:
     assert enabled != prior_contract
 
 
-def test_dependency_audit_schema_1_1_rotates_both_contract_tokens() -> None:
-    assert DEPENDENCY_AUDIT_CONTRACT_VERSION == "dependency-audit-evidence-v1.1"
+def test_dependency_audit_schema_1_2_rotates_both_contract_tokens() -> None:
+    assert DEPENDENCY_AUDIT_CONTRACT_VERSION == "dependency-audit-evidence-v1.2"
     assert (
         ACTION_IDEMPOTENCY_VERSION
-        == "2:dependency-audit-v1.1:private-policy:review-config:verified-model"
+        == "3:dependency-audit-v1.2:project-coverage:private-policy:review-config:verified-model"
     )
 
     common = {
@@ -143,6 +143,10 @@ def test_dependency_audit_schema_1_1_rotates_both_contract_tokens() -> None:
     )
 
     assert current != prior_schema
+    assert current != compute_idempotency_key(
+        action_major_version="2:dependency-audit-v1.1:private-policy:review-config:verified-model",
+        audit_contract_version="dependency-audit-evidence-v1.1", **common,
+    )
 
 
 def test_pip_audit_ignore_ids_are_canonicalized_for_idempotency() -> None:

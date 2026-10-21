@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
 from typing import Any, Dict, Optional, Tuple
 
 from .models import (
@@ -18,7 +19,7 @@ from .utils import sha256_file, sha256_hex
 
 _DEPENDENCY_AUDIT_ECOSYSTEMS = frozenset(DEPENDENCY_AUDIT_COVERAGE_SCOPE)
 _DEPENDENCY_AUDIT_EVIDENCE_KEYS = frozenset(
-    {"schema_version", "enabled", "complete", "coverage_scope", "outcomes"}
+    {"schema_version", "enabled", "complete", "coverage_scope", "outcomes", "npm_projects"}
 )
 _DEPENDENCY_AUDIT_OUTCOME_KEYS = frozenset(
     {
@@ -152,6 +153,57 @@ def _validate_llm_evidence(summary: Dict[str, Any]) -> Tuple[bool, Optional[str]
     ):
         return False, "FAIL-CLOSED: live LLM latency evidence is invalid."
     return True, None
+
+
+def _validate_npm_project_evidence(evidence: dict, aggregate: dict) -> bool:
+    projects = evidence.get("npm_projects")
+    if not isinstance(projects, dict) or set(projects) != {"discovered_manifests", "audits"}:
+        return False
+    declared, audits = projects["discovered_manifests"], projects["audits"]
+    def path_ok(value):
+        return (isinstance(value, str) and bool(value) and "\\" not in value and ":" not in value
+                and "\0" not in value and not PurePosixPath(value).is_absolute()
+                and all(part not in {"", ".", ".."} for part in value.split("/")))
+    def digest_ok(value):
+        return isinstance(value, str) and re.fullmatch(r"[a-f0-9]{64}", value) is not None
+    if (not isinstance(declared, list) or not isinstance(audits, list) or len(declared) > 32
+            or any(not path_ok(path) or PurePosixPath(path).name != "package.json" for path in declared)
+            or len(set(declared)) != len(declared) or declared != sorted(declared)):
+        return False
+    if aggregate["applicable"] is False:
+        return not declared and not audits
+    if not declared or len(audits) != len(declared):
+        return False
+    observed = []
+    total = 0
+    for audit in audits:
+        if not isinstance(audit, dict) or set(audit) != {"manifest_path", "manifest_sha256", "lockfile_path", "lockfile_sha256", "mode", "input_unchanged", "outcome"}:
+            return False
+        path, outcome = audit["manifest_path"], audit["outcome"]
+        if (not path_ok(path) or not digest_ok(audit["manifest_sha256"]) or audit["input_unchanged"] is not True
+                or not isinstance(outcome, dict) or set(outcome) != _DEPENDENCY_AUDIT_OUTCOME_KEYS
+                or outcome["ecosystem"] != "npm" or outcome["applicable"] is not True
+                or outcome["state"] not in {"clean", "vulnerable"} or outcome["reason_code"] is not None
+                or type(outcome["vulnerability_count"]) is not int or outcome["vulnerability_count"] < 0):
+            return False
+        count = outcome["vulnerability_count"]
+        if (outcome["state"] == "clean") != (count == 0):
+            return False
+        if audit["mode"] == "empty_declared_graph":
+            if audit["lockfile_path"] is not None or audit["lockfile_sha256"] is not None or count:
+                return False
+        elif audit["mode"] == "registry_graph":
+            lock = audit["lockfile_path"]
+            if (not path_ok(lock) or not digest_ok(audit["lockfile_sha256"])
+                    or PurePosixPath(lock).parent != PurePosixPath(path).parent
+                    or PurePosixPath(lock).name not in {"package-lock.json", "npm-shrinkwrap.json"}):
+                return False
+        else:
+            return False
+        observed.append(path)
+        total += count
+    return (observed == declared and aggregate["vulnerability_count"] == total
+            and aggregate["state"] == ("vulnerable" if total else "clean"))
 
 
 def _validate_dependency_audit_evidence(
@@ -400,6 +452,9 @@ def _validate_dependency_audit_evidence(
                 "audit finding.",
                 0,
             )
+    npm = next(outcome for outcome in outcomes if outcome["ecosystem"] == "npm")
+    if not _validate_npm_project_evidence(evidence, npm):
+        return False, "FAIL-CLOSED: npm project coverage evidence is incomplete or inconsistent.", 0
     return True, None, vulnerable_outcomes
 
 

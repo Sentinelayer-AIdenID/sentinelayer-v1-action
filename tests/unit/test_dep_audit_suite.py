@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from omargate.harness.runner import CommandResult, CommandStatus
+from omargate.models import DEPENDENCY_AUDIT_SCHEMA_VERSION
 from omargate.harness.suites import dep_audit
 from omargate.harness.suites.dep_audit import (
     DepAuditSuite,
@@ -408,9 +409,10 @@ def test_parse_ignore_ids_splits_and_deduplicates() -> None:
 
 def test_disabled_dependency_audit_emits_exact_opt_out_evidence() -> None:
     assert disabled_dependency_audit_evidence() == {
-        "schema_version": "1.1",
+        "schema_version": DEPENDENCY_AUDIT_SCHEMA_VERSION,
         "enabled": False,
         "complete": True,
+        "npm_projects": {"discovered_manifests": [], "audits": []},
         "coverage_scope": {
             "npm": "package_lock_registry_graph",
             "pip": "declared_direct_pins",
@@ -999,7 +1001,7 @@ async def test_nested_dependency_project_is_indeterminate_without_spawning(
 
     assert called is False
     assert finding is not None
-    assert outcome.reason_code == "unsupported_project_layout"
+    assert outcome.reason_code == ("unsafe_manifest" if tool == "npm" else "unsupported_project_layout")
     assert "PRIVATE_" not in json.dumps(asdict(finding), sort_keys=True)
 
 
@@ -1221,9 +1223,10 @@ async def test_all_nonapplicable_ecosystems_emit_complete_exact_evidence(
 
     assert result.findings == []
     assert result.evidence.to_dict() == {
-        "schema_version": "1.1",
+        "schema_version": DEPENDENCY_AUDIT_SCHEMA_VERSION,
         "enabled": True,
         "complete": True,
+        "npm_projects": {"discovered_manifests": [], "audits": []},
         "coverage_scope": {
             "npm": "package_lock_registry_graph",
             "pip": "declared_direct_pins",
