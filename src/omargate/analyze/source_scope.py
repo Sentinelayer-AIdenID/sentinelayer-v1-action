@@ -25,10 +25,13 @@ class SourceScope:
     ignore_patterns: tuple[str, ...]
     total_bytes: int
     scope_id: str
+    source_head: str
+    git_blobs: tuple[tuple[str, str], ...]
 
     def manifest(self) -> dict:
         return {
             "scope_id": self.scope_id, "scan_mode": self.scan_mode,
+            "source_head": self.source_head,
             "coverage": "all tracked text within the declared ignore policy",
             "untracked_files": "outside_declared_scope",
             "source_hashes": dict(self.source_hashes),
@@ -54,6 +57,29 @@ def _tracked_paths(repo_root: Path) -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
+def _committed_tree(repo_root: Path) -> tuple[str, tuple[tuple[str, str], ...]]:
+    try:
+        head = subprocess.check_output(["git", "-C", str(repo_root), "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, timeout=30).decode().strip()
+        tree = subprocess.check_output(["git", "-C", str(repo_root), "ls-tree", "-r", "-z", "HEAD"], timeout=30).decode("utf-8")
+        blobs = []
+        for row in tree.rstrip("\0").split("\0"):
+            info, path = row.split("\t", 1)
+            _, kind, digest = info.split(" ")
+            if kind != "blob":
+                raise TypeSafeReviewIncomplete("unsupported_tracked_source_type")
+            blobs.append((path, digest))
+        return head, tuple(sorted(blobs))
+    except (OSError, subprocess.SubprocessError, ValueError, UnicodeError):
+        raise TypeSafeReviewIncomplete("committed_source_inventory_unavailable") from None
+
+
+def _verify_blob(raw: bytes, expected: str) -> None:
+    blob = b"blob " + str(len(raw)).encode() + b"\0" + raw
+    actual = hashlib.sha1(blob, usedforsecurity=False).hexdigest() if len(expected) == 40 else hashlib.sha256(blob).hexdigest()
+    if actual != expected:
+        raise TypeSafeReviewIncomplete("source_differs_from_committed_blob")
+
+
 def build_source_scope(
     repo_root: Path, scan_mode: str, *, max_total_bytes: int = 8_000_000,
     max_candidates: int = 10_000,
@@ -63,6 +89,12 @@ def build_source_scope(
     if type(max_total_bytes) is not int or max_total_bytes < 1 or type(max_candidates) is not int or max_candidates < 1:
         raise TypeSafeReviewIncomplete("invalid_full_source_budget")
     tracked = _tracked_paths(repo_root)
+    head, git_blobs = _committed_tree(repo_root)
+    blobs = dict(git_blobs)
+    if tracked != tuple(path for path, _ in git_blobs):
+        raise TypeSafeReviewIncomplete("source_scope_changed")
+    if (repo_root / ".sentinelayerignore").exists() and ".sentinelayerignore" not in blobs:
+        raise TypeSafeReviewIncomplete("unbound_source_ignore_policy")
     ignores = tuple(_load_ignore_patterns(repo_root))
     candidates, required_hashes, hashes, excluded = [], [], [], []
     total = 0
@@ -81,6 +113,7 @@ def build_source_scope(
             raise TypeSafeReviewIncomplete("source_unavailable") from None
         if len(raw) > MAX_FILE_BYTES:
             raise TypeSafeReviewIncomplete("source_budget_exceeded")
+        _verify_blob(raw, blobs[relative])
         if b"\0" in raw:
             if classify_file(relative).category != "other":
                 raise TypeSafeReviewIncomplete("unsupported_source_bytes")
@@ -107,14 +140,16 @@ def build_source_scope(
     if not candidates:
         raise TypeSafeReviewIncomplete("empty_source_scope")
     inventory = ReviewInventory(tuple(candidates), tuple(required_hashes), "pr-diff")
-    identity = json.dumps([scan_mode, tracked, hashes, excluded, ignores], ensure_ascii=False).encode("utf-8")
+    identity = json.dumps([head, scan_mode, tracked, hashes, excluded, ignores], ensure_ascii=False).encode("utf-8")
     scope = SourceScope(inventory, scan_mode, tracked, tuple(hashes), tuple(excluded), ignores,
-                        total, "scope-" + hashlib.sha256(identity).hexdigest())
+                        total, "scope-" + hashlib.sha256(identity).hexdigest(), head, git_blobs)
     verify_source_scope(repo_root, scope)
     return scope
 
 
 def verify_source_scope(repo_root: Path, scope: SourceScope) -> None:
+    if _committed_tree(repo_root) != (scope.source_head, scope.git_blobs):
+        raise TypeSafeReviewIncomplete("source_scope_changed")
     if _tracked_paths(repo_root) != scope.tracked_paths or tuple(_load_ignore_patterns(repo_root)) != scope.ignore_patterns:
         raise TypeSafeReviewIncomplete("source_scope_changed")
     for relative, expected in scope.source_hashes:

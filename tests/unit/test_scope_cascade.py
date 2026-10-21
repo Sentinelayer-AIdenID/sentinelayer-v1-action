@@ -23,12 +23,19 @@ def full(request, monkeypatch):
     orchestrator = request.getfixturevalue("configured")
     root = orchestrator.repo_root
     subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "core.autocrlf", "false"], check=True)
     (root / "z.py").write_bytes(b"tail = 2\n")
     subprocess.run(["git", "-C", str(root), "add", "x.py", "z.py"], check=True)
+    commit(root)
     orchestrator.config = orchestrator.config.model_copy(update={"typesafe_max_candidates": 1})
     monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", AsyncMock(return_value=triage()))
     orchestrator._run_llm_analysis = AsyncMock(side_effect=lambda **kwargs: generator_result(kwargs["review_route"]))
     return orchestrator
+
+
+def commit(root):
+    subprocess.run(["git", "-C", str(root), "add", "-u"], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "owned fixture"], check=True)
 
 
 async def run_full(orchestrator, **kwargs):
@@ -58,6 +65,7 @@ async def test_real_full_scope_loop_reviews_tail_preserves_coordinates_and_count
 
 async def test_late_redaction_refuses_entire_plan_without_spending_on_earlier_partition(full):
     (full.repo_root / "z.py").write_text("password = '" + "not-" + "a-credential'\n")
+    commit(full.repo_root)
     result = await run_full(full)
     full._run_llm_analysis.assert_not_awaited()
     assert not result.success
@@ -95,6 +103,7 @@ async def test_incomplete_native_census_refuses_before_models(full, key):
 
 async def test_oversize_tail_refuses_complete_plan_before_first_provider(full):
     (full.repo_root / "z.py").write_bytes(b"content = '" + b"a" * 100_000 + b"'\n")
+    commit(full.repo_root)
     result = await run_full(full)
     full._run_llm_analysis.assert_not_awaited()
     assert not result.success and result.usage["cost_ledger"]["calls"] == []

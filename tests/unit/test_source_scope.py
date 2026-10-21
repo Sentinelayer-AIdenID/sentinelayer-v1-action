@@ -9,11 +9,13 @@ from omargate.analyze.typesafe_review import TypeSafeReviewIncomplete
 @pytest.fixture
 def tracked(tmp_path):
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "core.autocrlf", "false"], check=True)
     def add(name, raw=b"value = 1\n"):
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(raw)
         subprocess.run(["git", "-C", str(tmp_path), "add", "--", name], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "owned fixture"], check=True)
     add("src/x.py")
     return tmp_path, add
 
@@ -85,3 +87,25 @@ def test_no_git_inventory_is_unknown(tmp_path):
     (tmp_path / "x.py").write_text("x = 1\n")
     with pytest.raises(TypeSafeReviewIncomplete, match="inventory_unavailable"):
         build_source_scope(tmp_path, "deep")
+
+
+def test_uncommitted_source_and_normalized_crlf_cannot_claim_committed_blob_identity(tracked):
+    root, _ = tracked
+    path = root / "src/x.py"
+    path.write_bytes(b"changed = True\n")
+    with pytest.raises(TypeSafeReviewIncomplete, match="differs_from_committed_blob"):
+        build_source_scope(root, "deep")
+    subprocess.run(["git", "-C", str(root), "config", "core.autocrlf", "true"], check=True)
+    path.write_bytes(b"value = 1\r\n")
+    subprocess.run(["git", "-C", str(root), "add", "--renormalize", "src/x.py"], check=True)
+    # Git normalizes this working file, so ordinary git status is clean.
+    assert not subprocess.check_output(["git", "-C", str(root), "status", "--porcelain"])
+    with pytest.raises(TypeSafeReviewIncomplete, match="differs_from_committed_blob"):
+        build_source_scope(root, "deep")
+
+
+def test_untracked_ignore_policy_cannot_hide_required_source(tracked):
+    root, _ = tracked
+    (root / ".sentinelayerignore").write_text("src/**\n")
+    with pytest.raises(TypeSafeReviewIncomplete, match="unbound_source_ignore_policy"):
+        build_source_scope(root, "deep")
