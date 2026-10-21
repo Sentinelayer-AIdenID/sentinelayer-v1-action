@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import html
+import sys
 import uuid
 from typing import Any, Optional
 
@@ -80,7 +81,13 @@ def _write_console_report(markdown: str) -> None:
     print("::group::Omar Gate report")
     print(f"::stop-commands::{token}")
     try:
-        print(sanitize_public_error(html.unescape(markdown)), flush=True)
+        report = sanitize_public_error(html.unescape(markdown))
+        # Console codecs (including Windows cp1252) may not represent the
+        # template or repository text. Escape only this display copy; keep the
+        # persisted Markdown in UTF8 and leave the caller's stream unchanged.
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        report = report.encode(encoding, errors="backslashreplace").decode(encoding)
+        print(report, flush=True)
     finally:
         print(f"::{token}::")
         print("::endgroup::", flush=True)
@@ -209,7 +216,7 @@ def write_step_summary(
     md.append("")
 
     report = "\n".join(md)
-    _write_console_report(report)
     if summary_path:
         with open(summary_path, "a", encoding="utf-8") as summary_file:
             summary_file.write(report)
+    _write_console_report(report)
