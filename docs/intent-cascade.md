@@ -67,3 +67,13 @@ uses only an intent-model label and a short pin hash. Set `intent_price_profile:
 typesafe-input-20261020` only for the reviewed pin bound to that dated published
 rate; an absent/unknown profile leaves that price unknown. Earlier GitHub history
 is retained; neutral naming and private configuration apply going forward.
+
+The canonical cascade refuses generator fallback when changed-source privacy or
+scope binding could not be verified. A verified source can still receive a deep
+generator review after an intent transport failure. Before constructing the
+generator client, the complete assembled context (including auxiliary README,
+spec and native finding text) is checked for credential material. A refusal is an
+unattempted, incomplete review with no invented provider cost; a sanitized subset
+cannot count as complete source coverage. Public project metadata alone does not
+trigger this credential check. The source-boundary contract participates in
+receipt identity so older same-head results cannot bypass the new boundary.

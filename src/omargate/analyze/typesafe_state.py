@@ -10,6 +10,7 @@ from .typesafe_review import ReviewInventory, TypeSafeReviewIncomplete
 
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_DIFF_METADATA = re.compile(r"(?:index [a-fA-F0-9]{4,64}\.\.[a-fA-F0-9]{4,64}(?: [0-7]{6})?|(?:old|new|new file|deleted file) mode [0-7]{6})")
 
 
 def build_typed_context(
@@ -24,6 +25,10 @@ def build_typed_context(
     if not diff_content or len(diff_content.encode("utf-8")) > 100_000:
         raise TypeSafeReviewIncomplete("typed_diff_unavailable_or_oversize")
     expected = dict(inventory.source_hashes)
+    headers = {f"diff --git a/{path} b/{path}" for path in expected}
+    headers.update("--- a/" + path for path in expected)
+    headers.update("+++ b/" + path for path in expected)
+    headers.add("--- /dev/null")
     lines = diff_content.splitlines()
     hunks = []
     current = None
@@ -45,6 +50,11 @@ def build_typed_context(
             current = path[2:]
         match = _HUNK.match(line)
         if not match:
+            # Generator context includes the complete original patch. Arbitrary
+            # preamble/tail prose cannot be ignored here and then inherit code
+            # reference exemptions in the assembled outbound context.
+            if line and line not in headers and not _DIFF_METADATA.fullmatch(line):
+                raise TypeSafeReviewIncomplete("unbound_typed_diff_record")
             if current is not None and line.startswith(("+", "-", " ")) and not line.startswith("+++ "):
                 raise TypeSafeReviewIncomplete("invalid_typed_diff_counts")
             index += 1
@@ -89,8 +99,11 @@ def build_typed_context(
             raise TypeSafeReviewIncomplete("incomplete_typed_diff_hunk")
         touched.add(current)
         text = "\n".join(hunk)
-        safe_text, source_redacted = redact_secret_source(text, file_path=current)
-        safe_hunk = sanitize_public_error(safe_text)
+        # Patch '+'/'-' markers are not identifier bytes. Inspect the source
+        # payload so a removed '-SECRET_KEY=...' cannot evade the field scanner.
+        payload = "\n".join(row[1:] for row in hunk[1:] if row and row[0] in {" ", "+", "-"})
+        safe_text, source_redacted = redact_secret_source(payload, file_path=current)
+        safe_hunk = hunk[0] + "\n" + safe_text if source_redacted else text
         hunks.append({
             "file_path": current, "line_start": start,
             "line_end": start + max(0, new_count - 1),
@@ -98,7 +111,7 @@ def build_typed_context(
             # Bind the display-safe hunk to the exact local source without
             # retaining its credential bytes in the provider state.
             "diff_hunk_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-            "source_redacted": source_redacted or safe_hunk != text,
+            "source_redacted": source_redacted,
         })
     if touched != set(expected):
         raise TypeSafeReviewIncomplete("incomplete_typed_diff_file_coverage")

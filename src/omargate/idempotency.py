@@ -5,11 +5,16 @@ import json
 import re
 from datetime import date, datetime, timezone
 
+GENERATOR_SOURCE_BOUNDARY_VERSION = "generator-source-privacy-v3:credential-field-normalization:bound-diff-records"
+
 
 def review_config_digest(config) -> str:
     """Bind effective settings without publishing credentials or private policy."""
     from pydantic import SecretStr
     values = config.model_dump(mode="json")
+    # A same-head receipt predating the outbound privacy boundary is not reusable.
+    if config.review_routing == "intent-cascade-v1":
+        values["_source_boundary_contract"] = GENERATOR_SOURCE_BOUNDARY_VERSION
     for name in type(config).model_fields:
         value = getattr(config, name)
         if isinstance(value, SecretStr):

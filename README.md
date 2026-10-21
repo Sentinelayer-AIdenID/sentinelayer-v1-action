@@ -271,7 +271,7 @@ Use these in subsequent workflow steps:
 | `gate_status` | `passed`, `blocked`, `bypassed`, or `error` |
 | `p0_count` / `p1_count` / `p2_count` / `p3_count` | Finding counts by severity |
 | `run_id` | Unique run identifier |
-| `estimated_cost_usd` | Actual-call token-rate USD estimate, or `unknown` when usage is incomplete; not a bill. The cost ledger retains separate model estimates and the known subtotal. |
+| `estimated_cost_usd` | With `intent-cascade-v1`, a token-rate estimate from observed model usage, or `unknown` when usage is incomplete. Its cost ledger separates model estimates and the known subtotal. Legacy routing and pre-analysis rate-limit exits may report a PR-size forecast instead. Neither is a bill. |
 | `findings_artifact` | Path to findings JSONL |
 | `audit_report_artifact` | Path to `AUDIT_REPORT.md` |
 
