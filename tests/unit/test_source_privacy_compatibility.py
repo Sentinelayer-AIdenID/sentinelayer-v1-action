@@ -98,7 +98,9 @@ async def test_recognized_credential_shapes_never_reach_either_provider(
     assert value not in redact_secret_source(source)[0]
 
 
-_RETURNED_FIELDS = ("githubToken", "refreshToken", "sessionToken", "botToken", "dbPassword", "jwtSecret", "ENCRYPTION_KEY", "STRIPE_KEY")
+_RETURNED_FIELDS = ("githubToken", "refreshToken", "sessionToken", "botToken", "dbPassword", "jwtSecret", "ENCRYPTION_KEY", "STRIPE_KEY",
+                    "githubtoken", "refreshtoken", "sessiontoken", "bottoken",
+                    "GITHUBTOKEN", "REFRESHTOKEN", "SESSIONTOKEN", "BOTTOKEN", "smtpPass")
 
 
 @pytest.mark.parametrize("field", _RETURNED_FIELDS)
