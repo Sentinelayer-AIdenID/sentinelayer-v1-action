@@ -45,7 +45,7 @@ from .llm.providers import detect_provider_from_model
 from .llm.response_parser import ParsedFinding
 from .typesafe_client import TypeSafeClient, TypeSafeError
 from .review_cascade import DEEP, MID, ReviewRoute, choose_route, excellence_coverage, triage_questions, response_model_matches
-from .review_costs import cost_ledger, estimate_usage
+from .review_costs import CASCADE_MAX_OUTPUT_TOKENS, cost_ledger, estimate_usage, partition_cost_reservation
 from .deterministic.workflow_scanner import scan_workflow_files
 from .typesafe_review import (
     TypedReview,
@@ -56,6 +56,8 @@ from .typesafe_review import (
     verify_sources,
 )
 from .typesafe_state import build_typed_context
+from .source_scope import build_source_scope, verify_scope_partition, verify_source_scope
+from .scope_context import plan_scope_requests, validate_scope_coverage
 from .typesafe_writer import explain_review, WRITER_MODEL
 
 
@@ -1019,9 +1021,17 @@ class AnalysisOrchestrator:
         deterministic_findings: List[dict], quick_learn: Optional[QuickLearnSummary],
         spec_context: Optional[dict], diff_content: Optional[str],
         run_dir: Optional[Path],
+        _source_scope=None, _inventory=None, _typed_context=None,
+        _generator_context=None,
     ) -> LLMAnalysisResult:
         """One intent model triage and bounded generator review; no silent downgrade."""
         from .typesafe_review import MAX_STATE_BYTES
+
+        if scan_mode in {"deep", "nightly"} and _source_scope is None:
+            return await self._run_full_scope_analysis(
+                ingest=ingest, scan_mode=scan_mode, deterministic_findings=deterministic_findings,
+                quick_learn=quick_learn, spec_context=spec_context, run_dir=run_dir,
+            )
 
         records: list[dict] = []
         route = DEEP
@@ -1031,8 +1041,13 @@ class AnalysisOrchestrator:
         source_verified = False
         source_failure_reason = None
         triage_status = "source_scope_incomplete"
+        def verify(inventory):
+            if _source_scope is None:
+                verify_sources(self.repo_root, inventory)
+            else:
+                verify_scope_partition(self.repo_root, _source_scope, inventory)
         try:
-            inventory = build_inventory(
+            inventory = _inventory if _inventory is not None else build_inventory(
                 repo_root=self.repo_root, ingest=ingest, changed_files=changed_files,
                 scan_mode=scan_mode, max_candidates=self.config.typesafe_max_candidates,
             )
@@ -1041,7 +1056,7 @@ class AnalysisOrchestrator:
                 raise TypeSafeReviewIncomplete("redacted_source")
             # Routing needs verified change context, not just isolated current
             # functions. Reuse the same bounded source/diff binding as policy.
-            state.update(build_typed_context(
+            state.update(_typed_context if _typed_context is not None else build_typed_context(
                 repo_root=self.repo_root, inventory=inventory, ingest=ingest,
                 diff_content=diff_content, deterministic_findings=deterministic_findings,
             ))
@@ -1056,9 +1071,10 @@ class AnalysisOrchestrator:
                 self.config.typesafe_api_key.get_secret_value(),
                 timeout_seconds=self.config.typesafe_timeout,
             )
+            verify(inventory)
             triage = await client.rate(state=state, questions=questions, model=self.config.intent_model_pin.get_secret_value())
             records.append({**estimate_usage("typesafe", triage.model, triage.usage, intent_price_profile=self.config.intent_price_profile), "stage": "triage"})
-            verify_sources(self.repo_root, inventory)
+            verify(inventory)
             route = choose_route(self.config.review_policy, triage, paths=changed_files or [], findings=deterministic_findings)
             triage_status = "complete"
         except Exception as exc:
@@ -1076,6 +1092,7 @@ class AnalysisOrchestrator:
         policy_findings, policy_assessment = await self._assess_cascade_policy(
             inventory=inventory if source_verified else None, ingest=ingest, diff_content=diff_content,
             deterministic_findings=deterministic_findings, records=records,
+            source_scope=_source_scope, typed_context=_typed_context,
         )
         if not source_verified:
             policy_assessment.update(status="incomplete", reason_code=source_failure_reason)
@@ -1093,16 +1110,17 @@ class AnalysisOrchestrator:
                 if not source_verified:
                     raise TypeSafeReviewIncomplete("source_scope_incomplete")
                 if inventory is not None:
-                    verify_sources(self.repo_root, inventory)
+                    verify(inventory)
                 review_started = True
                 result = await self._run_llm_analysis(
                     ingest=ingest, deterministic_findings=deterministic_findings,
                     quick_learn=quick_learn, spec_context=spec_context,
                     scan_mode=scan_mode, diff_content=diff_content,
                     changed_files=changed_files, review_route=route,
+                    **({"source_context": _generator_context} if _generator_context is not None else {}),
                 )
                 if inventory is not None:
-                    verify_sources(self.repo_root, inventory)
+                    verify(inventory)
             except Exception:
                 result = self._llm_failure_result(
                     deterministic_findings=deterministic_findings, attempted=review_started,
@@ -1180,8 +1198,122 @@ class AnalysisOrchestrator:
                     result.failure_class = "cascade_evidence_write_failed"
             return result
 
+    async def _run_full_scope_analysis(
+        self, *, ingest, scan_mode, deterministic_findings, quick_learn, spec_context, run_dir,
+    ) -> LLMAnalysisResult:
+        """Review all declared source spans, retaining residual work and every cost."""
+        records: list[dict] = []
+        findings: list[dict] = []
+        completed = []
+        scope = None
+        requests = ()
+        result = None
+        reason = None
+        reservations = []
+        try:
+            census = ingest.get("stats", {})
+            if any(census.get(key) for key in ("truncated", "too_large", "read_failures")):
+                raise TypeSafeReviewIncomplete("deterministic_inventory_incomplete")
+            scope = build_source_scope(self.repo_root, scan_mode)
+            requests = plan_scope_requests(scope, deterministic_findings,
+                load_policy(self.config.intent_policy.get_secret_value()),
+                triage_questions(self.config.review_policy),
+                max_candidates=self.config.typesafe_max_candidates,
+                max_generator_bytes=self.config.max_input_tokens)
+            verify_source_scope(self.repo_root, scope)
+            system_prompt = self._generator_system_prompt(scan_mode, DEEP)
+            for request in requests:
+                validate_scope_coverage(scope, requests)
+                verify_scope_partition(self.repo_root, scope, request.inventory)
+                ledger = cost_ledger(records)
+                if records and not ledger["complete"]:
+                    raise TypeSafeReviewIncomplete("prior_model_cost_unknown")
+                reservation = partition_cost_reservation(request.generator_context, system_prompt,
+                    intent_price_profile=self.config.intent_price_profile)
+                if reservation is None:
+                    raise TypeSafeReviewIncomplete("review_price_unknown")
+                from decimal import Decimal
+                committed = Decimal(str(ledger["known_estimated_usd"])) + Decimal(str(reservation))
+                if committed > Decimal(str(self.config.max_review_estimate_usd)):
+                    raise TypeSafeReviewIncomplete("review_estimate_budget_exceeded")
+                reservations.append({"partition_id": request.partition_id, "estimated_reserve_usd": reservation,
+                                     "known_estimated_before_usd": ledger["known_estimated_usd"]})
+                partition_dir = run_dir / "partitions" / request.partition_id if run_dir else None
+                result = await self._run_cascade_analysis(
+                    ingest=ingest, changed_files=sorted(dict(request.inventory.source_hashes)),
+                    scan_mode=scan_mode, deterministic_findings=deterministic_findings,
+                    quick_learn=quick_learn, spec_context=spec_context, diff_content=None,
+                    run_dir=partition_dir, _source_scope=scope, _inventory=request.inventory,
+                    _typed_context=request.context, _generator_context=request.generator_context)
+                usage = result.usage or {}
+                records.extend({**row, "partition_id": request.partition_id}
+                               for row in usage.get("cost_ledger", {}).get("calls", []))
+                findings = self._merge_findings(findings, result.findings)
+                completed.append({"partition_id": request.partition_id, "success": result.success,
+                                  "output_valid": result.output_valid, "failure_class": result.failure_class,
+                                  "review_routing": usage.get("review_routing"),
+                                  "policy_assessment": usage.get("policy_assessment"),
+                                  "excellence": usage.get("excellence")})
+                verify_source_scope(self.repo_root, scope)
+                if not result.success or not result.output_valid:
+                    reason = "source_partition_incomplete"
+                    break
+            validate_scope_coverage(scope, requests)
+            verify_source_scope(self.repo_root, scope)
+        except Exception as exc:
+            code = str(exc)
+            reason = code if re.fullmatch(r"[a-z][a-z0-9_]{0,95}", code) else "full_source_review_failed"
+        complete = reason is None and bool(requests) and len(completed) == len(requests)
+        attempted_ids = {row["partition_id"] for row in completed}
+        reviewed_ids = {row["partition_id"] for row in completed if row["success"] and row["output_valid"]}
+        evidence = {
+            "schema": "omargate.source-scope.v1", "complete": complete,
+            "reason_code": reason, "scope": scope.manifest() if scope else None,
+            "partitions": completed,
+            "planned_partitions": [{"partition_id": r.partition_id,
+                                    "candidate_ids": [c.candidate_id for c in r.inventory.candidates]}
+                                   for r in requests],
+            "attempted_partition_ids": [r.partition_id for r in requests if r.partition_id in attempted_ids],
+            "reviewed_partition_ids": [r.partition_id for r in requests if r.partition_id in reviewed_ids],
+            "unattempted_partition_ids": [r.partition_id for r in requests if r.partition_id not in attempted_ids],
+            "residual_partition_ids": [r.partition_id for r in requests if r.partition_id not in reviewed_ids],
+            "cost_ledger": cost_ledger(records),
+            "estimate_budget": {"ceiling_usd": self.config.max_review_estimate_usd,
+                                "kind": "token_rate_forecast_not_billing_cap", "admissions": reservations},
+        }
+        if result is None:
+            result = self._llm_failure_result(deterministic_findings=deterministic_findings,
+                attempted=False, failure_class="full_source_scope_incomplete",
+                public_error="Whole-source review could not verify its complete bounded scope")
+        result.findings = findings
+        result.attempted = bool(records)
+        result.success = complete
+        result.output_valid = complete
+        result.no_findings_reported = complete and not findings
+        result.reported_finding_count = len(findings)
+        if not complete:
+            result.failure_class = "full_source_scope_incomplete"
+            result.warning = "Whole-source review is incomplete; unreviewed source remains unknown"
+        result.usage = {**(result.usage or {}), "cost_ledger": evidence["cost_ledger"],
+                        "source_scope": evidence,
+                        "policy_assessment": {"complete": complete, "status": "complete" if complete else "incomplete"}}
+        if run_dir:
+            try:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "SOURCE_SCOPE.json").write_text(json.dumps(evidence, indent=2, allow_nan=False), encoding="utf-8")
+                (run_dir / "REVIEW_ROUTING.json").write_text(json.dumps({
+                    "source_scope": evidence, "costs": evidence["cost_ledger"],
+                    "policy_assessment": result.usage["policy_assessment"],
+                }, indent=2, allow_nan=False), encoding="utf-8")
+            except OSError:
+                result.success = False
+                result.output_valid = False
+                result.failure_class = "cascade_evidence_write_failed"
+        return result
+
     async def _assess_cascade_policy(
         self, *, inventory, ingest, diff_content, deterministic_findings, records,
+        source_scope=None, typed_context=None,
     ):
         """Run source policy independently of routing; incompleteness cannot pass."""
         assessment = {"complete": False, "policy_reference": self.config.review_policy.reference,
@@ -1190,20 +1322,27 @@ class AnalysisOrchestrator:
             return [], assessment
         client = None
         recorded = False
+        def verify():
+            if source_scope is None:
+                verify_sources(self.repo_root, inventory)
+            else:
+                verify_scope_partition(self.repo_root, source_scope, inventory)
         try:
-            verify_sources(self.repo_root, inventory)
+            verify()
             policy = load_policy(self.config.intent_policy.get_secret_value())
-            context = build_typed_context(repo_root=self.repo_root, inventory=inventory,
+            context = typed_context if typed_context is not None else build_typed_context(repo_root=self.repo_root, inventory=inventory,
                 ingest=ingest, diff_content=diff_content, deterministic_findings=deterministic_findings)
             client = TypeSafeClient(self.config.typesafe_api_key.get_secret_value(),
                                     timeout_seconds=self.config.typesafe_timeout)
             review = await review_inventory(repo_root=self.repo_root, inventory=inventory,
-                policy=policy, client=client, model=self.config.intent_model_pin.get_secret_value(), context=context)
+                policy=policy, client=client, model=self.config.intent_model_pin.get_secret_value(), context=context,
+                **({"source_scope": source_scope} if source_scope is not None else {}))
+            # review_inventory performs the same full-scope binding internally.
             records.append({**estimate_usage("typesafe", self.config.intent_model_pin.get_secret_value(),
                 review.usage.get("typesafe_usage"), intent_price_profile=self.config.intent_price_profile),
                 "stage": "source-policy"})
             recorded = True
-            verify_sources(self.repo_root, inventory)
+            verify()
             # Retain decisions and source bindings without prompt/rubric text or
             # copied source context, so operators can explain incomplete reviews.
             for name in ("source_hashes", "candidates", "question_candidates", "answers",
@@ -1546,6 +1685,15 @@ class AnalysisOrchestrator:
                 pass
         return files
 
+    def _generator_system_prompt(self, scan_mode: str, review_route: Optional[ReviewRoute]) -> str:
+        prompt = self.prompt_loader.get_prompt(scan_mode=scan_mode)
+        if review_route:
+            private_policy = self.config.review_policy
+            dimensions = [criterion for _, criterion in private_policy.routing["domains"].values()]
+            prompt += ("\n" + private_policy.generator_instructions + "\nReview dimensions: "
+                       + json.dumps(dimensions) + "\nReport source defects; do not quote private configuration.")
+        return prompt
+
     async def _run_llm_analysis(
         self,
         ingest: dict,
@@ -1556,6 +1704,7 @@ class AnalysisOrchestrator:
         diff_content: Optional[str],
         changed_files: Optional[List[str]],
         review_route: Optional[ReviewRoute] = None,
+        source_context: Optional[str] = None,
     ) -> LLMAnalysisResult:
         """Run LLM analysis with fallback handling."""
         context_ingest = ingest
@@ -1579,10 +1728,17 @@ class AnalysisOrchestrator:
             scan_mode=scan_mode,
             diff_content=diff_content,
             changed_files=changed_files,
-        )
+        ) if source_context is None else None
+
+        if source_context is not None:
+            from .llm.context_builder import BuiltContext
+            context = BuiltContext(source_context, len(source_context.encode("utf-8")),
+                                   list(changed_files or []), [], [], [])
+        assert context is not None
 
         if review_route and (context.files_truncated or context.files_skipped
                              or context.sections_incomplete
+                             or context.token_count > self.config.max_input_tokens
                              or not set(changed_files or []).issubset(context.files_included)):
             return self._llm_failure_result(
                 deterministic_findings=deterministic_findings, attempted=False,
@@ -1601,12 +1757,7 @@ class AnalysisOrchestrator:
                 failure_class="cascade_source_privacy_incomplete",
                 public_error="Generator source privacy verification is incomplete; review remains unknown",
             )
-        system_prompt = self.prompt_loader.get_prompt(scan_mode=scan_mode)
-        if review_route:
-            private_policy = self.config.review_policy
-            dimensions = [criterion for _, criterion in private_policy.routing["domains"].values()]
-            system_prompt += ("\n" + private_policy.generator_instructions + "\nReview dimensions: "
-                              + json.dumps(dimensions) + "\nReport source defects; do not quote private configuration.")
+        system_prompt = self._generator_system_prompt(scan_mode, review_route)
 
         client = LLMClient(
             api_key=self.config.openai_api_key.get_secret_value(),
@@ -1629,7 +1780,7 @@ class AnalysisOrchestrator:
         response = await client.analyze(
             system_prompt=system_prompt,
             user_content=context.content,
-            max_tokens=16384 if review_route else 4096,
+            max_tokens=CASCADE_MAX_OUTPUT_TOKENS if review_route else 4096,
         )
 
         if not response.success:

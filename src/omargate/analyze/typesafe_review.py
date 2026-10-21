@@ -29,6 +29,13 @@ class TypeSafeReviewIncomplete(ValueError):
     """A bounded reason, safe to retain without source or credential bodies."""
 
 
+def verify_source_path_privacy(relative: str) -> None:
+    # Coordinates are source too. Refuse instead of rewriting a path and
+    # breaking its binding to the committed file/line evidence.
+    if redact_secret_source(relative, code_context=False)[1]:
+        raise TypeSafeReviewIncomplete("redacted_source")
+
+
 def _digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -44,6 +51,7 @@ class ReviewCandidate:
     source_sha256: str
 
     def state(self) -> dict[str, Any]:
+        verify_source_path_privacy(self.file_path)
         # Source privacy is credential-only. Public-error identifier scrubbing
         # must not alter ordinary source or its coverage/verification decision.
         source_safe, source_redacted = redact_secret_source(
@@ -123,6 +131,7 @@ def _source_path(repo_root: Path, relative: str) -> Path:
     logical = PurePosixPath(relative)
     if logical.is_absolute() or any(part in {".", ".."} for part in relative.split("/")):
         raise TypeSafeReviewIncomplete("unsupported_source_path")
+    verify_source_path_privacy(relative)
     target = (repo_root / relative).resolve()
     if not target.is_relative_to(repo_root.resolve()) or not target.is_file():
         raise TypeSafeReviewIncomplete("source_unavailable")
@@ -240,10 +249,17 @@ async def review_inventory(
     *, repo_root: Path, inventory: ReviewInventory, policy: ReviewPolicy,
     client: TypeSafeClient, model: str,
     context: dict[str, Any] | None = None,
+    source_scope=None,
 ) -> TypedReview:
     if not inventory.candidates or not policy.policy_id or not policy.calibration_id:
         raise TypeSafeReviewIncomplete("review_policy_or_coverage_unavailable")
-    verify_sources(repo_root, inventory)
+    def verify():
+        if source_scope is None:
+            verify_sources(repo_root, inventory)
+        else:
+            from .source_scope import verify_scope_partition
+            verify_scope_partition(repo_root, source_scope, inventory)
+    verify()
     by_id = {candidate.candidate_id: candidate for candidate in inventory.candidates}
     if len(by_id) != len(inventory.candidates):
         raise TypeSafeReviewIncomplete("duplicate_source_candidate")
@@ -255,7 +271,7 @@ async def review_inventory(
     ):
         raise TypeSafeReviewIncomplete("incomplete_question_coverage")
     state = {
-        "scope": inventory.scan_mode,
+        "scope": source_scope.scan_mode if source_scope is not None else inventory.scan_mode,
         "policy_id": policy.policy_id,
         "calibration_id": policy.calibration_id,
         "candidates": [candidate.state() for candidate in inventory.candidates],
@@ -268,7 +284,7 @@ async def review_inventory(
     if len(request_bytes) > 48_000:
         raise TypeSafeReviewIncomplete("typed_question_budget_exceeded")
     response = await client.rate(state=state, questions=plan.questions, model=model)
-    verify_sources(repo_root, inventory)
+    verify()
     try:
         validate_answers(response.answers, plan.questions)
     except TypeSafeError:

@@ -29,8 +29,8 @@ finding. Failed strongest review remains a failed review.
 Source hashes are checked around model work. intent model receives redacted bounded state;
 redacted, unsupported, oversized, deleted or unavailable source takes the stronger
 review path and retains incomplete policy status. Even a clean strongest-model
-answer cannot complete missing policy coverage. Deep/nightly inventories currently
-remain unsupported by this profile and cannot pass as complete cascade reviews.
+answer cannot complete missing policy coverage. Deep/nightly reviews use the
+bounded tracked-source partition plan below; an incomplete plan cannot pass.
 
 `REVIEW_ROUTING.json` and `PACK_SUMMARY.json` record the actual model, decisions,
 source hashes, neutral policy/calibration references, review coverage and separate
@@ -77,3 +77,40 @@ unattempted, incomplete review with no invented provider cost; a sanitized subse
 cannot count as complete source coverage. Public project metadata alone does not
 trigger this credential check. The source-boundary contract participates in
 receipt identity so older same-head results cannot bypass the new boundary.
+
+Whole-source cascades also reserve a conservative token-rate envelope before
+each partition, including every possible low/mid/deep escalation and both intent
+requests. `max_review_estimate_usd` defaults to USD5 and is independent of
+`approval_mode`; zero refuses paid whole-source review. Actual reported usage
+replaces that partition's forecast. Unknown prior usage, an unknown price profile,
+or insufficient remaining budget stops further paid requests. The evidence keeps
+completed partitions, observed defects, actual-call estimates and explicit residual
+partition ids. Coverage remains incomplete and blocks the gate. Forecasts are
+recorded separately from provider usage and do not guarantee a provider bill or
+include non-token fees.
+
+Whole-source deep/nightly coverage includes every tracked UTF-8 text file,
+including tests, build/dist directories and a tracked `.sentinelayerignore`.
+Neither that PR-controlled file nor the legacy ingest defaults waive tracked
+text coverage. Untracked files remain outside the declared scope. A binary
+exclusion requires bytes that fail strict UTF-8 decoding, a recognized image
+extension (PNG, JPEG or ICO), and its matching magic signature; this
+classification is not an image security audit. UTF-8 text is reviewed regardless
+of its image extension/header; UTF-8 NUL-bearing files refuse rather than vanish.
+GIF/WebP headers can begin executable JavaScript even when the loader replaces
+invalid UTF-8 inside comments, so those files must be reviewed as exact UTF-8 or
+refuse. Undecodable GIF/WebP images therefore block this bounded text review.
+NUL-bearing scripts, other undeclared binary formats and
+unsupported text encodings refuse the complete plan before providers. Text
+and excluded image bytes are bound to committed Git blobs and rechecked around
+provider calls. A changed image cannot remain excluded merely by retaining a
+NUL or its magic header.
+
+Scanner auxiliary context applies the credential-only redactor before public
+diagnostic sanitization. Secret-category hits stay in local deterministic
+evidence and do not enter whole-source provider state. These rules do not waive
+source privacy or native gates. Recognized credentials in source paths refuse the
+whole plan before providers or a source manifest; coordinates are never rewritten
+to manufacture source coverage. The existing native census and per-file/total
+byte/candidate/request/spend limits can still refuse a large repository; a
+refusal is incomplete coverage, never permission to silently clip its tail.

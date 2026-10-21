@@ -32,6 +32,7 @@ const stats = {
   binary_files: 0,
   too_large: 0,
   truncated: false,
+  read_failures: 0,
 };
 
 const files = [];
@@ -74,6 +75,7 @@ async function walk(dir) {
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
   } catch {
+    stats.read_failures += 1;
     return;
   }
 
@@ -102,6 +104,7 @@ async function walk(dir) {
     try {
       fileStat = await fs.stat(fullPath);
     } catch {
+      stats.read_failures += 1;
       continue;
     }
 

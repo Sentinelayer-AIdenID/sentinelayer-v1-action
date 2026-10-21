@@ -15,6 +15,29 @@ RATES = {
     "gpt-6.1-sol": ("2", "0.10", "10"),
     "gpt-6-sol": ("2", "0.20", "10"),
 }
+CASCADE_MAX_OUTPUT_TOKENS = 16384
+
+
+def partition_cost_reservation(context: str, system_prompt: str, *, intent_price_profile: str) -> float | None:
+    """Forecast the full escalation envelope, separate from actual paid-call usage.
+
+    UTF-8 bytes conservatively bound source/prompt BPE tokens. Add protocol
+    overhead, assume no cache discount, and reserve every possible generator
+    tier with its entire output limit. The two intent requests already have
+    enforced 24k/48k byte envelope limits. This is a token-rate estimate, never
+    a guarantee about the provider's bill or non-token fees.
+    """
+    from .review_cascade import LOW, MID, DEEP
+    tokens = len(context.encode("utf-8")) + len(system_prompt.encode("utf-8")) + 1024
+    predicted = [estimate_usage("openai", route.model,
+                 {"input_tokens": tokens, "output_tokens": CASCADE_MAX_OUTPUT_TOKENS})
+                 for route in (LOW, MID, DEEP)]
+    predicted.append(estimate_usage("typesafe", "reservation-only",
+        {"input_tokens": 24_000 + 48_000 + 2048, "output_tokens": 0},
+        intent_price_profile=intent_price_profile))
+    if any(row["estimated_usd"] is None for row in predicted):
+        return None
+    return float(sum(Decimal(str(row["estimated_usd"])) for row in predicted))
 
 
 def _count(value) -> bool:

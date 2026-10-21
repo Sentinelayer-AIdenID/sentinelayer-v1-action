@@ -218,6 +218,11 @@ inputs:
     required: false
     default: 'pr_label'
 
+  max_review_estimate_usd:
+    description: 'Whole-source cascade token-estimate ceiling in USD; zero refuses paid review; independent of approval_mode'
+    required: false
+    default: '5.00'
+
   approval_label:
     description: 'PR label that approves high-cost scan'
     required: false
@@ -441,6 +446,7 @@ runs:
         INPUT_RATE_LIMIT_FAIL_MODE: ${{ inputs.rate_limit_fail_mode }}
         INPUT_MAX_INPUT_TOKENS: ${{ inputs.max_input_tokens }}
         INPUT_REQUIRE_COST_CONFIRMATION: ${{ inputs.require_cost_confirmation }}
+        INPUT_MAX_REVIEW_ESTIMATE_USD: ${{ inputs.max_review_estimate_usd }}
         INPUT_APPROVAL_MODE: ${{ inputs.approval_mode }}
         INPUT_APPROVAL_LABEL: ${{ inputs.approval_label }}
         INPUT_FORK_POLICY: ${{ inputs.fork_policy }}
