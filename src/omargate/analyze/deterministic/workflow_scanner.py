@@ -162,6 +162,11 @@ def scan_workflow(path: str, text: str, *, lock_text: str | None = None) -> list
                 if "with" in target:
                     for key, value in _mapping(target["with"]).items():
                         text_value = _scalar(value)
+                        if reference.startswith("docker://") and key.lower() in {"args", "entrypoint"}:
+                            # Docker execution inputs reach the container directly;
+                            # pinning the image cannot sanitize expression values.
+                            scripts.append(value)
+                            continue
                         if key == "script" and reference.lower().startswith("actions/github-script@"):
                             continue  # The known executable script gets the P0 check below.
                         if any(_untrusted(match.group(1)) for match in _EXPRESSION.finditer(text_value)):
@@ -175,8 +180,8 @@ def scan_workflow(path: str, text: str, *, lock_text: str | None = None) -> list
                     value = _scalar(script)
                     if any(_untrusted(expression.group(1)) for expression in _EXPRESSION.finditer(value)):
                         findings.append(_finding("CICD-001", "P0", path, script,
-                            "Untrusted GitHub context is interpolated into executable script text.",
-                            "Pass untrusted context as data through an environment variable or action argument; quote variables and never eval them."))
+                            "Untrusted GitHub context reaches executable script text or a direct container execution input.",
+                            "Pass untrusted context through an environment variable; quote variables, preserve argument boundaries, and never eval them."))
     except (WorkflowInputIncomplete, yaml.YAMLError, RecursionError, UnicodeError, ValueError):
         findings.append(_finding("CICD-COVERAGE-INCOMPLETE", "P1", path, None,
             "Workflow or dependency-lock evidence could not be completely analyzed.",

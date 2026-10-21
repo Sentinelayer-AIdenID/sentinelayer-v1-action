@@ -1,15 +1,13 @@
 import json
-import hashlib
 from pathlib import Path
 
 import pytest
 
 from omargate.analyze.deterministic.eng_quality_helpers import bounded_python_deadline_loops
 from omargate.analyze.deterministic.eng_quality_scanner import EngQualityScanner
-from omargate.analyze.deterministic.secret_scanner import scan_for_secrets
 from omargate.harness.runner import CommandResult
 from omargate.harness.suites import dep_audit
-from omargate.harness.suites.secrets_in_git import _known_synthetic_fixture
+from omargate.harness.suites.secrets_in_git import SecretsInGitSuite
 
 pytestmark = pytest.mark.anyio
 
@@ -31,16 +29,24 @@ def test_monotonic_deadline_is_a_bound_but_word_presence_or_reset_is_not():
     assert any(f.pattern_id == "EQ-013" for f in scanner.scan({"src/retry.py": unbounded}))
 
 
-def test_only_exact_reviewed_fixture_in_test_source_becomes_advisory():
+@pytest.mark.parametrize("path", ["tests/unit/test_redaction.py", "src/config.py"])
+async def test_secret_history_has_no_fixture_or_test_directory_exemption(tmp_path, monkeypatch, path):
     token = "AKIA" + "1234567890ABCDEF"
-    assert hashlib.sha256(token.encode()).hexdigest() == "743554670c6065b3f7f13ac4f07e392f977b3556ceb7457411633c454bcbece8"
-    line = f"AWS_ACCESS_KEY_ID = '{token}'"
-    fixture = next(f for f in scan_for_secrets(line, "tests/unit/test_redaction.py") if f.pattern_id == "SEC-004")
-    assert _known_synthetic_fixture(fixture, [line])
-    production = next(f for f in scan_for_secrets(line, "src/config.py") if f.pattern_id == "SEC-004")
-    assert not _known_synthetic_fixture(production, [line])
-    mixed = line + "; other='AKIA" + "ZXCVBNMASDFGHJKL'"
-    assert not _known_synthetic_fixture(fixture, [mixed])
+    (tmp_path / ".git").mkdir()
+    async def git_command(args, **kwargs):
+        if args[1] == "--version":
+            stdout = "git version fixture"
+        elif args[1] == "log":
+            stdout = "a" * 40
+        else:
+            assert args[1] == "show"
+            stdout = f"--- a/{path}\n+++ b/{path}\n+AWS_ACCESS_KEY_ID = '{token}'\n"
+        return CommandResult(args=args, status="exited", returncode=0, stdout=stdout)
+    monkeypatch.setattr("omargate.harness.suites.secrets_in_git.run_command", git_command)
+    findings = await SecretsInGitSuite([]).run(str(tmp_path))
+    detected = [row for row in findings if row.pattern_id == "SEC-004"]
+    assert len(detected) == 1
+    assert detected[0].severity == "P0"
 
 
 def test_hash_pins_union_and_tool_configuration_are_supported_without_execution(tmp_path):

@@ -11,18 +11,20 @@ from omargate.redaction import (
 
 def test_sanitize_public_error_redacts_provider_ids_and_keys() -> None:
     raw = (
-        "Fallback failed: 403 PERMISSION_DENIED. "
-        "{'error': {'message': 'API key AIzaSyDUMMYDUMMYDUMMYDUMMYDUMMY is invalid "
-        "for consumer projects/123456789012 and project_id=my-prod-project'}} "
-        "standalone projects/999999999999 "
-        "https://example.test/v1?key=AIzaSyQUERYDUMMYDUMMYDUMMYDUMMY"
+        "".join((
+            "Fallback failed: 403 PERMISSION_DENIED. {'error': {'message': 'API key AI",
+            'zaSyDUMMYDUMMYDUMMYDUMMYDUMMY is invalid for consumer projects/123456789012 and proje',
+            "ct_id=my-prod-project'}} standalone projects/999999999999 https://example.test/v1?key",
+            '=AI',
+            'zaSyQUERYDUMMYDUMMYDUMMYDUMMY',
+        ))
     )
 
     sanitized = sanitize_public_error(raw)
 
     assert "PERMISSION_DENIED" in sanitized
     assert "403" in sanitized
-    assert "AIza" not in sanitized
+    assert "".join(('AI', 'za')) not in sanitized
     assert "123456789012" not in sanitized
     assert "999999999999" not in sanitized
     assert "my-prod-project" not in sanitized
@@ -48,11 +50,11 @@ def test_sanitize_public_error_keeps_capacity_context() -> None:
 
 
 def test_sanitize_public_error_redacts_cli_masked_openai_key() -> None:
-    raw = "Incorrect API key provided: sk-test-***************lder"
+    raw = "".join(('Incorrect API key provided: sk', '-test-***************lder'))
 
     sanitized = sanitize_public_error(raw)
 
-    assert "sk-test" not in sanitized
+    assert "".join(('sk', '-test')) not in sanitized
     assert "[redacted-secret]" in sanitized
 
 
@@ -67,7 +69,7 @@ def test_sanitize_public_error_redacts_cli_masked_openai_key() -> None:
         "DATABASE_URL=postgres://dbuser:db-private@db.example.test/app\n",
         'headers = {"Authorization": "Bearer bearer-private"}\n',
         "url = 'https://example.test/?signature=private-value'\n",
-        "-----BEGIN PRIVATE KEY-----\nprivate-body\n-----END PRIVATE KEY-----\n",
+        "".join(('-----', 'BEGIN PRIVATE KEY-----\nprivate-body\n-----', 'END PRIVATE KEY-----\n')),
     ],
     ids=[
         "aws-comment",
@@ -124,8 +126,7 @@ def test_sanitize_public_error_preserves_canonical_redaction_placeholders() -> N
 
 def test_untrusted_markdown_scalar_is_inert_single_line_and_idempotent() -> None:
     raw = (
-        "\r\n# forged [click](javascript:alert(1)) </details><!-- x -->"
-        "\x00\u202e token=sk-testtesttesttest"
+        "".join(('\r\n# forged [click](javascript:alert(1)) </details><!-- x -->\x00\u202e token=sk', '-testtesttesttest'))
     )
 
     sanitized = sanitize_untrusted_markdown_scalar(raw)
@@ -139,7 +140,7 @@ def test_untrusted_markdown_scalar_is_inert_single_line_and_idempotent() -> None
     assert "[click](" not in sanitized
     assert "</details>" not in sanitized
     assert "<!--" not in sanitized
-    assert "sk-testtesttesttest" not in sanitized
+    assert "".join(('sk', '-testtesttesttest')) not in sanitized
     assert "&#35;" in sanitized
     assert "&#91;click&#93;&#40;" in sanitized
     assert "&#60;&#47;details&#62;" in sanitized

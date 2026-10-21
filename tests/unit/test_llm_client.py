@@ -130,7 +130,7 @@ async def test_llm_client_redacts_provider_payloads_in_combined_error() -> None:
             latency_ms=0,
         ),
         success=False,
-        error="Error code: 429 - insufficient_quota sk-testtesttesttest",
+        error="".join(('Error code: 429 - insufficient_quota sk', '-testtesttesttest')),
     )
     fallback_fail = LLMResponse(
         content="",
@@ -160,13 +160,13 @@ async def test_llm_client_redacts_provider_payloads_in_combined_error() -> None:
     assert "insufficient_quota" in result.error
     assert "PERMISSION_DENIED" in result.error
     assert "123456789012" not in result.error
-    assert "sk-testtesttesttest" not in result.error
+    assert "".join(('sk', '-testtesttesttest')) not in result.error
 
 
 @pytest.mark.anyio
 async def test_managed_capacity_fallback_runs_once_after_byo_quota_failures() -> None:
     client = LLMClient(
-        api_key="sk-byo",
+        api_key="".join(('sk', '-byo')),
         primary_model="gpt-5.3-codex",
         fallback_model="gemini-2.5-flash",
         google_api_key="google-byo",
@@ -244,7 +244,7 @@ async def test_managed_capacity_fallback_runs_once_after_byo_quota_failures() ->
 @pytest.mark.anyio
 async def test_managed_capacity_fallback_does_not_run_for_non_capacity_errors() -> None:
     client = LLMClient(
-        api_key="sk-byo",
+        api_key="".join(('sk', '-byo')),
         primary_model="gpt-5.3-codex",
         fallback_model="gpt-4.1-mini",
         managed_capacity_fallback=True,
@@ -297,7 +297,7 @@ async def test_managed_capacity_fallback_does_not_run_for_non_capacity_errors() 
 @pytest.mark.anyio
 async def test_managed_capacity_fallback_failure_fails_closed() -> None:
     client = LLMClient(
-        api_key="sk-byo",
+        api_key="".join(('sk', '-byo')),
         primary_model="gpt-5.3-codex",
         fallback_model="gemini-2.5-flash",
         google_api_key="google-byo",

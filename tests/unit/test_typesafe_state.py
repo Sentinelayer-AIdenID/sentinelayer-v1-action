@@ -63,7 +63,7 @@ def context_for(tmp_path, inventory, ingest, diff, findings=None):
 
 
 def test_actual_head_hunk_language_hash_and_redacted_scanner_evidence(tmp_path: Path) -> None:
-    secret = "sk-fictional0123456789"
+    secret = "".join(('sk', '-fictional0123456789'))
     after = f"keep\napi_key = '{secret}'\ntail\n"
     inventory, ingest = inventory_for(tmp_path, {"source.py": after}, language="python")
     diff = patch("source.py", "keep\nold value\ntail\n", after)

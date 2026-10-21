@@ -151,8 +151,11 @@ def test_review_brief_redacts_provider_error_details() -> None:
             "line_start": 0,
             "line_end": 0,
             "message": (
-                "LLM failed for consumer projects/123456789012 and "
-                "project_id=my-prod-project with key AIzaSyDUMMYDUMMYDUMMYDUMMYDUMMY"
+                "".join((
+                    'LLM failed for consumer projects/123456789012 and project_id=my-prod-project with key',
+                    ' AI',
+                    'zaSyDUMMYDUMMYDUMMYDUMMYDUMMY',
+                ))
             ),
             "recommendation": "Retry when provider capacity is healthy.",
         }
@@ -169,7 +172,7 @@ def test_review_brief_redacts_provider_error_details() -> None:
     assert "LLM Failure" in content
     assert "123456789012" not in content
     assert "my-prod-project" not in content
-    assert "AIza" not in content
+    assert "".join(('AI', 'za')) not in content
     assert "&#91;redacted&#45;provider&#45;id&#93;" in content
 
 

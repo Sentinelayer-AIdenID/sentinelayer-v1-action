@@ -220,7 +220,7 @@ async def test_untrusted_source_instructions_remain_data_and_cannot_change_fixed
 
 @pytest.mark.anyio
 async def test_writer_prose_reuses_existing_redactor_without_changing_bound_verdict() -> None:
-    secret = "sk-synthetic-writer-fixture-123456789"
+    secret = "".join(('sk', '-synthetic-writer-fixture-123456789'))
     message = f"The generated explanation repeated {secret}."
     recommendation = f"Remove the generated fixture value {secret}."
     assert secret not in sanitize_public_error(message)

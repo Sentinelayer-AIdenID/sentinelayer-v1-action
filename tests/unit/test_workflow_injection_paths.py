@@ -1,11 +1,15 @@
+from dataclasses import asdict
+import json
+
 import pytest
 
 from omargate.analyze.deterministic.workflow_scanner import scan_workflow
 
 
-def scan(expression, *, input_name=None):
+def scan(expression, *, input_name=None, reference=None):
     if input_name:
-        step = "      - uses: docker://alpine@sha256:" + "a" * 64 + "\n        with:\n          " + input_name + ": |\n            ${{ " + expression + " }}\n"
+        reference = reference or "owner/action@" + "a" * 40
+        step = "      - uses: " + reference + "\n        with:\n          " + input_name + ": |\n            ${{ " + expression + " }}\n"
     else:
         step = "      - run: |\n          echo ${{ " + expression + " }}\n"
     source = "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n" + step
@@ -27,6 +31,49 @@ def test_indexed_and_less_common_context_strings_remain_executable_probes(expres
 def test_execution_related_action_inputs_are_reviewed_without_assuming_receiver_execution(name):
     results = scan("github.event.issue.title", input_name=name)
     assert any(row.pattern_id == "CICD-ACTION-INPUT" and row.severity == "P2" for row in results)
+
+
+@pytest.mark.parametrize("reference", ["docker://alpine:latest", "docker://alpine@sha256:" + "a" * 64])
+@pytest.mark.parametrize("name", ["args", "entrypoint"])
+def test_container_execution_inputs_with_untrusted_context_block_the_default_gate(tmp_path, reference, name):
+    from omargate.gate import evaluate_gate
+    from omargate.models import GateConfig, GateStatus
+    from omargate.utils import sha256_hex
+
+    # A container is the receiver: unlike owner/action@sha, its execution input
+    # has no intervening action implementation that can validate the value.
+    text = ("jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - uses: " + reference + "\n        with:\n          " + name
+            + ": sh -c \"echo ${{ github.event.issue.title }}\"\n")
+    findings = scan_workflow(".github/workflows/ci.yml", text)
+    counts = {severity: sum(row.severity == severity for row in findings) for severity in ("P0", "P1", "P2", "P3", "P4")}
+    packed = tmp_path / "FINDINGS.jsonl"
+    packed.write_text("\n".join(json.dumps(asdict(row)) for row in findings), encoding="utf-8")
+    (tmp_path / "PACK_SUMMARY.json").write_text(json.dumps({
+        "run_id": "container-injection", "writer_complete": True, "counts": counts,
+        "findings_file": packed.name, "findings_file_sha256": sha256_hex(packed.read_bytes()),
+    }), encoding="utf-8")
+    result = evaluate_gate(tmp_path, GateConfig())
+    assert result.status == GateStatus.BLOCKED
+    assert result.block_merge is True
+    assert counts["P0"] == 1
+    assert any(row.pattern_id == "CICD-001" and row.severity == "P0" for row in findings)
+
+
+@pytest.mark.parametrize("name", ["args", "entrypoint"])
+def test_container_execution_input_boundaries_do_not_trust_pinning_or_shell_quoting(name):
+    reference = "docker://alpine@sha256:" + "a" * 64
+    rows = scan("github['event']['issue']['title']", input_name=name, reference=reference)
+    assert [(row.pattern_id, row.severity) for row in rows] == [("CICD-001", "P0")]
+
+
+def test_container_literal_commands_and_quoted_environment_data_remain_clean():
+    text = ("jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - uses: docker://alpine@sha256:" + "a" * 64 + "\n"
+            "        env:\n          TITLE: ${{ github.event.issue.title }}\n"
+            "        with:\n          entrypoint: sh\n          args: -c 'printf %s \"$TITLE\"'\n")
+    assert scan_workflow(".github/workflows/ci.yml", text) == []
+    assert scan("github.event.issue.number", input_name="args", reference="docker://alpine@sha256:" + "a" * 64) == []
 
 
 def test_all_action_input_values_are_seen_but_metadata_is_only_advisory():

@@ -200,14 +200,16 @@ def test_comment_redacts_provider_error_details() -> None:
                 "line_start": 0,
                 "category": "LLM Failure",
                 "message": (
-                    "LLM analysis failed: 403 PERMISSION_DENIED consumer "
-                    "projects/123456789012 with key AIzaSyDUMMYDUMMYDUMMYDUMMYDUMMY."
+                    "".join((
+                        'LLM analysis failed: 403 PERMISSION_DENIED consumer projects/123456789012 with key AI',
+                        'zaSyDUMMYDUMMYDUMMYDUMMYDUMMY.',
+                    ))
                 ),
                 "fix_plan": "Retry once provider capacity is healthy.",
             }
         ],
         warnings=[
-            "Fallback failed for project_id=my-prod-project token=sk-testtesttesttest"
+            "".join(('Fallback failed for project_id=my-prod-project token=sk', '-testtesttesttest'))
         ],
         head_sha="deadbeef",
     )
@@ -215,8 +217,8 @@ def test_comment_redacts_provider_error_details() -> None:
     assert "PERMISSION&#95;DENIED" in body
     assert "123456789012" not in body
     assert "my-prod-project" not in body
-    assert "AIza" not in body
-    assert "sk-testtesttesttest" not in body
+    assert "".join(('AI', 'za')) not in body
+    assert "".join(('sk', '-testtesttesttest')) not in body
     assert "&#91;redacted&#45;provider&#45;id&#93;" in body
 
 

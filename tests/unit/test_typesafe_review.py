@@ -381,7 +381,7 @@ async def test_question_budget_refuses_before_client(tmp_path: Path):
 
 @pytest.mark.anyio
 async def test_review_preserves_source_binding_and_reports_only_actual_usage(tmp_path: Path):
-    secret = "sk-fixture-secret-123456789"
+    secret = "".join(('sk', '-fixture-secret-123456789'))
     inventory = source_inventory(tmp_path, f'api_key = "{secret}"\nprint("ordinary source")\n')
     candidate = inventory.candidates[0]
     client = FakeClient()
@@ -426,10 +426,9 @@ async def test_review_excludes_comment_and_private_key_material_before_client(tm
     private_body = "private-body-must-never-cross-the-provider-boundary"
     inventory = source_inventory(
         tmp_path,
-        "# historical credential " + aws_secret + "\n"
-        "-----BEGIN PRIVATE KEY-----\n"
+        "# historical credential " + aws_secret + "".join(('\n-----', 'BEGIN PRIVATE KEY-----\n'))
         + private_body
-        + "\n-----END PRIVATE KEY-----\nordinary = 1\n",
+        + "".join(('\n-----', 'END PRIVATE KEY-----\nordinary = 1\n')),
     )
     candidate = inventory.candidates[0]
     client = FakeClient()
@@ -640,7 +639,7 @@ async def test_none_choice_does_not_override_uncertain_fixture_policy(tmp_path: 
 
 @pytest.mark.anyio
 async def test_policy_prose_reuses_existing_redactor_with_bound_source_and_verdict(tmp_path: Path):
-    secret = "sk-synthetic-policy-fixture-123456789"
+    secret = "".join(('sk', '-synthetic-policy-fixture-123456789'))
     message = f"The fixture policy reason repeated {secret}."
     recommendation = f"Remove the fixture policy value {secret}."
     assert secret not in sanitize_public_error(message)

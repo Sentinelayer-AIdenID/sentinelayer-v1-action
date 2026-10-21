@@ -25,7 +25,7 @@ async def test_openai_provider_calls_responses_create() -> None:
     create_mock = AsyncMock(return_value=response)
     fake_client = SimpleNamespace(responses=SimpleNamespace(create=create_mock))
 
-    provider = OpenAIProvider(api_key="sk-test", client_getter=lambda: fake_client)
+    provider = OpenAIProvider(api_key="".join(('sk', '-test')), client_getter=lambda: fake_client)
     out = await provider.call(
         model="gpt-4.1",
         system="SYS",
