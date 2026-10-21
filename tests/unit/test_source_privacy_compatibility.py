@@ -47,6 +47,7 @@ async def review_source(instance, source, *, quick=None):
     "token = config['access_token']\n",
     "token = parse_token(payload)\n",
     "secret = Field(default=None)\n",
+    "authorization: str\n",
 ])
 async def test_ordinary_source_reaches_both_provider_call_boundaries(subject, transport, monkeypatch, source):
     rate = AsyncMock(return_value=triage(sensitive=1))
@@ -78,6 +79,7 @@ async def test_readme_placeholder_prose_does_not_disable_generator(subject, tran
     'password = SecretStr("{value}")', 'api_key = os.getenv("API_KEY", "{value}")',
     'token = settings.get("TOKEN", "{value}")', 'password = "None"',
     '# password={value}', '// token={value}', '/* SECRET_KEY={value} */',
+    '{{"Authorization": "{value}"}}', 'url = "https://example.invalid/?key={value}"',
 ])
 async def test_recognized_credential_shapes_never_reach_either_provider(
     subject, transport, monkeypatch, shape,
