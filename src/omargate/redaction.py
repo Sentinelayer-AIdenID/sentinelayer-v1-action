@@ -95,7 +95,7 @@ _SOURCE_SECRET_LINE_RE = re.compile(
       ["']?authorization["']?\s*[:=]\s*["']?(?:bearer|basic)\s+\S+ |
       \b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?|https?)
         ://[^\s/:@]+:[^\s/@]+@ |
-      [?&](?:api[_-]?key|access[_-]?token|token|signature|secret)=[^&#\s]+
+      [?&](?:key|api[_-]?key|access[_-]?token|token|signature|secret)=[^&#\s]+
     )
     """
 )
@@ -120,7 +120,7 @@ def _credential_field(name: str) -> bool:
     compact = name.replace("_", "")
     return (compact.endswith(("secretaccesskey", "apikey", "accesstoken", "authtoken",
                               "clientsecret", "privatekey", "secretkey", "signingkey", "webhooksecret"))
-            or name.split("_")[-1] in {"secret", "token", "password", "passwd", "pwd", "credential", "pass"})
+            or name.split("_")[-1] in {"secret", "token", "password", "passwd", "pwd", "credential", "pass", "authorization"})
 
 
 def _code_reference(value: str) -> bool:
