@@ -85,7 +85,7 @@ Omar Gate runs directly on the GitHub-hosted runner (composite action mode), not
 - Installs Python dependencies from the action directory using `python -P -m pip`
 - Installs Codex CLI on the runner (`@openai/codex`)
 - Scans the checked-out repository at `$GITHUB_WORKSPACE`, while imports use the action-owned `src` with `PYTHONSAFEPATH=1` and `python -P -m omargate.main`
-- Runs dependency audits with private tool state/copied inputs and sanitized credential-free connectivity; schema 1.1 evidence is validated separately from finding thresholds (see `run_harness` below)
+- Runs dependency audits with private tool state/copied inputs and sanitized credential-free connectivity; schema 1.2 project evidence is validated separately from finding thresholds (see `run_harness` below)
 
 ---
 
@@ -300,10 +300,16 @@ With `run_harness: true`, every applicable dependency audit must produce recogni
 internally consistent JSON. A missing tool or lockfile, timeout, malformed result, or
 unsupported Python dependency input blocks the run even when `severity_gate: none`;
 `run_harness: false` is the explicit opt-out. Bounded, no-follow manifest discovery
-rejects nested or multi-project layouts instead of silently reporting them as clean.
+rejects ambiguous discovery. Independent nested npm projects are audited separately;
+nested Python and Cargo layouts remain unsupported.
 
 npm projects require a non-workspace `package-lock.json` or `npm-shrinkwrap.json`
-at lockfile version 2 or 3. Peer/peer-optional dependencies are unsupported because
+at lockfile version 2 or 3 for each project. A manifest with no dependency, workspace,
+bundle or peer declarations and no lockfile records an empty declared graph. A
+present lockfile must still validate and be audited. At most 32 npm manifests are
+accepted per run; omitted projects and changed inputs block completion.
+`npm_projects` records exact declared coverage, input hashes and individual outcomes.
+Peer/peer-optional dependencies are unsupported because
 npm audit does not cover them. Every remaining non-link package must resolve through one
 credential-free canonical `https://registry.npmjs.org` origin, which is passed
 explicitly to npm. Custom/private, localhost, IP-literal, credentialed, mixed, and

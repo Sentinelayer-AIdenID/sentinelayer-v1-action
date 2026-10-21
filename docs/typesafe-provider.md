@@ -89,7 +89,7 @@ rendered summaries and external provider retention are separate boundaries (see
 `TYPESAFE_REVIEW.json` retains the assessment and final completion/failure state
 and is included in the artifact manifest. The pack summary retains typed assessment
 metadata even when the generator fallback supplies the final review. Dependency-audit
-evidence is separate: with `run_harness: true`, schema 1.1 audit scopes/outcomes and
+evidence is separate: with `run_harness: true`, schema 1.2 audit project/scopes/outcomes and
 serialized harness findings must validate before the required LLM result or severity
 threshold can pass. Typed findings, a successful writer or generator output cannot
 replace an incomplete audit. See [dependency-audit coverage](CONFIGURATION.md#run_harness-and-dependency-audit-evidence). Returned
