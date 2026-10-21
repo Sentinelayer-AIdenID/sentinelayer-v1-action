@@ -276,7 +276,7 @@ def _write_github_outputs(
     findings_path: Path,
     pack_summary_path: Path,
     gate_result: GateResult,
-    estimated_cost_usd: float = 0.0,
+    estimated_cost_usd: Optional[float] = 0.0,
     review_brief_path: Optional[Path] = None,
     audit_report_path: Optional[Path] = None,
     scan_mode: Optional[str] = None,
@@ -342,7 +342,8 @@ def _write_github_outputs(
                 f"audit_report_artifact={_to_workspace_relative(audit_report_path)}\n"
             )
         output_file.write(f"idempotency_key={idem_key}\n")
-        output_file.write(f"estimated_cost_usd={estimated_cost_usd:.4f}\n")
+        cost_value = f"{estimated_cost_usd:.8f}" if estimated_cost_usd is not None else "unknown"
+        output_file.write(f"estimated_cost_usd={cost_value}\n")
         if scan_mode is not None:
             output_file.write(f"scan_mode={scan_mode}\n")
         if severity_gate is not None:

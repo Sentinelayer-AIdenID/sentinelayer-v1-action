@@ -257,6 +257,9 @@ inputs:
     default: 'v1'
 
 outputs:
+  review_verdict:
+    description: 'Explicit UNKNOWN when private review configuration cannot be loaded'
+    value: ${{ steps.omar.outputs.review_verdict }}
   gate_status:
     description: 'Gate result: passed, blocked, bypassed, error'
     value: ${{ steps.omar.outputs.gate_status }}

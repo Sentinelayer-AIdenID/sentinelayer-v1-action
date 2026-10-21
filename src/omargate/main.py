@@ -111,11 +111,11 @@ def _llm_display_identity(analysis) -> tuple[str, str]:
 
 def _llm_display_cost(analysis) -> Optional[float]:
     """Keep an attempted review's unreported cost unknown, including failures."""
-    if not analysis.llm_attempted and not analysis.llm_success:
-        return 0.0
     usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
     if isinstance(usage.get("cost_ledger"), dict):
         return usage["cost_ledger"].get("estimated_total_usd")
+    if not analysis.llm_attempted and not analysis.llm_success:
+        return 0.0
     cost = usage.get("cost_usd")
     return float(cost) if cost is not None else None
 
@@ -233,6 +233,46 @@ def _github_publish_enabled(config: OmarGateConfig) -> bool:
     return bool(getattr(config, "publish_github", True))
 
 
+def _write_configuration_failure_evidence(run_dir: Path, run_id: str) -> None:
+    """Refuse before context/providers, retaining UNKNOWN rather than no report."""
+    from .analyze.review_costs import cost_ledger
+    required = ("TYPESAFE_API_KEY", "OPENAI_API_KEY", "INTENT_MODEL_PIN", "INTENT_POLICY")
+    typed = (os.environ.get("INPUT_LLM_PROVIDER", "").strip().lower() == "typesafe"
+             or os.environ.get("INPUT_REVIEW_ROUTING", "").strip().lower() == "intent-cascade-v1")
+    missing = [name for name in required if not os.environ.get("INPUT_" + name, "").strip()] if typed else []
+    reason = "private_config_missing" if missing else "configuration_invalid"
+    findings = run_dir / "FINDINGS.jsonl"
+    write_findings_jsonl(findings, [])
+    summary = write_pack_summary(
+        run_dir=run_dir, run_id=run_id, writer_complete=False, findings_path=findings,
+        counts={severity: 0 for severity in ("P0", "P1", "P2", "P3", "P4")},
+        tool_versions={"omargate": ACTION_VERSION}, stages_completed=[], error=reason,
+        llm_usage={"cost_ledger": cost_ledger([])},
+        llm_evidence={"schema_version": "1.0", "attempted": False, "success": False,
+                      "output_valid": False, "failure_class": reason, "usage_recorded": False,
+                      "provider": "unknown", "model": "unknown"},
+    )
+    payload = json.loads(summary.read_text(encoding="utf-8"))
+    payload.update(review_verdict="UNKNOWN", block_merge=True, missing_private_inputs=missing)
+    summary.write_text(json_dumps(payload), encoding="utf-8")
+    gate = GateResult(status=GateStatus.ERROR, reason="UNKNOWN: " + reason,
+                      block_merge=True, counts=Counts())
+    _write_github_outputs(run_id=run_id, idem_key="", findings_path=findings,
+                          pack_summary_path=summary, gate_result=gate, estimated_cost_usd=None,
+                          llm_provider="unknown", model="unknown", llm_attempted=False,
+                          llm_success=False, llm_output_valid=False, llm_failure_class=reason)
+    output = os.environ.get("GITHUB_OUTPUT")
+    if output:
+        with open(output, "a", encoding="utf-8") as handle:
+            handle.write("review_verdict=UNKNOWN\nblock_merge=true\n")
+    step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step_summary:
+        with open(step_summary, "a", encoding="utf-8") as handle:
+            handle.write("## Omar Gate: UNKNOWN\nReview refused: " + reason + ". Merge is blocked.\n")
+            if missing:
+                handle.write("Missing private inputs: " + ", ".join(missing) + "\n")
+
+
 async def async_main() -> int:
     """Async main entry point."""
 
@@ -277,10 +317,14 @@ async def async_main() -> int:
     try:
         try:
             config = OmarGateConfig()
-        except Exception as exc:
-            print(f"::error::Configuration error: {exc}")
-            collector.record_error("config", str(exc))
+        except Exception:
+            print("::error::Omar Gate UNKNOWN: review configuration unavailable or invalid; merge blocked")
+            collector.record_error("config", "review_configuration_invalid")
             collector.record_preflight_exit(reason="config_error", exit_code=2)
+            try:
+                _write_configuration_failure_evidence(run_dir, run_id)
+            except OSError:
+                print("::error::Omar Gate UNKNOWN: configuration-failure evidence could not be written")
             exit_code = 2
             return exit_code
 
@@ -459,7 +503,7 @@ async def async_main() -> int:
 
                 bp_ok, bp_message = check_branch_protection(gh, ctx, check_name)
                 if not bp_ok:
-                    logger.warning("Branch protection issue", message=bp_message)
+                    logger.warning("Branch protection issue", detail=bp_message)
         except Exception as exc:
             preflight_success = False
             collector.record_error("preflight", str(exc))
@@ -932,7 +976,7 @@ async def async_main() -> int:
 
         # === OUTPUTS ===
         try:
-            estimated_cost_usd = float(estimated_cost or 0.0)
+            estimated_cost_usd = _llm_display_cost(analysis)
             audit_report_path = run_dir / "AUDIT_REPORT.md"
             _write_github_outputs(
                 run_id=run_id,
