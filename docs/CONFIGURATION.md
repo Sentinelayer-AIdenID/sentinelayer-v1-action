@@ -558,6 +558,13 @@ The repository also supplies a Docker image; it is not the current `runs.using` 
 
 Harness audit commands use an explicit environment allowlist and private home/config/cache/temp state from [`runner.py`](../src/omargate/harness/runner.py). Provider, GitHub/OIDC and `INPUT_*` credentials are excluded. Only validated credential-free proxy origins, bounded `NO_PROXY` entries and copies of CA material outside the scanned workspace may be forwarded. npm uses the canonical Node binary with copied validated inputs instead of repository `.npmrc` or a command wrapper; PATH/CA controls reject lexical and resolved workspace containment. These are configuration/process boundaries, not filesystem or network sandboxes. Live public advisory metadata egress and direct-only Python coverage are described under [`run_harness`](#run_harness-and-dependency-audit-evidence).
 
+Every nested npm project retains the original checkout root for process, PATH,
+CA and scratch isolation; its own directory is only the manifest/lock input
+location. Manifest discovery excludes only installed `node_modules` trees.
+Names such as `build`, `dist`, `vendor`, `target`, `venv` and cache names cannot
+hide application projects. If traversal exceeds its depth/entry bounds or cannot
+read required directories, coverage remains incomplete and the gate refuses.
+
 Codex has a separate allowlist and receives the configured OpenAI/Codex credential and model for its review task. The dependency audit's schema 1.2 project/scope/outcome evidence and exact serialized audit finding identities are validated before required LLM evidence and the severity threshold. A valid clean outcome applies only to its declared scope; an environment filter or a missing finding alone is not completion evidence.
 
 ## Data and Rendering Boundaries

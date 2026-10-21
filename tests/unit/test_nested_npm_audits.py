@@ -48,7 +48,7 @@ async def test_parent_empty_graph_and_two_nested_lockfiles_receive_complete_inde
     result = await run(projects)
     evidence = result.evidence.to_dict()
     assert result.findings == [] and evidence["complete"]
-    assert {path.name for path in calls} == {"admission", "gateway"} and len(calls) == 2
+    assert calls == [root.resolve(), root.resolve()]
     rows = evidence["npm_projects"]["audits"]
     assert len(rows) == 3
     assert rows[-1]["mode"] == "empty_declared_graph" and rows[-1]["lockfile_path"] is None
@@ -93,8 +93,11 @@ async def test_vulnerability_in_last_project_retained_while_other_project_is_inc
 
 async def test_earlier_manifest_changed_during_later_audit_never_completes(projects, monkeypatch):
     root, parent, _ = projects
+    call_count = 0
     async def change(args, *, cwd, timeout_s, project_root):
-        if project_root.name == "gateway":
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
             (parent / "deploy/admission/package.json").write_text("changed")
         return fixture._result(stdout=fixture._clean_stdout("npm"))
     monkeypatch.setattr(dep_audit, "run_command", change)
@@ -103,7 +106,7 @@ async def test_earlier_manifest_changed_during_later_audit_never_completes(proje
     assert result.evidence.to_dict()["npm_projects"]["audits"][0]["input_unchanged"] is False
 
 
-@pytest.mark.parametrize("case", ["omit", "duplicate", "undeclared", "bad_hash", "path_escape", "wrong_parent_lock", "empty_graph_with_lock", "misleading_clean", "bool_count"])
+@pytest.mark.parametrize("case", ["omit", "duplicate", "undeclared", "bad_hash", "path_escape", "wrong_parent_lock", "empty_graph_with_lock", "misleading_clean", "bool_count", "list_state", "dict_state"])
 async def test_gate_rejects_forged_or_partial_project_coverage(projects, case):
     root, _, _ = projects
     evidence = json.loads(json.dumps((await run(projects)).evidence.to_dict()))
@@ -124,6 +127,8 @@ async def test_gate_rejects_forged_or_partial_project_coverage(projects, case):
         proof["audits"][0]["mode"] = "empty_declared_graph"
     elif case == "misleading_clean":
         proof["audits"][0]["outcome"].update(state="vulnerable", vulnerability_count=1)
+    elif case in {"list_state", "dict_state"}:
+        proof["audits"][0]["outcome"]["state"] = [] if case == "list_state" else {}
     else:
         proof["audits"][0]["outcome"]["vulnerability_count"] = False
     result = evaluate(root, evidence)

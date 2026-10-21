@@ -114,11 +114,11 @@ def test_dependency_audit_contract_and_harness_mode_are_bound() -> None:
     assert enabled != prior_contract
 
 
-def test_dependency_audit_schema_1_2_rotates_both_contract_tokens() -> None:
-    assert DEPENDENCY_AUDIT_CONTRACT_VERSION == "dependency-audit-evidence-v1.2"
+def test_npm_workspace_boundary_rotates_both_contract_tokens() -> None:
+    assert DEPENDENCY_AUDIT_CONTRACT_VERSION == "dependency-audit-evidence-v1.2:workspace-root:complete-discovery"
     assert (
         ACTION_IDEMPOTENCY_VERSION
-        == "3:dependency-audit-v1.2:project-coverage:private-policy:review-config:verified-model"
+        == "4:dependency-audit-v1.2:complete-discovery:workspace-root:private-policy:review-config:verified-model"
     )
 
     common = {
@@ -147,6 +147,11 @@ def test_dependency_audit_schema_1_2_rotates_both_contract_tokens() -> None:
         action_major_version="2:dependency-audit-v1.1:private-policy:review-config:verified-model",
         audit_contract_version="dependency-audit-evidence-v1.1", **common,
     )
+    old_action = "3:dependency-audit-v1.2:project-coverage:private-policy:review-config:verified-model"
+    old_audit = "dependency-audit-evidence-v1.2"
+    for action, audit in [(old_action, old_audit), (old_action, DEPENDENCY_AUDIT_CONTRACT_VERSION),
+                          (ACTION_IDEMPOTENCY_VERSION, old_audit)]:
+        assert current != compute_idempotency_key(action_major_version=action, audit_contract_version=audit, **common)
 
 
 def test_pip_audit_ignore_ids_are_canonicalized_for_idempotency() -> None:
