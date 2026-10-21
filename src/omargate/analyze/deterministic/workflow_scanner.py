@@ -16,7 +16,10 @@ from .pattern_scanner import Finding, MAX_SCAN_BYTES, _truncate_snippet
 
 _EXPRESSION = re.compile(r"\$\{\{([\s\S]*?)\}\}")
 _CONTEXT_PATH = re.compile(r"(?<![\w'\"])\b(?:github|inputs)(?:\s*\.\s*\w+)+")
-_UNTRUSTED_FIELDS = {"body", "default_branch", "email", "head_ref", "ref_name", "label", "message", "name", "page_name", "ref", "title"}
+_UNTRUSTED_FIELDS = {"body", "default_branch", "description", "email", "head_branch", "head_commit", "head_ref", "ref_name", "label", "message", "name", "page_name", "ref", "title"}
+_LEGACY_CONTEXT = re.compile(r"(?<![\w'\"])github\s*\.\s*event\s*\.\s*(?:issue|comment|review)\b")
+_SAFE_EVENT_NUMBER = re.compile(r"github\.event\.(?:issue|comment|review)\.(?:id|number)$")
+_EXECUTION_INPUTS = {"args", "arguments", "command", "commands", "entrypoint", "run", "script", "shell"}
 _FULL_SHA = re.compile(r"[a-fA-F0-9]{40}")
 
 
@@ -46,11 +49,18 @@ def _document(text: str) -> Node:
 
 def _untrusted(expression: str) -> bool:
     normalized = re.sub(r"\[\s*['\"](\w+)['\"]\s*\]", r".\1", expression)
+    normalized = re.sub(r"\[\s*(?:-?\d+|\*)\s*\]", "", normalized)
+    normalized = re.sub(r"\.\s*\*\s*(?=\.|$)", "", normalized)
     for match in _CONTEXT_PATH.finditer(normalized):
         parts = re.sub(r"\s+", "", match.group(0)).split(".")
         if parts[0] == "inputs" or parts[:3] == ["github", "event", "inputs"]:
             return True
-        if parts[0] == "github" and (parts[-1] in _UNTRUSTED_FIELDS or "toJSON" in expression):
+        if parts[0] == "github" and (parts[-1] in _UNTRUSTED_FIELDS or "tojson" in expression.lower()):
+            return True
+        # Preserve the legacy issue/comment/review coverage when a context field
+        # is outside the structural vocabulary. Numeric API IDs are data, and a
+        # quoted literal spelling a context path is not an actual context read.
+        if _LEGACY_CONTEXT.match(match.group(0)) and not _SAFE_EVENT_NUMBER.fullmatch(".".join(parts)):
             return True
     return False
 
@@ -149,6 +159,18 @@ def scan_workflow(path: str, text: str, *, lock_text: str | None = None) -> list
                     script = _mapping(target["with"]).get("script")
                     if script is not None:
                         scripts.append(script)
+                if "with" in target:
+                    for key, value in _mapping(target["with"]).items():
+                        text_value = _scalar(value)
+                        if key == "script" and reference.lower().startswith("actions/github-script@"):
+                            continue  # The known executable script gets the P0 check below.
+                        if any(_untrusted(match.group(1)) for match in _EXPRESSION.finditer(text_value)):
+                            executable = key.lower() in _EXECUTION_INPUTS
+                            findings.append(_finding("CICD-ACTION-INPUT" if executable else "CICD-INPUT-FLOW",
+                                "P2" if executable else "P4", path, value,
+                                "Untrusted context reaches an execution-related action input; receiver review is required." if executable else
+                                "Untrusted context is passed as action data; the receiving action owns validation.",
+                                "Inspect the pinned receiving action's input contract, preserve argument boundaries, and avoid eval or string-built commands."))
                 for script in scripts:
                     value = _scalar(script)
                     if any(_untrusted(expression.group(1)) for expression in _EXPRESSION.finditer(value)):

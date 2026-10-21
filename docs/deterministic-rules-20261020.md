@@ -46,3 +46,14 @@ Primary references checked on 2026-10-20:
 - [GitHub workflow dependency lockfiles](https://docs.github.com/en/actions/concepts/security/workflow-dependency-lockfiles)
 - [React state update queues](https://react.dev/learn/queueing-a-series-of-state-updates)
 - [React Compiler](https://react.dev/learn/react-compiler/introduction)
+
+Follow-up checks on 2026-10-21 cover array-indexed event strings, workflow-run
+branch/message fields and all action input values. Known inline executable
+scripts retain CICD-001. Execution-related receiver inputs get CICD-ACTION-INPUT
+(P2); other untrusted action data gets CICD-INPUT-FLOW (P4). Neither observation
+can corroborate a blocking generator finding without receiver execution evidence.
+Passing a title as structured action data is not by itself proven code execution.
+
+The composite and native review now use Node 24 LTS in place of EOL Node 20,
+following the [official release status](https://nodejs.org/en/about/previous-releases).
+Cascade execution skips installation of the unused Codex CLI.

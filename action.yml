@@ -368,7 +368,7 @@ runs:
     - name: Setup Node
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
       with:
-        node-version: '20'
+        node-version: '24'
 
     - name: Install Omar Gate dependencies
       shell: bash
@@ -379,6 +379,7 @@ runs:
         python -P -m pip install --no-cache-dir --require-hashes -r "${GITHUB_ACTION_PATH}/requirements.lock.txt"
 
     - name: Install Codex CLI
+      if: inputs.review_routing != 'intent-cascade-v1' && (inputs.use_codex != 'false' || inputs.codex_only == 'true')
       shell: bash
       run: |
         set -euo pipefail

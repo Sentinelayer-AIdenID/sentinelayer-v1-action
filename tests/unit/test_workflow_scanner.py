@@ -32,7 +32,7 @@ def test_safe_env_and_action_arguments_are_data_not_script_injection():
                     "        run: printf '%s' \"$TITLE\"\n"
                     f"      - uses: owner/action@{SHA}\n"
                     "        with:\n          title: ${{ github.event.issue.title }}\n")
-    assert ids(text) == []
+    assert ids(text) == ["CICD-INPUT-FLOW"]  # Data flow is advisory, not executable interpolation.
     assert ids(workflow("      - run: echo '${{ github.event.issue.number }}'\n")) == []
 
 

@@ -1037,6 +1037,12 @@ class AnalysisOrchestrator:
             state = {"candidates": [candidate.state() for candidate in inventory.candidates]}
             if any(candidate["evidence_redacted"] for candidate in state["candidates"]):
                 raise TypeSafeReviewIncomplete("redacted_source")
+            # Routing needs verified change context, not just isolated current
+            # functions. Reuse the same bounded source/diff binding as policy.
+            state.update(build_typed_context(
+                repo_root=self.repo_root, inventory=inventory, ingest=ingest,
+                diff_content=diff_content, deterministic_findings=deterministic_findings,
+            ))
             questions = triage_questions(self.config.review_policy)
             if len(json.dumps({"state": state, "questions": questions}).encode("utf-8")) > MAX_STATE_BYTES:
                 raise TypeSafeReviewIncomplete("triage_budget_exceeded")
@@ -2141,6 +2147,8 @@ class AnalysisOrchestrator:
         for finding in non_llm_findings:
             if not isinstance(finding, dict):
                 continue
+            if finding.get("rule_id") in {"CICD-ACTION-INPUT", "CICD-INPUT-FLOW"}:
+                continue  # An input-flow observation does not establish receiver execution.
             other_path = str(finding.get("file_path") or "").replace("\\", "/")
             if other_path != path:
                 continue

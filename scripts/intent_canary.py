@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 
 from omargate.analyze.llm.llm_client import LLMClient
 from omargate.analyze.orchestrator import AnalysisOrchestrator
@@ -15,6 +16,38 @@ from omargate.analyze.review_costs import cost_ledger, estimate_usage
 from omargate.config import OmarGateConfig
 from omargate.logging import OmarLogger
 from omargate.mask_inputs import main as mask_inputs
+from omargate.main import _build_llm_evidence
+from omargate.gate import evaluate_gate
+from omargate.models import GateConfig
+from omargate.packaging import write_findings_jsonl, write_pack_summary
+
+
+def evaluate_case(name, result, config, root):
+    """Use the actual pack/gate boundary, keeping review state separate from test expectations."""
+    projection = SimpleNamespace(llm_usage=result.usage, llm_attempted=result.attempted,
+        llm_success=result.success, llm_output_valid=result.output_valid,
+        llm_no_findings_reported=result.no_findings_reported,
+        llm_reported_finding_count=result.reported_finding_count, llm_count=len(result.findings),
+        llm_parse_error_count=result.parse_error_count, llm_failure_class=result.failure_class)
+    path = root / "FINDINGS.jsonl"
+    write_findings_jsonl(path, result.findings)
+    counts = {severity: sum(row.get("severity") == severity for row in result.findings)
+              for severity in ("P0", "P1", "P2", "P3", "P4")}
+    summary = write_pack_summary(root, "synthetic-" + name, True, path, counts, {}, ["packaging"],
+        llm_usage=result.usage, llm_evidence=_build_llm_evidence(projection, config))
+    gate = evaluate_gate(summary, GateConfig(require_llm_success=True))
+    routes = (result.usage or {}).get("review_routing", {}).get("routes", [])
+    if name == "ordinary":
+        expectation_met = result.success and gate.status.value == "passed" and not gate.block_merge
+    else:
+        # A serious synthetic defect must block. Policy uncertainty is retained
+        # explicitly; a provider failure or missing defect does not count as proof.
+        expectation_met = (bool(routes) and routes[0].get("tier") == "deep"
+            and routes[-1].get("identity_matches") is True and routes[-1].get("success") is True
+            and bool(counts["P0"] + counts["P1"]) and gate.block_merge
+            and (result.success or result.failure_class == "cascade_policy_incomplete"))
+    return {"expectation_met": expectation_met, "review_complete": result.success,
+            "gate_status": gate.status.value, "block_merge": gate.block_merge, "gate_reason": gate.reason}
 
 
 async def run(output: Path) -> bool:
@@ -77,15 +110,13 @@ async def run(output: Path) -> bool:
                 usage = result.usage or {}
                 routes = usage.get("review_routing", {}).get("routes", [])
                 calls.extend(usage.get("cost_ledger", {}).get("calls", []))
-                complete = result.success and result.output_valid and usage.get("policy_assessment", {}).get("complete") is True
-                if name == "serious":
-                    complete = complete and bool(routes) and routes[0].get("tier") == "deep"
-                report["cases"].append({"name": name, "success": complete, "failure_class": result.failure_class,
+                outcome = evaluate_case(name, result, config, root)
+                report["cases"].append({"name": name, **outcome, "failure_class": result.failure_class,
                     "routes": routes, "triage_status": usage.get("review_routing", {}).get("triage_status"),
                     "triage_answers": usage.get("review_routing", {}).get("answers"),
                     "policy_assessment": usage.get("policy_assessment"),
                     "finding_severities": [row.get("severity") for row in result.findings]})
-                success = success and complete
+                success = success and outcome["expectation_met"]
     except Exception:
         # Never publish private config/provider exception bodies. No-call or
         # interrupted usage remains unknown, even if an earlier subtotal exists.
@@ -93,7 +124,7 @@ async def run(output: Path) -> bool:
                       "kind": "estimated_not_billed", "estimated_usd": None, "status": "usage_unknown"})
         report["failure_class"] = "synthetic_trial_incomplete"
         success = False
-    report.update(success=success, costs=cost_ledger(calls), completed_at=datetime.now(timezone.utc).isoformat())
+    report.update(expectations_met=success, costs=cost_ledger(calls), completed_at=datetime.now(timezone.utc).isoformat())
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return success

@@ -226,7 +226,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Prepare global npm bin path
         run: |
@@ -380,7 +380,7 @@ jobs:
           INPUT_OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           INPUT_TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
           INPUT_INTENT_MODEL_PIN: ${{ secrets.INTENT_MODEL_PIN }}
-          INPUT_INTENT_POLICY: ${{ secrets.INTENT_POLICY }}
+          INPUT_INTENT_POLICY: ${{ secrets.INTENT_POLICY_CANARY }}
           INPUT_INTENT_PRICE_PROFILE: typesafe-input-20261020
         run: python -P scripts/intent_canary.py
       - name: Upload bounded synthetic evidence

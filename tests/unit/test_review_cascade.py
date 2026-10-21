@@ -140,6 +140,9 @@ async def test_real_orchestrator_low_route_requires_generator_and_writes_separat
     assert payload["routing"]["routes"][0]["effort"] == "max"
     assert "dimension-1" in payload["routing"]["answers"]
     assert "gap_fixture" not in payload["routing"]["answers"]
+    sent = rate.call_args_list[0].kwargs["state"]
+    assert sent["diff_head_lines_verified"] is True
+    assert sent["candidate_context"][sent["candidates"][0]["candidate_id"]]["diff_hunks"]
 
 
 async def test_low_defect_escalates_and_later_clean_cannot_erase(configured, monkeypatch):
@@ -260,6 +263,29 @@ async def test_incomplete_source_policy_keeps_review_unknown_after_clean_deep_re
     configured._run_llm_analysis = AsyncMock(return_value=generator_result(DEEP))
     result = await run_review(configured)
     assert not result.success and result.failure_class == "cascade_policy_incomplete"
+
+
+async def test_private_policy_p4_is_preserved_without_forcing_expensive_review(configured, monkeypatch):
+    from pydantic import SecretStr
+    data = json.loads(FAKE_POLICY_JSON)
+    data["typed"]["severity_criteria"]["P4"] = "Test-only informational finding"
+    data["typed"]["severity_support_floors"]["P4"] = data["typed"]["severity_support_floors"]["P3"]
+    configured.config = configured.config.model_copy(update={"intent_policy": SecretStr(json.dumps(data))})
+    monkeypatch.setattr("omargate.analyze.orchestrator.review_inventory", real_review_inventory)
+    async def rate(self, *, state, questions, model):
+        if "risk" in questions:
+            return triage()
+        answers = {}
+        for key, question in questions.items():
+            selected = "P4" if key.startswith("severity::") else "auth"
+            answers[key] = (1.0 if question["type"] == "noul" else
+                ChoiceAnswer(selected, {label: float(label == selected) for label in question["criteria"]}, 1.0))
+        return TypeSafeResult(model, answers, {"input_tokens": 100, "output_tokens": 0}, 1)
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", rate)
+    configured._run_llm_analysis = AsyncMock(return_value=generator_result(LOW))
+    result = await run_review(configured)
+    assert result.success and result.findings[0]["severity"] == "P4"
+    assert configured._run_llm_analysis.call_args.kwargs["review_route"] == LOW
 
 
 async def test_provider_missing_model_identity_cannot_inherit_requested_model(configured, monkeypatch):
