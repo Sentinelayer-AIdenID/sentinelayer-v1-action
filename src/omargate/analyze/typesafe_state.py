@@ -10,6 +10,7 @@ from .typesafe_review import ReviewInventory, TypeSafeReviewIncomplete
 
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_DIFF_METADATA = re.compile(r"(?:index [a-fA-F0-9]{4,64}\.\.[a-fA-F0-9]{4,64}(?: [0-7]{6})?|(?:old|new|new file|deleted file) mode [0-7]{6})")
 
 
 def build_typed_context(
@@ -24,6 +25,10 @@ def build_typed_context(
     if not diff_content or len(diff_content.encode("utf-8")) > 100_000:
         raise TypeSafeReviewIncomplete("typed_diff_unavailable_or_oversize")
     expected = dict(inventory.source_hashes)
+    headers = {f"diff --git a/{path} b/{path}" for path in expected}
+    headers.update("--- a/" + path for path in expected)
+    headers.update("+++ b/" + path for path in expected)
+    headers.add("--- /dev/null")
     lines = diff_content.splitlines()
     hunks = []
     current = None
@@ -45,6 +50,11 @@ def build_typed_context(
             current = path[2:]
         match = _HUNK.match(line)
         if not match:
+            # Generator context includes the complete original patch. Arbitrary
+            # preamble/tail prose cannot be ignored here and then inherit code
+            # reference exemptions in the assembled outbound context.
+            if line and line not in headers and not _DIFF_METADATA.fullmatch(line):
+                raise TypeSafeReviewIncomplete("unbound_typed_diff_record")
             if current is not None and line.startswith(("+", "-", " ")) and not line.startswith("+++ "):
                 raise TypeSafeReviewIncomplete("invalid_typed_diff_counts")
             index += 1

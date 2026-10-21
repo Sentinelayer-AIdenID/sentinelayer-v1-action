@@ -22,13 +22,13 @@ def transport(request):
     return request.getfixturevalue("generator_transport")
 
 
-async def review_source(instance, source, *, quick=None):
-    (instance.repo_root / "x.py").write_bytes(source.encode())
+async def review_source(instance, source, *, quick=None, file_path="x.py"):
+    (instance.repo_root / file_path).write_bytes(source.encode())
     lines = source.splitlines()
-    diff = ("diff --git a/x.py b/x.py\n--- /dev/null\n+++ b/x.py\n@@ -0,0 +1,"
+    diff = (f"diff --git a/{file_path} b/{file_path}\n--- /dev/null\n+++ b/{file_path}\n@@ -0,0 +1,"
             + str(len(lines)) + " @@\n" + "\n".join("+" + line for line in lines) + "\n")
     return await instance._run_cascade_analysis(
-        ingest={"files": [{"path": "x.py"}]}, changed_files=["x.py"], scan_mode="pr-diff",
+        ingest={"files": [{"path": file_path}]}, changed_files=[file_path], scan_mode="pr-diff",
         deterministic_findings=[], quick_learn=quick, spec_context=None, diff_content=diff, run_dir=None)
 
 
@@ -98,6 +98,73 @@ async def test_recognized_credential_shapes_never_reach_either_provider(
     assert value not in redact_secret_source(source)[0]
 
 
+_RETURNED_FIELDS = ("githubToken", "refreshToken", "sessionToken", "botToken", "dbPassword", "jwtSecret", "ENCRYPTION_KEY", "STRIPE_KEY")
+
+
+@pytest.mark.parametrize("field", _RETURNED_FIELDS)
+@pytest.mark.parametrize("suffix", ["py", "ts"])
+async def test_returned_credential_families_stay_local(subject, transport, monkeypatch, field, suffix):
+    value = "private-" + "bounded-fixture-value"
+    rate = AsyncMock(side_effect=AssertionError("literal credential must stay local"))
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", rate)
+    result = await review_source(subject, json.dumps({field: value}) + "\n", file_path="x." + suffix)
+    rate.assert_not_awaited()
+    transport.assert_not_awaited()
+    assert result.failure_class == "cascade_source_privacy_incomplete"
+    assert not result.success and not result.attempted
+    assert result.usage["cost_ledger"]["calls"] == []
+
+
+@pytest.mark.parametrize("field", _RETURNED_FIELDS)
+async def test_returned_field_references_remain_reviewable(subject, transport, monkeypatch, field):
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", AsyncMock(return_value=triage(sensitive=1)))
+    result = await review_source(subject, f"{field} = config.{field}\n")
+    transport.assert_awaited_once()
+    assert result.success
+
+
+@pytest.mark.parametrize("field", _RETURNED_FIELDS[:4])
+async def test_removed_camelcase_credential_stays_local(subject, transport, monkeypatch, field):
+    rate = AsyncMock(side_effect=AssertionError("removed credential must stay local"))
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", rate)
+    result = await subject._run_cascade_analysis(
+        ingest={"files": [{"path": "x.py"}]}, changed_files=["x.py"], scan_mode="pr-diff",
+        deterministic_findings=[], quick_learn=None, spec_context=None, run_dir=None,
+        diff_content="diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-"
+        + json.dumps({field: "private-" + "bounded-fixture-value"}) + "\n+value = 1\n")
+    rate.assert_not_awaited()
+    transport.assert_not_awaited()
+    assert result.failure_class == "cascade_source_privacy_incomplete"
+
+
+@pytest.mark.parametrize("field", _RETURNED_FIELDS[:4])
+async def test_auxiliary_camelcase_credential_stays_local(subject, transport, field):
+    from omargate.analyze.review_cascade import DEEP
+    quick = QuickLearnSummary("PublicProject", "Public description", [], "", [], "README.md",
+                              json.dumps({field: "private-" + "bounded-fixture-value"}))
+    result = await subject._run_llm_analysis(
+        ingest={"files": [{"path": "x.py"}]}, deterministic_findings=[], quick_learn=quick,
+        spec_context=None, scan_mode="pr-diff", diff_content="+value = 1\n", changed_files=["x.py"], review_route=DEEP)
+    transport.assert_not_awaited()
+    assert result.failure_class == "cascade_source_privacy_incomplete"
+
+
+@pytest.mark.parametrize("position", ["prefix", "suffix"])
+async def test_unbound_diff_prose_is_refused_before_providers(subject, transport, monkeypatch, position):
+    rate = AsyncMock(return_value=triage(sensitive=1))
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", rate)
+    diff = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -0,0 +1 @@\n+value = 1\n"
+    note = "NOTE password=private_fixture_value\n"
+    result = await subject._run_cascade_analysis(
+        ingest={"files": [{"path": "x.py"}]}, changed_files=["x.py"], scan_mode="pr-diff",
+        deterministic_findings=[], quick_learn=None, spec_context=None, run_dir=None,
+        diff_content=note + diff if position == "prefix" else diff + note)
+    rate.assert_not_awaited()
+    transport.assert_not_awaited()
+    assert not result.success and not result.attempted
+    assert result.usage["review_routing"]["source_failure_reason"] == "unbound_typed_diff_record"
+
+
 def test_public_error_identifier_scrubbing_remains_separate_from_source_privacy():
     text = "Project: PublicProject"
     assert "PublicProject" not in sanitize_public_error(text)
@@ -121,6 +188,13 @@ def test_long_noncredential_identifier_has_bounded_work_and_cannot_hide_later_se
     code = ("from omargate.redaction import contains_credential_material as check;"
             "text='a_'*32768;assert not check(text);"
             "assert check(text+'\\nSECRET_KEY=private-fixture-value')")
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=5, capture_output=True)
+
+
+def test_long_uppercase_camelcase_boundary_has_bounded_work():
+    code = ("from omargate.redaction import contains_credential_material as check;"
+            "name='A'*300000;assert not check(name+' = 1',code_context=True);"
+            "assert check(name+'Token = '+repr('private-fixture-value'),code_context=True)")
     subprocess.run([sys.executable, "-c", code], check=True, timeout=5, capture_output=True)
 
 
