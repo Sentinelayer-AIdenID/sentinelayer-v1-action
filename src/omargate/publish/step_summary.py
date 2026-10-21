@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+import html
+import uuid
 from typing import Any, Optional
 
 from ..formatting import format_int, truncate
 from ..models import GateResult, GateStatus
 from ..ingest.codebase_snapshot import build_codebase_synopsis, render_codebase_snapshot_md
-from ..redaction import sanitize_untrusted_markdown_scalar
+from ..redaction import sanitize_public_error, sanitize_untrusted_markdown_scalar
 
 
 def _status_key(status: GateStatus | str) -> str:
@@ -45,6 +47,45 @@ def _sanitize_snapshot_scalars(value: Any) -> Any:
     return value
 
 
+def _review_completeness(summary: dict) -> list[str]:
+    lines = ["### Review completeness", ""]
+    audit = summary.get("dependency_audit_evidence")
+    if isinstance(audit, dict):
+        state = ("DISABLED" if audit.get("enabled") is False else
+                 "COMPLETE" if audit.get("complete") is True else "INCOMPLETE")
+        lines.append(f"- Dependency audit: **{state}**")
+        outcomes = audit.get("outcomes")
+        if isinstance(outcomes, list):
+            for outcome in outcomes[:3]:
+                if not isinstance(outcome, dict) or outcome.get("applicable") is not True:
+                    continue
+                ecosystem = sanitize_untrusted_markdown_scalar(outcome.get("ecosystem", "unknown"))
+                status = sanitize_untrusted_markdown_scalar(outcome.get("state", "unknown"))
+                reason = sanitize_untrusted_markdown_scalar(outcome.get("reason_code") or "none")
+                lines.append(f"  - {ecosystem}: {status} (reason: {reason})")
+    evidence = summary.get("llm_evidence")
+    if isinstance(evidence, dict):
+        state = ("NOT ATTEMPTED" if evidence.get("attempted") is not True else
+                 "COMPLETE" if evidence.get("success") is True and evidence.get("output_valid") is True else "INCOMPLETE")
+        reason = sanitize_untrusted_markdown_scalar(evidence.get("failure_class") or "none")
+        lines.append(f"- Live model review: **{state}** (reason: {reason})")
+    lines.append("")
+    return lines if len(lines) > 3 else []
+
+
+def _write_console_report(markdown: str) -> None:
+    # A report may contain repository/model text. Disable workflow commands
+    # while rendering it, then flush before the final stderr annotation.
+    token = uuid.uuid4().hex
+    print("::group::Omar Gate report")
+    print(f"::stop-commands::{token}")
+    try:
+        print(sanitize_public_error(html.unescape(markdown)), flush=True)
+    finally:
+        print(f"::{token}::")
+        print("::endgroup::", flush=True)
+
+
 def write_step_summary(
     gate_result: GateResult,
     summary: dict,
@@ -56,14 +97,12 @@ def write_step_summary(
     codebase_synopsis: Optional[str] = None,
 ) -> None:
     """
-    Write GitHub Actions Step Summary.
+    Print the report before the gate annotation and write the Actions summary.
 
     This appears in the job summary, providing quick visibility
     without clicking into logs.
     """
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if not summary_path:
-        return
 
     counts = summary.get("counts", {}) if summary else {}
     if not counts:
@@ -106,6 +145,8 @@ def write_step_summary(
         f"| P4 (Informational) | {format_int(counts.get('P4', 0))} | No |",
         "",
     ]
+
+    md.extend(_review_completeness(summary))
 
     from ..analyze.review_costs import render_cost_ledger
     md.extend(render_cost_ledger((summary.get("llm_usage") or {}).get("cost_ledger")))
@@ -167,5 +208,8 @@ def write_step_summary(
     md.append(f"<sub>Omar Gate v{safe_version} • run_id={safe_run_id}</sub>")
     md.append("")
 
-    with open(summary_path, "a", encoding="utf-8") as summary_file:
-        summary_file.write("\n".join(md))
+    report = "\n".join(md)
+    _write_console_report(report)
+    if summary_path:
+        with open(summary_path, "a", encoding="utf-8") as summary_file:
+            summary_file.write(report)

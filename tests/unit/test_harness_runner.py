@@ -353,6 +353,10 @@ def test_harness_child_env_isolates_homes_and_copies_sanitized_connectivity(
         assert Path(child[key]).is_relative_to(scratch)
     assert Path(child["PIP_CONFIG_FILE"]).is_relative_to(scratch)
     assert Path(child["NPM_CONFIG_USERCONFIG"]).is_relative_to(scratch)
+    assert Path(child["NPM_CONFIG_GLOBALCONFIG"]).is_relative_to(scratch)
+    assert child["NPM_CONFIG_USERCONFIG"] != child["NPM_CONFIG_GLOBALCONFIG"]
+    assert Path(child["NPM_CONFIG_USERCONFIG"]).read_text() == ""
+    assert Path(child["NPM_CONFIG_GLOBALCONFIG"]).read_text() == ""
     assert Path(child["GIT_CONFIG_GLOBAL"]).is_relative_to(scratch)
     serialized = repr(child)
     for secret in (

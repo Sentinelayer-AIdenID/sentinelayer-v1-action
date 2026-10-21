@@ -66,8 +66,8 @@ from .utils import ensure_writable_dir, json_dumps
 ACTION_VERSION = "1.3.11"
 # Rotate this whenever a security-control contract changes so dedupe cannot
 # mirror a successful check produced under weaker semantics on the same head.
-ACTION_IDEMPOTENCY_VERSION = "4:dependency-audit-v1.2:complete-discovery:workspace-root:private-policy:review-config:verified-model"
-DEPENDENCY_AUDIT_CONTRACT_VERSION = "dependency-audit-evidence-v1.2:workspace-root:complete-discovery"
+ACTION_IDEMPOTENCY_VERSION = "4:dependency-audit-v1.2:complete-discovery:workspace-root:private-policy:review-config:verified-model:root-declared-peer-edges:isolated-npm-config"
+DEPENDENCY_AUDIT_CONTRACT_VERSION = "dependency-audit-evidence-v1.2:workspace-root:complete-discovery:root-declared-peer-edges:isolated-npm-config"
 CHECK_NAME_BASE = "Omar Gate"
 __all__ = [
     "main",
@@ -809,6 +809,21 @@ async def async_main() -> int:
             counts=analysis.counts,
         )
 
+        # Report the completed local review before external publication or the
+        # final failure annotation. A publisher error must not hide the audit.
+        try:
+            write_step_summary(
+                gate_result=gate_result,
+                summary=summary_payload,
+                findings=analysis.findings,
+                codebase_snapshot=codebase_snapshot,
+                codebase_synopsis=codebase_synopsis,
+                run_id=run_id,
+                version=ACTION_VERSION,
+            )
+        except OSError as exc:
+            logger.warning("Step summary write failed", error=str(exc))
+
         if spec_context:
             spec_compliance = _build_spec_compliance_from_findings(
                 spec_context=spec_context,
@@ -955,18 +970,6 @@ async def async_main() -> int:
                         logger.warning("Check run creation failed", error=str(exc))
                         analysis.warnings.append("Check run creation failed")
 
-                try:
-                    write_step_summary(
-                        gate_result=gate_result,
-                        summary=summary_payload,
-                        findings=analysis.findings,
-                        codebase_snapshot=codebase_snapshot,
-                        codebase_synopsis=codebase_synopsis,
-                        run_id=run_id,
-                        version=ACTION_VERSION,
-                    )
-                except OSError as exc:
-                    logger.warning("Step summary write failed", error=str(exc))
         except Exception as exc:
             publish_success = False
             collector.record_error("publish", str(exc))

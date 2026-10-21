@@ -466,8 +466,9 @@ def _harness_child_env(
         directory.mkdir()
     pip_config = resolved_scratch / "pip.conf"
     npm_config = resolved_scratch / "npmrc"
+    npm_global_config = resolved_scratch / "npm-globalrc"
     git_config = resolved_scratch / "gitconfig"
-    for config_file in (pip_config, npm_config, git_config):
+    for config_file in (pip_config, npm_config, npm_global_config, git_config):
         config_file.write_text("", encoding="utf-8")
 
     child = {
@@ -484,8 +485,8 @@ def _harness_child_env(
         "PIP_NO_INPUT": "1",
         "NPM_CONFIG_USERCONFIG": str(npm_config),
         "npm_config_userconfig": str(npm_config),
-        "NPM_CONFIG_GLOBALCONFIG": str(npm_config),
-        "npm_config_globalconfig": str(npm_config),
+        "NPM_CONFIG_GLOBALCONFIG": str(npm_global_config),
+        "npm_config_globalconfig": str(npm_global_config),
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": str(git_config),
         "GIT_TERMINAL_PROMPT": "0",
