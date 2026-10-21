@@ -138,6 +138,8 @@ async def test_real_orchestrator_low_route_requires_generator_and_writes_separat
     assert [r["provider"] for r in payload["costs"]["calls"]] == ["typesafe", "typesafe", "openai"]
     assert payload["policy_assessment"]["complete"] is True
     assert payload["routing"]["routes"][0]["effort"] == "max"
+    assert "dimension-1" in payload["routing"]["answers"]
+    assert "gap_fixture" not in payload["routing"]["answers"]
 
 
 async def test_low_defect_escalates_and_later_clean_cannot_erase(configured, monkeypatch):
@@ -245,6 +247,10 @@ async def test_real_source_policy_runs_and_a_clean_generator_cannot_remove_its_p
     guarded = configured._apply_llm_guardrails(llm_findings=result.findings, non_llm_findings=[], ingest={"files": [{"path": "x.py"}]})
     assert guarded[0]["severity"] == "P1"  # missing deterministic corroboration cannot erase it
     assert result.usage["policy_assessment"]["complete"] is True
+    assert result.usage["policy_assessment"]["answers"]
+    assert result.usage["policy_assessment"]["question_candidates"]
+    assert "context" not in result.usage["policy_assessment"]
+    assert "Test-only" not in json.dumps(result.usage["policy_assessment"])
     assert len(result.usage["cost_ledger"]["calls"]) == 3
 
 

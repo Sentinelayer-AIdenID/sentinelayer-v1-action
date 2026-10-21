@@ -1053,7 +1053,8 @@ class AnalysisOrchestrator:
             # Never expose source/provider exception bodies. A failed request may
             # have been billed, so its cost remains unknown rather than zero.
             if client is not None and client.attempted and not records:
-                records.append(estimate_usage("typesafe", self.config.intent_model_pin.get_secret_value(), None, intent_price_profile=self.config.intent_price_profile))
+                records.append({**estimate_usage("typesafe", self.config.intent_model_pin.get_secret_value(),
+                    None, intent_price_profile=self.config.intent_price_profile), "stage": "triage"})
             triage_status = "incomplete_requires_deep_review"
 
         policy_findings, policy_assessment = await self._assess_cascade_policy(
@@ -1093,7 +1094,8 @@ class AnalysisOrchestrator:
             reported_model = (result.usage or {}).get("model")
             actual_model = reported_model if isinstance(reported_model, str) else ""
             if result.attempted:
-                records.append(estimate_usage("openai", actual_model, raw_usage))
+                records.append({**estimate_usage("openai", actual_model, raw_usage),
+                                "stage": "generator-" + route.tier, "effort": route.effort})
             unexpected_model = not response_model_matches(actual_model, route.model)
             if unexpected_model:
                 result = self._llm_failure_result(
@@ -1135,7 +1137,8 @@ class AnalysisOrchestrator:
             usage["cost_ledger"] = cost_ledger(records)
             usage["review_routing"] = {"routes": routes, "triage_status": triage_status,
                                        "model": self.config.intent_model_reference,
-                                       "answers": {key: value.as_dict() if hasattr(value, "as_dict") else value
+                                       "answers": {(f"dimension-{list(self.config.review_policy.routing['domains']).index(key[4:]) + 1}" if key.startswith("gap_") else key):
+                                                   value.as_dict() if hasattr(value, "as_dict") else value
                                                    for key, value in triage.answers.items()} if triage else {},
                                        "source_hashes": dict(inventory.source_hashes) if inventory else {}}
             usage["policy_assessment"] = policy_assessment
@@ -1179,6 +1182,12 @@ class AnalysisOrchestrator:
                 "stage": "source-policy"})
             recorded = True
             verify_sources(self.repo_root, inventory)
+            # Retain decisions and source bindings without prompt/rubric text or
+            # copied source context, so operators can explain incomplete reviews.
+            for name in ("source_hashes", "candidates", "question_candidates", "answers",
+                         "decision_reason", "unresolved_candidates"):
+                if name in review.assessment:
+                    assessment[name] = review.assessment[name]
             assessment.update(complete=review.assessment.get("complete") is True,
                               status="complete" if review.assessment.get("complete") is True else "incomplete")
             findings = list(review.findings)

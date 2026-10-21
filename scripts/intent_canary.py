@@ -82,6 +82,7 @@ async def run(output: Path) -> bool:
                     complete = complete and bool(routes) and routes[0].get("tier") == "deep"
                 report["cases"].append({"name": name, "success": complete, "failure_class": result.failure_class,
                     "routes": routes, "triage_status": usage.get("review_routing", {}).get("triage_status"),
+                    "triage_answers": usage.get("review_routing", {}).get("answers"),
                     "policy_assessment": usage.get("policy_assessment"),
                     "finding_severities": [row.get("severity") for row in result.findings]})
                 success = success and complete
