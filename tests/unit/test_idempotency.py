@@ -115,10 +115,10 @@ def test_dependency_audit_contract_and_harness_mode_are_bound() -> None:
 
 
 def test_npm_workspace_boundary_rotates_both_contract_tokens() -> None:
-    assert DEPENDENCY_AUDIT_CONTRACT_VERSION == "dependency-audit-evidence-v1.2:workspace-root:complete-discovery"
+    assert DEPENDENCY_AUDIT_CONTRACT_VERSION == "dependency-audit-evidence-v1.2:workspace-root:complete-discovery:root-declared-peer-edges:isolated-npm-config"
     assert (
         ACTION_IDEMPOTENCY_VERSION
-        == "4:dependency-audit-v1.2:complete-discovery:workspace-root:private-policy:review-config:verified-model"
+        == "4:dependency-audit-v1.2:complete-discovery:workspace-root:private-policy:review-config:verified-model:root-declared-peer-edges:isolated-npm-config"
     )
 
     common = {

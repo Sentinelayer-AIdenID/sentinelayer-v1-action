@@ -57,7 +57,7 @@ def _emit_gate_annotation(
 
     title = f"Omar Gate {status.upper()}"
     counts = gate_result.counts
-    counts_str = f"P0={counts.p0}, P1={counts.p1}, P2={counts.p2}, P3={counts.p3}"
+    counts_str = f"P0={counts.p0}, P1={counts.p1}, P2={counts.p2}, P3={counts.p3}, P4={counts.p4}"
     link = workflow_run_url or dashboard_url or ""
     link_str = f" Details: {link}" if link else ""
 

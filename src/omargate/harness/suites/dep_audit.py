@@ -911,7 +911,11 @@ def _load_npm_audit_input(
             or any(part in {"", ".", ".."} for part in package_path.split("/"))
             or not isinstance(record, dict)
             or peer_dependencies is None
-            or bool(peer_dependencies)
+            # A declaration can refer to a package already in the regular
+            # root graph. Its concrete registry record is still required and
+            # counted below; peer-only/optional records remain unsupported.
+            # This audits locked versions, not peer semver compatibility.
+            or not set(peer_dependencies).issubset(declared_names)
             or not isinstance(peer_metadata, dict)
             or bool(peer_metadata)
             or record.get("link") is True

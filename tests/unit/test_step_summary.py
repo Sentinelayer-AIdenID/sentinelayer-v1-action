@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+import pytest
+
 from omargate.models import Counts, GateResult, GateStatus
 from omargate.publish import write_step_summary
 
@@ -97,3 +105,64 @@ def test_step_summary_neutralizes_untrusted_markdown(tmp_path, monkeypatch) -> N
     assert "&#35;&#35; PASSED" in content
     assert "&#60;img src&#61;x&#62;" in content
     assert "&#64;admins" in content
+
+
+@pytest.mark.parametrize("encoding", ["cp1252", "ascii", "utf-8"])
+def test_real_console_encoding_preserves_report_and_final_error_order(tmp_path, encoding):
+    summary_file = tmp_path / "summary.md"
+    env = {**os.environ, "PYTHONIOENCODING": f"{encoding}:strict",
+           "GITHUB_STEP_SUMMARY": str(summary_file)}
+    source = str(Path(__file__).resolve().parents[2] / "src")
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [source, env.get("PYTHONPATH")]))
+    program = r'''
+import sys
+from pathlib import Path
+from omargate.models import Counts, GateResult, GateStatus
+from omargate.publish import write_step_summary
+from omargate.runtime_helpers import _emit_gate_annotation
+gate = GateResult(status=GateStatus.BLOCKED, reason="Review incomplete: \u6f22\u5b57",
+                  block_merge=True, counts=Counts(p0=1, p1=1, p2=8, p3=48), dedupe_key="fixture")
+write_step_summary(gate, {"severity_gate": "P1"}, [
+    {"severity": "P1", "file_path": "source.py", "line_start": 1,
+     "message": "::error::untrusted fixture"}], "fixture-run", "1.0.0")
+_emit_gate_annotation(gate_result=gate, severity_gate="P1", run_id="fixture-run",
+                      run_dir=Path("."), workflow_run_url=None, dashboard_url=None)
+raise SystemExit(1)
+'''
+    result = subprocess.run([sys.executable, "-c", program], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+    assert result.returncode == 1
+    console = result.stdout.decode(encoding, errors="strict")
+    assert "UnicodeEncodeError" not in console
+    assert "P3 (Low) | 48" in console
+    token = re.search(r"::stop-commands::([a-f0-9]{32})", console)
+    assert token is not None
+    assert (console.index(token.group(0)) < console.index("::error::untrusted fixture")
+            < console.index(f"::{token.group(1)}::")
+            < console.index("::endgroup::") < console.index("::error title="))
+    saved = summary_file.read_text(encoding="utf-8")
+    assert "\U0001f6e1\ufe0f" in saved  # The file keeps the full Unicode template.
+    assert "Review incomplete&#58; \u6f22\u5b57" in saved
+
+
+def test_console_io_failure_cannot_prevent_persisted_summary(tmp_path, monkeypatch):
+    import omargate.publish.step_summary as module
+    summary_file = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+    def broken_console(_):
+        raise OSError("owned fixture broken pipe")
+    monkeypatch.setattr(module, "_write_console_report", broken_console)
+    gate = GateResult(status=GateStatus.BLOCKED, reason="Incomplete review", block_merge=True,
+                      counts=Counts(p0=1), dedupe_key="fixture")
+    with pytest.raises(OSError, match="owned fixture broken pipe"):
+        write_step_summary(gate, {}, [], "fixture", "1.0.0")
+    assert "Incomplete review" in summary_file.read_text(encoding="utf-8")
+
+
+def test_summary_file_io_failure_cannot_prevent_console_report(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path))  # A directory is not a summary file.
+    gate = GateResult(status=GateStatus.BLOCKED, reason="Incomplete review", block_merge=True,
+                      counts=Counts(p0=1), dedupe_key="fixture")
+    with pytest.raises(OSError):
+        write_step_summary(gate, {}, [], "fixture", "1.0.0")
+    assert "Incomplete review" in capsys.readouterr().out
