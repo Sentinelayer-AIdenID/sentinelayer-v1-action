@@ -5,7 +5,7 @@ import json
 import re
 from datetime import date, datetime, timezone
 
-GENERATOR_SOURCE_BOUNDARY_VERSION = "generator-source-privacy-v2:credential-only-source"
+GENERATOR_SOURCE_BOUNDARY_VERSION = "generator-source-privacy-v3:credential-field-normalization:bound-diff-records"
 
 
 def review_config_digest(config) -> str:

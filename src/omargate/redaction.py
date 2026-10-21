@@ -116,10 +116,14 @@ _TYPE_VALUE_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.\[\], |<>?]{0,200}
 
 
 def _credential_field(name: str) -> bool:
-    name = name.lower().replace("-", "_")
+    # Split camelCase and acronym boundaries before losing case information.
+    # Fixed-width lookarounds avoid retrying a greedy uppercase prefix at every
+    # position of an attacker-controlled identifier.
+    name = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "_", name).lower().replace("-", "_")
     compact = name.replace("_", "")
     return (compact.endswith(("secretaccesskey", "apikey", "accesstoken", "authtoken",
-                              "clientsecret", "privatekey", "secretkey", "signingkey", "webhooksecret"))
+                              "clientsecret", "privatekey", "secretkey", "signingkey", "webhooksecret",
+                              "encryptionkey", "stripekey"))
             or name.split("_")[-1] in {"secret", "token", "password", "passwd", "pwd", "credential", "pass", "authorization"})
 
 
