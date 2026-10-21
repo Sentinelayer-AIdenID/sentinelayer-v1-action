@@ -123,7 +123,8 @@ def _credential_field(name: str) -> bool:
     compact = name.replace("_", "")
     return (compact.endswith(("secretaccesskey", "apikey", "accesstoken", "authtoken",
                               "clientsecret", "privatekey", "secretkey", "signingkey", "webhooksecret",
-                              "encryptionkey", "stripekey"))
+                              "encryptionkey", "stripekey", "token", "password", "passwd", "pwd",
+                              "credential", "secret", "authorization"))
             or name.split("_")[-1] in {"secret", "token", "password", "passwd", "pwd", "credential", "pass", "authorization"})
 
 
