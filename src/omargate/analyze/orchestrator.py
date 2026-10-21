@@ -1264,6 +1264,8 @@ class AnalysisOrchestrator:
             code = str(exc)
             reason = code if re.fullmatch(r"[a-z][a-z0-9_]{0,95}", code) else "full_source_review_failed"
         complete = reason is None and bool(requests) and len(completed) == len(requests)
+        attempted_ids = {row["partition_id"] for row in completed}
+        reviewed_ids = {row["partition_id"] for row in completed if row["success"] and row["output_valid"]}
         evidence = {
             "schema": "omargate.source-scope.v1", "complete": complete,
             "reason_code": reason, "scope": scope.manifest() if scope else None,
@@ -1271,7 +1273,10 @@ class AnalysisOrchestrator:
             "planned_partitions": [{"partition_id": r.partition_id,
                                     "candidate_ids": [c.candidate_id for c in r.inventory.candidates]}
                                    for r in requests],
-            "residual_partition_ids": [r.partition_id for r in requests[len(completed):]],
+            "attempted_partition_ids": [r.partition_id for r in requests if r.partition_id in attempted_ids],
+            "reviewed_partition_ids": [r.partition_id for r in requests if r.partition_id in reviewed_ids],
+            "unattempted_partition_ids": [r.partition_id for r in requests if r.partition_id not in attempted_ids],
+            "residual_partition_ids": [r.partition_id for r in requests if r.partition_id not in reviewed_ids],
             "cost_ledger": cost_ledger(records),
             "estimate_budget": {"ceiling_usd": self.config.max_review_estimate_usd,
                                 "kind": "token_rate_forecast_not_billing_cap", "admissions": reservations},

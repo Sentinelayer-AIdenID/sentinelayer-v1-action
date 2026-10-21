@@ -145,7 +145,12 @@ async def test_failed_first_partition_is_unknown_with_explicit_unreviewed_tail(f
     result = await run_full(full)
     proof = result.usage["source_scope"]
     assert not result.success and not proof["complete"]
-    assert len(proof["partitions"]) == 1 and len(proof["residual_partition_ids"]) == 1
+    assert len(proof["partitions"]) == 1 and len(proof["residual_partition_ids"]) == 2
+    failed_id = proof["partitions"][0]["partition_id"]
+    assert proof["attempted_partition_ids"] == [failed_id]
+    assert proof["reviewed_partition_ids"] == []
+    assert failed_id in proof["residual_partition_ids"]
+    assert proof["unattempted_partition_ids"] == proof["residual_partition_ids"][1:]
     assert len(result.usage["cost_ledger"]["calls"]) == 4  # triage/policy + low + deep
 
 
