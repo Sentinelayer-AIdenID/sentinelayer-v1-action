@@ -6,7 +6,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..redaction import sanitize_public_error
+from ..redaction import redact_secret_source, sanitize_public_error
 from .source_scope import SourceScope
 from .typesafe_review import MAX_STATE_BYTES, ReviewInventory, TypeSafeReviewIncomplete
 
@@ -19,11 +19,13 @@ def build_scope_context(scope: SourceScope, inventory: ReviewInventory, findings
     for candidate in inventory.candidates:
         hits = []
         for finding in findings:
+            if str(finding.get("category", "")).strip().lower() == "secrets":
+                continue  # Keep secret findings locally, never their evidence in provider state.
             start = finding.get("line_start")
             end = finding.get("line_end") or start
             if (finding.get("file_path") == candidate.file_path and type(start) is int
                     and type(end) is int and end >= candidate.line_start and start <= candidate.line_end):
-                hits.append({key: sanitize_public_error(str(finding.get(key, "")))
+                hits.append({key: sanitize_public_error(redact_secret_source(str(finding.get(key, "")))[0])
                              for key in ("rule_id", "severity", "category", "message")})
         context[candidate.candidate_id] = {
             "language": Path(candidate.file_path).suffix.lstrip(".") or "unknown",

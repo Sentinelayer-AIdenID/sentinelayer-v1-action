@@ -29,8 +29,8 @@ finding. Failed strongest review remains a failed review.
 Source hashes are checked around model work. intent model receives redacted bounded state;
 redacted, unsupported, oversized, deleted or unavailable source takes the stronger
 review path and retains incomplete policy status. Even a clean strongest-model
-answer cannot complete missing policy coverage. Deep/nightly inventories currently
-remain unsupported by this profile and cannot pass as complete cascade reviews.
+answer cannot complete missing policy coverage. Deep/nightly reviews use the
+bounded tracked-source partition plan below; an incomplete plan cannot pass.
 
 `REVIEW_ROUTING.json` and `PACK_SUMMARY.json` record the actual model, decisions,
 source hashes, neutral policy/calibration references, review coverage and separate
@@ -88,3 +88,22 @@ completed partitions, observed defects, actual-call estimates and explicit resid
 partition ids. Coverage remains incomplete and blocks the gate. Forecasts are
 recorded separately from provider usage and do not guarantee a provider bill or
 include non-token fees.
+
+Whole-source deep/nightly coverage includes every tracked UTF-8 text file,
+including tests, build/dist directories and a tracked `.sentinelayerignore`.
+Neither that PR-controlled file nor the legacy ingest defaults waive tracked
+text coverage. Untracked files remain outside the declared scope. A binary
+exclusion requires both a recognized image extension (PNG, JPEG, GIF, WebP or
+ICO) and its matching magic signature; this classification is not an image
+security audit. NUL-bearing scripts, other undeclared binary formats and
+unsupported text encodings refuse the complete plan before providers. Text
+and excluded image bytes are bound to committed Git blobs and rechecked around
+provider calls. A changed image cannot remain excluded merely by retaining a
+NUL or its magic header.
+
+Scanner auxiliary context applies the credential-only redactor before public
+diagnostic sanitization. Secret-category hits stay in local deterministic
+evidence and do not enter whole-source provider state. These rules do not waive
+source privacy or native gates. The existing native census and per-file/total
+byte/candidate/request/spend limits can still refuse a large repository; a
+refusal is incomplete coverage, never permission to silently clip its tail.

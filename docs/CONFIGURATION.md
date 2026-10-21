@@ -264,7 +264,7 @@ These documented source contracts do not demonstrate empirical model recall, cal
 
 ### `.sentinelayerignore`
 
-The action respects a `.sentinelayerignore` file at repo root (gitignore-style patterns). This is the primary control for reducing scan scope in monorepos or large repositories.
+The legacy ingest path respects a `.sentinelayerignore` file at repo root (gitignore-style patterns). Complete-source `intent-cascade-v1` deep/nightly reviews do not use it or the ingest defaults to waive tracked text coverage: tests and build/dist source remain required. Unsupported bytes or exhausted budgets make that review incomplete. See [the complete-source contract](intent-cascade.md).
 
 Example `.sentinelayerignore`:
 

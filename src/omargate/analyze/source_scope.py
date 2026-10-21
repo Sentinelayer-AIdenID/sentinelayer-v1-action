@@ -7,8 +7,6 @@ import json
 from pathlib import Path
 import subprocess
 
-from ..ingest.ingest_runner import _load_ignore_patterns, _matches_ignore
-from ..ingest.file_classifier import classify_file
 from .typesafe_review import (
     MAX_FILE_BYTES, ReviewInventory, TypeSafeReviewIncomplete, _source_path,
     build_inventory, verify_sources,
@@ -32,7 +30,9 @@ class SourceScope:
         return {
             "scope_id": self.scope_id, "scan_mode": self.scan_mode,
             "source_head": self.source_head,
-            "coverage": "all tracked text within the declared ignore policy",
+            "coverage": "all tracked text; ignore patterns cannot waive coverage",
+            "ignore_policy": "no_tracked_text_exemptions",
+            "binary_exclusion_policy": "image-extension-and-magic-v1",
             "untracked_files": "outside_declared_scope",
             "source_hashes": dict(self.source_hashes),
             "exclusions": [{"file_path": path, "reason": reason} for path, reason in self.exclusions],
@@ -80,6 +80,22 @@ def _verify_blob(raw: bytes, expected: str) -> None:
         raise TypeSafeReviewIncomplete("source_differs_from_committed_blob")
 
 
+def _declared_image(relative: str, raw: bytes) -> bool:
+    """A NUL alone never establishes that executable source is a binary asset."""
+    suffix = Path(relative).suffix.lower()
+    if suffix == ".png":
+        return raw.startswith(b"\x89PNG\r\n\x1a\n")
+    if suffix in {".jpg", ".jpeg"}:
+        return raw.startswith(b"\xff\xd8\xff")
+    if suffix == ".gif":
+        return raw.startswith((b"GIF87a", b"GIF89a"))
+    if suffix == ".webp":
+        return raw.startswith(b"RIFF") and raw[8:12] == b"WEBP"
+    if suffix == ".ico":
+        return raw.startswith(b"\x00\x00\x01\x00")
+    return False
+
+
 def build_source_scope(
     repo_root: Path, scan_mode: str, *, max_total_bytes: int = 8_000_000,
     max_candidates: int = 10_000,
@@ -93,15 +109,13 @@ def build_source_scope(
     blobs = dict(git_blobs)
     if tracked != tuple(path for path, _ in git_blobs):
         raise TypeSafeReviewIncomplete("source_scope_changed")
-    if (repo_root / ".sentinelayerignore").exists() and ".sentinelayerignore" not in blobs:
-        raise TypeSafeReviewIncomplete("unbound_source_ignore_policy")
-    ignores = tuple(_load_ignore_patterns(repo_root))
+    # A whole-source completeness claim cannot be narrowed by PR-controlled
+    # ignore rules or generic defaults such as tests/build/dist. Tracked ignore
+    # files are ordinary reviewed text; untracked files remain outside scope.
+    ignores: tuple[str, ...] = ()
     candidates, required_hashes, hashes, excluded = [], [], [], []
     total = 0
     for relative in tracked:
-        if _matches_ignore(relative, list(ignores)):
-            excluded.append((relative, "declared_ignore_policy"))
-            continue
         path = _source_path(repo_root, relative)
         if path.is_symlink() or (repo_root / relative).is_symlink():
             raise TypeSafeReviewIncomplete("unsupported_source_symlink")
@@ -114,11 +128,12 @@ def build_source_scope(
         if len(raw) > MAX_FILE_BYTES:
             raise TypeSafeReviewIncomplete("source_budget_exceeded")
         _verify_blob(raw, blobs[relative])
-        if b"\0" in raw:
-            if classify_file(relative).category != "other":
-                raise TypeSafeReviewIncomplete("unsupported_source_bytes")
+        hashes.append((relative, hashlib.sha256(raw).hexdigest()))
+        if _declared_image(relative, raw):
             excluded.append((relative, "binary_non_text"))
             continue
+        if b"\0" in raw:
+            raise TypeSafeReviewIncomplete("unsupported_source_bytes")
         try:
             raw.decode("utf-8")
         except UnicodeDecodeError:
@@ -128,7 +143,6 @@ def build_source_scope(
         total += len(raw)
         if total > max_total_bytes:
             raise TypeSafeReviewIncomplete("full_source_byte_budget_exceeded")
-        hashes.append((relative, hashlib.sha256(raw).hexdigest()))
         if not raw:
             continue  # Empty files remain hash-bound, with no source lines to review.
         item = build_inventory(repo_root=repo_root, ingest={"files": [{"path": relative}]},
@@ -150,7 +164,7 @@ def build_source_scope(
 def verify_source_scope(repo_root: Path, scope: SourceScope) -> None:
     if _committed_tree(repo_root) != (scope.source_head, scope.git_blobs):
         raise TypeSafeReviewIncomplete("source_scope_changed")
-    if _tracked_paths(repo_root) != scope.tracked_paths or tuple(_load_ignore_patterns(repo_root)) != scope.ignore_patterns:
+    if _tracked_paths(repo_root) != scope.tracked_paths or scope.ignore_patterns != ():
         raise TypeSafeReviewIncomplete("source_scope_changed")
     for relative, expected in scope.source_hashes:
         try:
@@ -162,15 +176,8 @@ def verify_source_scope(repo_root: Path, scope: SourceScope) -> None:
             raise TypeSafeReviewIncomplete("source_unavailable") from None
         if hashlib.sha256(raw).hexdigest() != expected:
             raise TypeSafeReviewIncomplete("source_changed_during_review")
-    # A binary exclusion cannot be replaced with code between provider calls.
-    for relative, reason in scope.exclusions:
-        if reason == "binary_non_text":
-            try:
-                path = _source_path(repo_root, relative)
-                if path.stat().st_size > MAX_FILE_BYTES or b"\0" not in path.read_bytes():
-                    raise TypeSafeReviewIncomplete("source_scope_changed")
-            except OSError:
-                raise TypeSafeReviewIncomplete("source_unavailable") from None
+    # The hash loop binds binary exclusions too: retaining a magic header or
+    # another NUL cannot conceal a change between provider calls.
     verify_sources(repo_root, scope.inventory)
 
 

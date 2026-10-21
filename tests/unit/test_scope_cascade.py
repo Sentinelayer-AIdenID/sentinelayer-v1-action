@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from test_review_cascade import configured as configured, triage, generator_result
+from test_review_cascade import configured as configured, triage, generator_result, generator_transport as generator_transport
 from omargate.analyze.review_cascade import LOW
 from omargate.analyze.scope_context import plan_scope_requests, validate_scope_coverage
 from omargate.analyze.source_scope import build_source_scope, verify_scope_partition
@@ -40,8 +40,69 @@ def commit(root):
 
 async def run_full(orchestrator, **kwargs):
     return await orchestrator._run_cascade_analysis(ingest={"files": [{"path": "x.py"}]},
-        changed_files=None, scan_mode=kwargs.pop("scan_mode", "deep"), deterministic_findings=[],
+        changed_files=None, scan_mode=kwargs.pop("scan_mode", "deep"), deterministic_findings=kwargs.pop("deterministic_findings", []),
         quick_learn=None, spec_context=None, diff_content=None, run_dir=kwargs.pop("run_dir", None))
+
+
+@pytest.mark.parametrize("name", ["tail.mjs", "tail.cjs", "scripts/tail"])
+async def test_nul_script_cannot_disappear_before_the_first_provider(full, name):
+    from omargate.analyze.typesafe_client import TypeSafeClient
+    path = full.repo_root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"/*\0*/\nconsole.log('fixture');\n")
+    subprocess.run(["git", "-C", str(full.repo_root), "add", "--", name], check=True)
+    commit(full.repo_root)
+    result = await run_full(full)
+    assert not result.success and not result.attempted
+    assert result.usage["source_scope"]["reason_code"] == "unsupported_source_bytes"
+    TypeSafeClient.rate.assert_not_awaited()
+    full._run_llm_analysis.assert_not_awaited()
+
+
+@pytest.mark.parametrize("name,policy", [
+    ("build/tail.py", None), ("dist/tail.py", None), ("tests/tail.py", None),
+    ("src/hidden/tail.py", "src/hidden/**\n"),
+])
+async def test_head_ignore_and_default_exclusions_cannot_waive_tracked_review(full, name, policy):
+    path = full.repo_root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"required_tail = 3\n")
+    subprocess.run(["git", "-C", str(full.repo_root), "add", "--", name], check=True)
+    if policy is not None:
+        (full.repo_root / ".sentinelayerignore").write_text(policy)
+        subprocess.run(["git", "-C", str(full.repo_root), "add", ".sentinelayerignore"], check=True)
+    commit(full.repo_root)
+    result = await run_full(full)
+    assert result.success, result.usage
+    contexts = [json.loads(call.kwargs["source_context"]) for call in full._run_llm_analysis.call_args_list]
+    candidates = [candidate for context in contexts for candidate in context["candidates"]]
+    assert any(candidate["file_path"] == name and candidate["evidence"] == "required_tail = 3\n" for candidate in candidates)
+    scope = result.usage["source_scope"]["scope"]
+    assert name in scope["source_hashes"] and not scope["exclusions"]
+
+
+@pytest.mark.parametrize("category", ["fixture", "secrets"])
+async def test_full_scope_scanner_context_cannot_send_credential_messages(full, monkeypatch, request, category):
+    from omargate.analyze import orchestrator as module
+    transport = request.getfixturevalue("generator_transport")
+    seen = []
+    async def rate(self, *, state, questions, model):
+        seen.append(state)
+        return triage()
+    monkeypatch.setattr(module.TypeSafeClient, "rate", rate)
+    full._run_llm_analysis = module.AnalysisOrchestrator._run_llm_analysis.__get__(full)
+    material = "password = '" + "tiny" + "'"
+    findings = [{"file_path": "x.py", "line_start": 1, "severity": "P2", "category": category,
+                 "rule_id": "FIXTURE", "message": material}]
+    original = json.dumps(findings)
+    await run_full(full, deterministic_findings=findings)
+    assert seen  # The real full-scope orchestration reached the typed boundary.
+    outbound = [*seen, *[call.kwargs["context"] for call in module.review_inventory.call_args_list],
+                *[call.kwargs for call in transport.call_args_list]]
+    assert all(material not in json.dumps(envelope) for envelope in outbound)
+    if category == "secrets":
+        assert all(not context["scanner_hits"] for state in seen for context in state["candidate_context"].values())
+    assert json.dumps(findings) == original  # Local deterministic evidence is preserved.
 
 
 async def test_zero_estimate_budget_refuses_all_transport_even_with_approval_none(full):

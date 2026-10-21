@@ -28,9 +28,9 @@ def test_whole_tracked_scope_retains_last_file_empty_hash_and_declared_exclusion
     add("tests/test_x.py")
     (root / "untracked.py").write_text("outside = True\n")
     scope = build_source_scope(root, mode)
-    assert set(dict(scope.source_hashes)) == {"src/x.py", "src/z.py", "src/empty.py"}
-    assert {c.file_path for c in scope.inventory.candidates} == {"src/x.py", "src/z.py"}
-    assert scope.exclusions == (("tests/test_x.py", "declared_ignore_policy"),)
+    assert set(dict(scope.source_hashes)) == {"src/x.py", "src/z.py", "src/empty.py", "tests/test_x.py"}
+    assert {c.file_path for c in scope.inventory.candidates} == {"src/x.py", "src/z.py", "tests/test_x.py"}
+    assert scope.exclusions == ()
     assert scope.manifest()["untracked_files"] == "outside_declared_scope"
     assert build_source_scope(root, mode) == scope
     verify_source_scope(root, scope)
@@ -50,10 +50,13 @@ def test_required_tail_mutation_and_new_tracked_file_cannot_pass(tracked):
 
 
 def test_ignore_policy_changes_cannot_silently_reduce_coverage(tracked):
-    root, _ = tracked
+    root, add = tracked
+    add(".sentinelayerignore", b"src/**\n")
     scope = build_source_scope(root, "deep")
-    (root / ".sentinelayerignore").write_text("src/**\n")
-    with pytest.raises(TypeSafeReviewIncomplete, match="source_scope_changed"):
+    assert "src/x.py" in dict(scope.source_hashes)
+    assert scope.ignore_patterns == ()
+    (root / ".sentinelayerignore").write_text("**\n")
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_changed_during_review"):
         verify_source_scope(root, scope)
 
 
@@ -67,11 +70,11 @@ def test_required_unreadable_bytes_do_not_become_clean(tracked, raw, code):
 
 def test_binary_exclusion_cannot_be_replaced_by_text(tracked):
     root, add = tracked
-    add("icon.png", b"image\0data")
+    add("icon.png", b"\x89PNG\r\n\x1a\n" + b"\0" * 12)
     scope = build_source_scope(root, "deep")
     assert ("icon.png", "binary_non_text") in scope.exclusions
     (root / "icon.png").write_text("now code\n")
-    with pytest.raises(TypeSafeReviewIncomplete, match="source_scope_changed"):
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_changed_during_review"):
         verify_source_scope(root, scope)
 
 
@@ -107,5 +110,32 @@ def test_uncommitted_source_and_normalized_crlf_cannot_claim_committed_blob_iden
 def test_untracked_ignore_policy_cannot_hide_required_source(tracked):
     root, _ = tracked
     (root / ".sentinelayerignore").write_text("src/**\n")
-    with pytest.raises(TypeSafeReviewIncomplete, match="unbound_source_ignore_policy"):
+    scope = build_source_scope(root, "deep")
+    assert "src/x.py" in dict(scope.source_hashes)
+    assert not scope.exclusions and not scope.ignore_patterns
+
+
+@pytest.mark.parametrize("name,header", [
+    ("icon.png", b"\x89PNG\r\n\x1a\n"), ("icon.jpg", b"\xff\xd8\xff"),
+    ("icon.jpeg", b"\xff\xd8\xff"), ("icon.gif", b"GIF89a"),
+    ("icon.webp", b"RIFF" + b"\0" * 4 + b"WEBP"), ("icon.ico", b"\0\0\x01\0"),
+])
+def test_only_declared_images_are_excluded_and_their_exact_bytes_stay_bound(tracked, name, header):
+    root, add = tracked
+    add(name, header + b"\0" * 12)
+    scope = build_source_scope(root, "deep")
+    assert scope.exclusions == ((name, "binary_non_text"),)
+    (root / name).write_bytes(header + b"\0" * 11 + b"x")
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_changed_during_review"):
+        verify_source_scope(root, scope)
+
+
+@pytest.mark.parametrize("name,raw", [
+    ("disguised.png", b"/*\0*/console.log('fixture');\n"),
+    ("source.mjs", b"GIF89a\0"), ("source", b"\0unknown"),
+])
+def test_nul_and_image_extension_or_magic_alone_do_not_establish_a_binary(tracked, name, raw):
+    root, add = tracked
+    add(name, raw)
+    with pytest.raises(TypeSafeReviewIncomplete, match="unsupported_source_bytes"):
         build_source_scope(root, "deep")
