@@ -36,18 +36,18 @@ def review_fixture() -> TypedReview:
             "message": f"Policy-owned reason {index}.",
             "recommendation": f"Policy-owned recommendation {index}.",
             "fix_plan": f"Policy-owned recommendation {index}.",
-            "source": "llm", "model_source": "jev-1.13.0",
+            "source": "llm", "model_source": "model-under-test-1.13.0",
             "typed_verdict": {"severity": severity, "category": "fixture", "reason": f"Policy-owned reason {index}."},
         })
     assessment = {
-        "provider": "typesafe", "model": "jev-1.13.0", "complete": True,
+        "provider": "typesafe", "model": "model-under-test-1.13.0", "complete": True,
         "source_hashes": {"source.py": "a" * 64},
         "answers": {"noul": 0.73, "choice": {
             "type": "choice", "choice": "present",
             "probabilities": {"present": 0.8, "absent": 0.2}, "confidence": 0.6,
         }},
     }
-    return TypedReview(findings, {"provider": "typesafe", "model": "jev-1.13.0", "typesafe_assessment": assessment}, assessment)
+    return TypedReview(findings, {"provider": "typesafe", "model": "model-under-test-1.13.0", "typesafe_assessment": assessment}, assessment)
 
 
 def explanations():
@@ -105,7 +105,7 @@ async def test_writer_adds_only_prose_preserves_verdict_evidence_order_and_actua
     }
     assert written.usage["writer_usage"] == written.assessment["writer"] == expected_usage
     assert written.usage["typesafe_assessment"] == written.assessment
-    assert written.usage["model"] == "jev-1.13.0"
+    assert written.usage["model"] == "model-under-test-1.13.0"
     assert written.assessment["answers"] == original.assessment["answers"]
     assert len(client.calls) == 1
     assert client.calls[0]["max_tokens"] == 4096
@@ -116,7 +116,7 @@ async def test_writer_adds_only_prose_preserves_verdict_evidence_order_and_actua
 
 @pytest.mark.anyio
 async def test_empty_clean_review_is_returned_without_a_writer_call() -> None:
-    review = TypedReview([], {"model": "jev-1.13.0"}, {"complete": True})
+    review = TypedReview([], {"model": "model-under-test-1.13.0"}, {"complete": True})
     client = FakeWriter()
     assert await explain_review(review, client=client) is review
     assert client.calls == []
@@ -258,7 +258,7 @@ async def test_writer_accepts_exact_or_strictly_dated_funded_model_and_keeps_act
     written = await explain_review(original, client=client)
 
     assert written.usage["writer_usage"]["model"] == written.assessment["writer"]["model"] == reported_model
-    assert written.usage["model"] == "jev-1.13.0"
+    assert written.usage["model"] == "model-under-test-1.13.0"
     for old, new in zip(original.findings, written.findings):
         assert new["writer_model_source"] == reported_model
         assert new["typed_verdict"] == old["typed_verdict"]

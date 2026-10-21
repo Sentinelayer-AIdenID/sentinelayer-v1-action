@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from omargate.intent_identity import intent_model_reference
+
 from dataclasses import replace
 import hashlib
 import json
@@ -22,7 +24,7 @@ from omargate.analyze.typesafe_review import (
 from omargate.redaction import sanitize_public_error
 
 
-MODEL = "jev-1.13.0"
+MODEL = "model-under-test-1.13.0"
 
 
 def source_inventory(
@@ -402,7 +404,7 @@ async def test_review_preserves_source_binding_and_reports_only_actual_usage(tmp
     assert (finding["file_path"], finding["line_start"], finding["line_end"]) == ("source.py", 1, 2)
     assert finding["snippet"] == sent_candidate["evidence"]
     assert finding["confidence"] == 0.61  # The fixture policy's interpretation, not the raw 0.87 Noul.
-    assert finding["model_source"] == MODEL
+    assert finding["model_source"] == intent_model_reference(MODEL)
     assert finding["typed_candidate"] == {
         "candidate_id": candidate.candidate_id,
         "evidence_sha256": candidate.evidence_sha256,
@@ -410,7 +412,7 @@ async def test_review_preserves_source_binding_and_reports_only_actual_usage(tmp
     }
     assert secret not in json.dumps(result.findings)
     assert result.usage == {
-        "provider": "typesafe", "model": MODEL, "route": "typed-review",
+        "provider": "typesafe", "model": intent_model_reference(MODEL), "route": "typed-review",
         "tokens_in": None, "tokens_out": None, "cost_usd": None,
         "latency_ms": 9,
         "typesafe_usage": {"input_tokens": 13, "output_tokens": 0, "fixture_meter": "reported"},
@@ -666,5 +668,5 @@ async def test_policy_prose_reuses_existing_redactor_with_bound_source_and_verdi
     assert finding["file_path"] == candidate.file_path
     assert (finding["line_start"], finding["line_end"]) == (candidate.line_start, candidate.line_end)
     assert finding["snippet"] == candidate.evidence
-    assert finding["model_source"] == MODEL
+    assert finding["model_source"] == intent_model_reference(MODEL)
     assert result.assessment["source_hashes"] == dict(inventory.source_hashes)

@@ -6,6 +6,8 @@ missing policy and uncertain decisions are explicit generator-fallback reasons.
 """
 from __future__ import annotations
 
+from ..intent_identity import intent_model_reference
+
 from dataclasses import dataclass
 import hashlib
 import json
@@ -318,7 +320,7 @@ async def review_inventory(
             # Legacy finding field: explicitly interpreted by the policy owner,
             # never inferred as a separate Noul confidence by the transport.
             "confidence": finding.support_probability,
-            "source": "llm", "model_source": response.model,
+            "source": "llm", "model_source": intent_model_reference(response.model),
             "typed_candidate": {
                 "candidate_id": candidate.candidate_id,
                 "evidence_sha256": candidate.evidence_sha256,
@@ -367,7 +369,7 @@ async def review_inventory(
             else "policy_review_incomplete"
         )
     assessment = {
-        "provider": "typesafe", "model": response.model,
+        "provider": "typesafe", "model": intent_model_reference(response.model),
         "policy_id": policy.policy_id, "calibration_id": policy.calibration_id,
         "source_hashes": dict(inventory.source_hashes),
         "candidates": [{
@@ -390,7 +392,7 @@ async def review_inventory(
         "context": context or {},
     }
     return TypedReview(emitted, {
-        "provider": "typesafe", "model": response.model, "route": "typed-review",
+        "provider": "typesafe", "model": intent_model_reference(response.model), "route": "typed-review",
         "tokens_in": None, "tokens_out": None, "cost_usd": None,
         "latency_ms": response.latency_ms, "typesafe_usage": response.usage,
         "typesafe_assessment": assessment,

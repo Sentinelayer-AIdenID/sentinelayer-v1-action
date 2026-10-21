@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import math
 import time
@@ -51,7 +51,7 @@ TypeSafeAnswer = float | ChoiceAnswer
 
 @dataclass(frozen=True)
 class TypeSafeResult:
-    model: str
+    model: str = field(repr=False)
     answers: dict[str, TypeSafeAnswer]
     usage: dict
     latency_ms: int
@@ -203,7 +203,7 @@ class TypeSafeClient:
         *,
         state: dict,
         questions: dict[str, dict],
-        model: str = "jev-1.13.0",
+        model: str,
     ) -> TypeSafeResult:
         """Evaluate named Noul/Choice questions; never retry or follow redirects.
 

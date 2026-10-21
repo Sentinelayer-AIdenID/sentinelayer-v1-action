@@ -37,10 +37,10 @@ inputs:
     required: false
     default: ''
 
-  typesafe_model:
-    description: 'Pinned TypeSafe model version for typed candidate assessment; mutable aliases are rejected'
+  intent_model_pin:
+    description: 'Private pinned intent-model identifier; map from an Actions variable or secret. Required with typesafe; never reported verbatim.'
     required: false
-    default: 'jev-1.13.0'
+    default: ''
 
   typesafe_timeout:
     description: 'TypeSafe request timeout in seconds (1-120)'
@@ -384,7 +384,7 @@ runs:
         INPUT_GOOGLE_API_KEY: ${{ inputs.google_api_key }}
         INPUT_XAI_API_KEY: ${{ inputs.xai_api_key }}
         INPUT_TYPESAFE_API_KEY: ${{ inputs.typesafe_api_key }}
-        INPUT_TYPESAFE_MODEL: ${{ inputs.typesafe_model }}
+        INPUT_INTENT_MODEL_PIN: ${{ inputs.intent_model_pin }}
         INPUT_TYPESAFE_TIMEOUT: ${{ inputs.typesafe_timeout }}
         INPUT_TYPESAFE_MAX_CANDIDATES: ${{ inputs.typesafe_max_candidates }}
         INPUT_TYPESAFE_FALLBACK: ${{ inputs.typesafe_fallback }}

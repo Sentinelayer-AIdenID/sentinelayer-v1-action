@@ -156,7 +156,7 @@ This provider first asks the pinned intent model model to assess source-backed c
     llm_provider: typesafe
     typesafe_api_key: ${{ secrets.TYPESAFE_API_KEY }}
     openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-    typesafe_model: ${{ secrets.TYPESAFE_MODEL }}
+    intent_model_pin: ${{ secrets.INTENT_MODEL_PIN }}
     typesafe_fallback: true
 ```
 
@@ -351,7 +351,7 @@ beneath a potentially live child.
 | `llm_provider` | `openai` | `openai`, `anthropic`, `google`, `xai`, `typesafe` |
 | `model` | `""` (automatic) | API model: `gpt-4.1-mini` for legacy providers; exactly `gpt-5.3-codex` for TypeSafe |
 | `model_fallback` | `""` (automatic) | API fallback: `gpt-4.1-mini` for legacy providers; exactly `gpt-5.3-codex` for TypeSafe |
-| `typesafe_model` | `pinned provider version` | Pinned `provider-MAJOR.MINOR.PATCH` version; mutable aliases rejected |
+| `intent_model_pin` | `""` | Required private `provider-MAJOR.MINOR.PATCH` version; mutable aliases rejected |
 | `typesafe_timeout` | `30` | TypeSafe timeout in seconds, 1–120 |
 | `typesafe_max_candidates` | `50` | Maximum complete source candidates, 1–200; budget exhaustion is incomplete coverage |
 | `typesafe_fallback` | `true` | Allow separate `gpt-5.3-codex` generator review when the typed stage cannot complete |

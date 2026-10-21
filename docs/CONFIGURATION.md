@@ -30,7 +30,7 @@ SentinelLayer (Omar Gate) is configured entirely via GitHub Action inputs (see [
 | `llm_provider` | string | `openai` | LLM provider: `openai`, `anthropic`, `google`, `xai`, `typesafe`. |
 | `model` | string | `""` (automatic) | Primary API model: resolves to `gpt-4.1-mini` for legacy providers, exactly `gpt-5.3-codex` for TypeSafe. |
 | `model_fallback` | string | `""` (automatic) | API fallback model: resolves to `gpt-4.1-mini` for legacy providers, exactly `gpt-5.3-codex` for TypeSafe. |
-| `typesafe_model` | string | `pinned provider version` | Pinned `provider-MAJOR.MINOR.PATCH` version; mutable aliases rejected. |
+| `intent_model_pin` | string | `""` | Required private `provider-MAJOR.MINOR.PATCH` version; mutable aliases rejected. |
 | `typesafe_timeout` | int | `30` | TypeSafe request timeout in seconds, 1–120 inclusive. |
 | `typesafe_max_candidates` | int | `50` | Complete source candidate budget, 1–200 inclusive. Exceeding it requires fallback; candidates are not silently truncated. |
 | `typesafe_fallback` | bool | `true` | Allow separate `gpt-5.3-codex` generator review when the typed stage cannot complete. |
@@ -213,13 +213,13 @@ with:
 
 ### TypeSafe review
 
-Set `llm_provider: typesafe` and provide both `typesafe_api_key` and `openai_api_key`. `typesafe_model` uses a pinned provider version and accepts only pinned `provider-MAJOR.MINOR.PATCH` names. `codex_only: true` and `sentinelayer_managed_llm: true` are invalid with this provider.
+Set `llm_provider: typesafe` and provide both `typesafe_api_key` and `openai_api_key`. `intent_model_pin` requires a private pinned provider version and accepts only pinned `provider-MAJOR.MINOR.PATCH` names. `codex_only: true` and `sentinelayer_managed_llm: true` are invalid with this provider.
 
 **Experimental status:** This configuration does not establish empirical recall, calibrated security quality, independent security/release approval or adoption approval. Use an independently approved action revision before enabling this provider.
 
 The stages have separate responsibilities:
 
-1. **Source-bound candidate assessment:** Complete supported changed files are divided into consecutive spans of at most 40 lines. Candidate identity binds the file, start/end lines, exact source hash and evidence hash. Source bytes are verified before and after assessment; supplied diff head/context lines are checked against source before assessment, while removed lines remain unverified patch context. intent model returns typed risk probabilities and severity/category choices; source text is untrusted data. Packaged policy owns completeness checks, thresholds, labels, finding text and remediation templates.
+1. **Source-bound candidate assessment:** Complete supported changed files are divided into consecutive spans of at most 40 lines. Candidate identity binds the file, start/end lines, exact source hash and evidence hash. Source bytes are verified before and after assessment; supplied diff head/context lines are checked against source before assessment, while removed lines remain unverified patch context. The intent model returns typed risk probabilities and severity/category choices; source text is untrusted data. Packaged policy owns completeness checks, thresholds, labels, finding text and remediation templates.
 2. **Fixed-verdict explanation:** When findings exist, `gpt-5.3-codex` may explain each exact finding ID once. The response may replace only message/recommendation prose; it cannot change severity, category, source span, evidence, typed reason or finding count. Writer failure preserves the policy-owned typed verdict and template text with a warning and bounded failure metadata; it does not erase the findings or automatically require generator review.
 3. **Generator fallback:** With `typesafe_fallback: true`, an unsuccessful typed stage runs the separate OpenAI `gpt-5.3-codex` review: Codex CLI first when `use_codex: true`, then the API if necessary; `use_codex: false` selects the API directly. `use_codex` does not disable the fixed-verdict writer.
 

@@ -18,7 +18,7 @@ from omargate.analyze.typesafe_client import (
 
 
 KEY = "synthetic-typesafe-key"
-MODEL = "jev-1.13.0"
+MODEL = "model-under-test-1.13.0"
 QUESTIONS = {
     "candidate-1": {"type": "noul", "instructions": "Does the supplied candidate apply?"},
     "candidate-2": {"type": "noul", "instructions": {"question": "Is the claim supported?"}},
@@ -48,7 +48,7 @@ async def evaluate(payload=None, *, content=None, status=200):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         evaluator = TypeSafeClient(KEY, client=client)
-        result = await evaluator.rate(state={"diff": "exact fixture"}, questions=QUESTIONS)
+        result = await evaluator.rate(state={"diff": "exact fixture"}, questions=QUESTIONS, model="model-under-test-1.13.0")
         return result, calls
 
 
@@ -89,7 +89,7 @@ async def test_supplied_client_reused_not_closed_and_cannot_override_bearer():
     ) as client:
         evaluator = TypeSafeClient(KEY, client=client)
         for _ in range(2):
-            await evaluator.rate(state={}, questions=QUESTIONS)
+            await evaluator.rate(state={}, questions=QUESTIONS, model="model-under-test-1.13.0")
         assert not client.is_closed
     assert len(calls) == 2
 
@@ -106,7 +106,7 @@ async def test_owned_client_is_closed_and_disables_ambient_proxy_and_redirects(m
         return client
 
     monkeypatch.setattr(httpx, "AsyncClient", factory)
-    assert (await TypeSafeClient(KEY).rate(state={}, questions=QUESTIONS)).model == MODEL
+    assert (await TypeSafeClient(KEY).rate(state={}, questions=QUESTIONS, model="model-under-test-1.13.0")).model == MODEL
     assert len(created) == 1 and created[0].is_closed
 
 
@@ -120,7 +120,7 @@ async def test_redirect_is_refused_even_when_injected_client_follows_redirects()
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True) as client:
         with pytest.raises(TypeSafeError, match=r"HTTP 307"):
-            await TypeSafeClient(KEY, client=client).rate(state={}, questions=QUESTIONS)
+            await TypeSafeClient(KEY, client=client).rate(state={}, questions=QUESTIONS, model="model-under-test-1.13.0")
     assert len(calls) == 1
     assert calls[0].url.host == "api.typesafe.ai"
 
@@ -136,7 +136,7 @@ async def test_status_errors_are_safe_and_never_retried(status):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(TypeSafeError) as failure:
-            await TypeSafeClient(KEY, client=client).rate(state={}, questions=QUESTIONS)
+            await TypeSafeClient(KEY, client=client).rate(state={}, questions=QUESTIONS, model="model-under-test-1.13.0")
     assert str(failure.value) == f"TypeSafe request failed (HTTP {status})"
     assert KEY not in str(failure.value) and "PRIVATE BODY" not in str(failure.value)
     assert len(calls) == 1
@@ -144,9 +144,9 @@ async def test_status_errors_are_safe_and_never_retried(status):
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("content", [
-    b'{"model":"jev-1.13.0","model":"jev-1.13.0"}',
-    b'{"model":"jev-1.13.0","answers":{"candidate-1":{"type":"noul","noul":0,"noul":1}}}',
-    b'{"model":"jev-1.13.0","unused":{"x":1,"x":2}}',
+    b'{"model":"model-under-test-1.13.0","model":"model-under-test-1.13.0"}',
+    b'{"model":"model-under-test-1.13.0","answers":{"candidate-1":{"type":"noul","noul":0,"noul":1}}}',
+    b'{"model":"model-under-test-1.13.0","unused":{"x":1,"x":2}}',
     b'{"number":NaN}', b'{"number":Infinity}', b'{"number":-Infinity}',
     b'{"number":1e400}', b'\xef\xbb\xbf{}', b'\xff', b'{', b'[]',
 ])
@@ -179,7 +179,7 @@ async def test_noul_must_be_numeric_nonbool_and_in_range(value):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("model", [None, "", "jev-latest", "jev-1.14.0", 13])
+@pytest.mark.parametrize("model", [None, "", "model-under-test-latest", "model-under-test-1.14.0", 13])
 async def test_response_model_must_match_requested_pin(model):
     with pytest.raises(TypeSafeError, match="model did not match"):
         await evaluate(projection(model=model))
@@ -188,12 +188,12 @@ async def test_response_model_must_match_requested_pin(model):
 @pytest.mark.anyio
 async def test_explicit_new_pin_is_sent_and_actual_model_returned():
     def handler(request):
-        assert json.loads(request.content)["model"] == "jev-1.14.0"
-        return httpx.Response(200, json=projection(model="jev-1.14.0"))
+        assert json.loads(request.content)["model"] == "model-under-test-1.14.0"
+        return httpx.Response(200, json=projection(model="model-under-test-1.14.0"))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await TypeSafeClient(KEY, client=client).rate(state={}, questions=QUESTIONS, model="jev-1.14.0")
-    assert result.model == "jev-1.14.0"
+        result = await TypeSafeClient(KEY, client=client).rate(state={}, questions=QUESTIONS, model="model-under-test-1.14.0")
+    assert result.model == "model-under-test-1.14.0"
 
 
 @pytest.mark.anyio
@@ -256,7 +256,7 @@ async def test_overall_timeout_cancels_delayed_transport_and_leaves_supplied_cli
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         evaluator = TypeSafeClient(KEY, timeout_seconds=0.01, client=client)
         with pytest.raises(TypeSafeError, match="request timed out"):
-            await evaluator.rate(state={}, questions=QUESTIONS)
+            await evaluator.rate(state={}, questions=QUESTIONS, model="model-under-test-1.13.0")
         assert cancelled.is_set() and not client.is_closed
         assert evaluator.attempted is True
 
@@ -269,7 +269,7 @@ async def test_transport_errors_hide_provider_key_body_and_exception_chain(excep
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(TypeSafeError) as failure:
-            await TypeSafeClient(KEY, client=client).rate(state={}, questions=QUESTIONS)
+            await TypeSafeClient(KEY, client=client).rate(state={}, questions=QUESTIONS, model="model-under-test-1.13.0")
     rendered = "".join(traceback.format_exception(failure.value))
     assert KEY not in rendered and "PRIVATE BODY" not in rendered
 
@@ -284,7 +284,7 @@ async def test_caller_cancellation_is_not_relabelled_as_provider_failure():
         return httpx.Response(200, json=projection())
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        task = asyncio.create_task(TypeSafeClient(KEY, client=client).rate(state={}, questions=QUESTIONS))
+        task = asyncio.create_task(TypeSafeClient(KEY, client=client).rate(state={}, questions=QUESTIONS, model="model-under-test-1.13.0"))
         await entered.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -461,7 +461,7 @@ async def test_invalid_choice_criteria_refuse_before_transport(criteria):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(TypeSafeError, match="request was invalid"):
-            await TypeSafeClient(KEY, client=client).rate(state={}, questions=questions)
+            await TypeSafeClient(KEY, client=client).rate(state={}, questions=questions, model="model-under-test-1.13.0")
     assert calls == []
 
 
@@ -520,7 +520,7 @@ async def test_http_attempted_changes_only_at_post_not_invalid_rate_entry():
         evaluator = TypeSafeClient(KEY, client=client)
         assert evaluator.attempted is False
         with pytest.raises(TypeSafeError, match="request was invalid"):
-            await evaluator.rate(state={}, questions={})
+            await evaluator.rate(state={}, questions={}, model="model-under-test-1.13.0")
         assert evaluator.attempted is False and calls == []
-        await evaluator.rate(state={}, questions=MIXED_QUESTIONS)
+        await evaluator.rate(state={}, questions=MIXED_QUESTIONS, model="model-under-test-1.13.0")
         assert evaluator.attempted is True and len(calls) == 1

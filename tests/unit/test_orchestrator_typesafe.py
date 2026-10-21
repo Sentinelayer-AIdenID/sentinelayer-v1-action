@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from omargate.intent_identity import intent_model_reference
+
 import copy
 import json
 import re
@@ -29,7 +31,7 @@ from omargate.models import GateConfig, GateStatus
 from omargate.packaging import write_findings_jsonl, write_pack_summary
 
 
-PIN = "jev-1.13.0"
+PIN = "model-under-test-1.13.0"
 GENERATOR = "gpt-5.3-codex"
 ACTUAL_GENERATOR = "fixture-returned-generator-model"
 DIFF = "diff --git a/source.py b/source.py\n--- a/source.py\n+++ b/source.py\n@@ -1 +1,2 @@\n-old\n+first\n+second\n"
@@ -131,7 +133,7 @@ def orchestrator(
     (tmp_path / "source.py").write_text("first\nsecond\n", encoding="utf-8")
     config = OmarGateConfig(
         llm_provider="typesafe", typesafe_api_key="synthetic-typesafe-key",
-        openai_api_key="synthetic-generator-key", typesafe_model=PIN,
+        openai_api_key="synthetic-generator-key", intent_model_pin=PIN,
         typesafe_fallback=fallback, use_codex=codex, model=GENERATOR,
         model_fallback=GENERATOR, codex_model=GENERATOR,
         run_harness=run_harness, publish_github=False, telemetry=False,
@@ -365,7 +367,7 @@ async def test_allowed_fallback_uses_codex_first_and_keeps_actual_returned_prove
     assert typed.await_count == cli.await_count == 1 and api.await_count == 0
     assert result.llm_usage["provider"] == "openai" and result.llm_usage["model"] == GENERATOR
     assert result.llm_usage["typesafe_attempt"]["success"] is False
-    assert result.llm_usage["fallback_chain"] == f"typesafe/{PIN} -> openai/{GENERATOR}"
+    assert result.llm_usage["fallback_chain"] == f"typesafe/{intent_model_reference(PIN)} -> openai/{GENERATOR}"
     assert synopsis == []
     assert_deterministic_retained(result)
 
@@ -383,7 +385,7 @@ async def test_allowed_api_fallback_does_not_label_findings_with_requested_model
     selected = next(row for row in result.findings if row["source"] == "llm")
     assert selected["model_source"] == ACTUAL_GENERATOR
     assert result.llm_usage["model"] == ACTUAL_GENERATOR
-    assert result.llm_usage["fallback_chain"] == f"typesafe/{PIN} -> openai/{ACTUAL_GENERATOR}"
+    assert result.llm_usage["fallback_chain"] == f"typesafe/{intent_model_reference(PIN)} -> openai/{ACTUAL_GENERATOR}"
     assert typed.await_count == api.await_count == 1 and cli.await_count == 0
     assert synopsis == []
     assert_deterministic_retained(result)
@@ -531,10 +533,10 @@ async def test_real_empty_complete_policy_decision_requires_generator(tmp_path, 
     assert result.no_findings_reported and result.findings == []
     assert result.reported_finding_count == 0
     assert result.failure_class == "typesafe_clean_requires_generator"
-    assert result.usage["model"] == PIN and result.usage["provider"] == "typesafe"
+    assert result.usage["model"] == intent_model_reference(PIN) and result.usage["provider"] == "typesafe"
     assert result.usage["typesafe_usage"] == {"input_tokens": 7, "output_tokens": 0}
     retained = json.loads((run_dir / "TYPESAFE_REVIEW.json").read_text(encoding="utf-8"))
-    assert retained["complete"] is False and retained["model"] == PIN
+    assert retained["complete"] is False and retained["model"] == intent_model_reference(PIN)
     assert retained["policy_decision_complete"] is True
     assert retained["failure_class"] == "typesafe_clean_requires_generator"
     assert retained["source_hashes"] and len(client.calls) == 1
@@ -766,7 +768,7 @@ async def test_source_change_while_writer_waits_cannot_publish_stale_findings(tm
     assert not result.success and not result.output_valid and result.attempted
     assert result.failure_class == "source_changed_during_review"
     assert len(client.calls) == writer_call.await_count == 1
-    assert result.usage["model"] == PIN
+    assert result.usage["model"] == intent_model_reference(PIN)
     assert result.usage["typesafe_usage"] == {"input_tokens": 7, "output_tokens": 0}
     assert not any(row.get("id", "").startswith("typesafe-span-") for row in result.findings)
     assert result.usage["typesafe_assessment"]["complete"] is False
@@ -788,7 +790,7 @@ async def test_evidence_write_failure_cannot_publish_successful_empty_review(tmp
     assert not result.success and not result.output_valid and result.attempted
     assert result.failure_class == "typesafe_evidence_write_failed"
     assert not result.no_findings_reported and len(client.calls) == 1
-    assert result.usage["model"] == PIN
+    assert result.usage["model"] == intent_model_reference(PIN)
     assert result.usage["typesafe_usage"] == {"input_tokens": 7, "output_tokens": 0}
     assert result.usage["typesafe_assessment"]["complete"] is False
 
@@ -1825,7 +1827,7 @@ async def test_completed_typed_p0_survives_writer_failure_without_a_new_decision
     )
     assert typed[0]["recommendation"] == "Inspect the bound fixture source."
     assert typed[0]["file_path"] == "source.py" and typed[0]["line_start"] == 1
-    assert typed[0]["model_source"] == PIN
+    assert typed[0]["model_source"] == intent_model_reference(PIN)
     assert result.llm_success and result.llm_output_valid and result.llm_attempted
     assert result.llm_reported_finding_count == result.llm_count == 1
     assert result.counts["P0"] == 1 and result.counts["P2"] == 1

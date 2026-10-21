@@ -285,6 +285,6 @@ async def test_full_typed_context_budget_refuses_before_any_client_request(tmp_p
     with pytest.raises(TypeSafeReviewIncomplete, match="typed_context_budget_exceeded"):
         await review_inventory(
             repo_root=tmp_path, inventory=inventory, policy=Policy(), client=client,
-            model="jev-1.13.0", context=context,
+            model="model-under-test-1.13.0", context=context,
         )
     assert client.calls == 0

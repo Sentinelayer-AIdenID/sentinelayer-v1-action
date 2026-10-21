@@ -868,7 +868,7 @@ class AnalysisOrchestrator:
         if typed_result is not None:
             llm_usage = dict(llm_usage or {})
             llm_usage["typesafe_attempt"] = {
-                "requested_model": self.config.typesafe_model,
+                "requested_model": self.config.intent_model_reference,
                 "attempted": typed_result.attempted,
                 "success": typed_result.success,
                 "failure_class": typed_result.failure_class,
@@ -882,7 +882,7 @@ class AnalysisOrchestrator:
                 actual_provider = llm_usage.get("provider") or "unknown"
                 actual_model = llm_usage.get("model") or "unknown"
                 llm_usage["fallback_chain"] = (
-                    f"typesafe/{self.config.typesafe_model} -> "
+                    f"typesafe/{self.config.intent_model_reference} -> "
                     f"{actual_provider}/{actual_model}"
                 )
 
@@ -1007,7 +1007,7 @@ class AnalysisOrchestrator:
         typed_usage = None
         writer_warning = None
         metadata: dict = {
-            "requested_provider": "typesafe", "requested_model": self.config.typesafe_model,
+            "requested_provider": "typesafe", "requested_model": self.config.intent_model_reference,
             "complete": False,
         }
         try:
@@ -1026,7 +1026,7 @@ class AnalysisOrchestrator:
             )
             review = await review_inventory(
                 repo_root=self.repo_root, inventory=inventory, policy=policy,
-                client=client, model=self.config.typesafe_model, context=context,
+                client=client, model=self.config.intent_model_pin.get_secret_value(), context=context,
             )
             metadata = review.assessment
             typed_usage = review.usage
@@ -1187,7 +1187,7 @@ class AnalysisOrchestrator:
         if result.usage is None:
             result.usage = {
                 "provider": "typesafe", "model": None,
-                "requested_model": self.config.typesafe_model,
+                "requested_model": self.config.intent_model_reference,
                 "tokens_in": None, "tokens_out": None, "cost_usd": None,
                 "typesafe_assessment": metadata,
             }

@@ -3,8 +3,11 @@
 The full-engine action accepts `llm_provider: typesafe` for its typed candidate
 assessment path. Supply both `typesafe_api_key` and `openai_api_key` through GitHub
 secrets. TypeSafe assesses candidates; the OpenAI key funds the writer and fallback.
-Both keys are held as secret configuration values. `typesafe_model` defaults to the pinned
-`pinned provider version`; mutable aliases and incomplete version strings are rejected.
+Both keys and `intent_model_pin` are held as secret configuration values. Supply
+the reviewed provider pin from an Actions variable or secret. No public default is
+provided; an empty or malformed pin refuses the intent-model stage. Mutable aliases
+and incomplete version strings are rejected. Public evidence contains only a
+neutral intent-model label and a short SHA-256 reference to the pin.
 
 The remaining inputs are `typesafe_timeout` (1–120 seconds, default 30),
 `typesafe_max_candidates` (1–200, default 50), and `typesafe_fallback` (default true).

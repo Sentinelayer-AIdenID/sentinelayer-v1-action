@@ -49,7 +49,7 @@ def test_typesafe_defaults_preserve_legacy_generator_settings() -> None:
 
     assert config.llm_provider == "openai"
     assert config.typesafe_api_key.get_secret_value() == ""
-    assert config.typesafe_model == "jev-1.13.0"
+    assert config.intent_model_pin.get_secret_value() == ""
     assert config.typesafe_timeout == 30
     assert config.typesafe_max_candidates == 50
     assert config.typesafe_fallback is True
@@ -65,7 +65,7 @@ def test_typesafe_inputs_load_with_funded_generator_models(
         "LLM_PROVIDER": " TypeSafe ",
         "TYPESAFE_API_KEY": "typesafe-test-only",
         "OPENAI_API_KEY": "writer-test-only",
-        "TYPESAFE_MODEL": "jev-1.14.0",
+        "INTENT_MODEL_PIN": "model-under-test-1.14.0",
         "TYPESAFE_TIMEOUT": "12",
         "TYPESAFE_MAX_CANDIDATES": "7",
         "TYPESAFE_FALLBACK": "false",
@@ -84,7 +84,7 @@ def test_typesafe_inputs_load_with_funded_generator_models(
     assert "typesafe-test-only" not in config.model_dump_json()
     assert "writer-test-only" not in repr(config)
     assert "writer-test-only" not in config.model_dump_json()
-    assert config.typesafe_model == "jev-1.14.0"
+    assert config.intent_model_pin.get_secret_value() == "model-under-test-1.14.0"
     assert config.typesafe_timeout == 12
     assert config.typesafe_max_candidates == 7
     assert config.typesafe_fallback is False
@@ -97,18 +97,18 @@ def test_typesafe_requires_nonblank_key(key: str) -> None:
     with pytest.raises(ValidationError, match="typesafe_api_key is required"):
         OmarGateConfig(
             llm_provider="typesafe", typesafe_api_key=key, openai_api_key="writer-test-only"
-        )
+        , intent_model_pin="model-under-test-1.13.0")
 
 
 @pytest.mark.parametrize(
     "model",
-    ["", "jev-latest", "jev-preview", "jev-1.13", "jev-1.13.0-preview", "jev-1.13.0\n", " jev-1.13.0"],
+    ["model-under-test-latest", "model-under-test-preview", "model-under-test-1.13", "model-under-test-1.13.0-preview", "model-under-test-1.13.0\n", " model-under-test-1.13.0"],
 )
 def test_typesafe_requires_exact_pinned_model(model: str) -> None:
-    with pytest.raises(ValidationError, match="typesafe_model must be a pinned version"):
+    with pytest.raises(ValidationError, match="intent_model_pin must be a pinned version"):
         OmarGateConfig(
             llm_provider="typesafe", typesafe_api_key="test-only",
-            openai_api_key="writer-test-only", typesafe_model=model,
+            openai_api_key="writer-test-only", intent_model_pin=model,
         )
 
 
@@ -128,7 +128,7 @@ def test_typesafe_limits_reject_out_of_range_or_fractional_values(field: str, va
         OmarGateConfig(
             llm_provider="typesafe", typesafe_api_key="test-only",
             openai_api_key="writer-test-only", **{field: value},
-        )
+         intent_model_pin="model-under-test-1.13.0")
 
 
 @pytest.mark.parametrize(
@@ -139,7 +139,7 @@ def test_typesafe_limits_accept_boundaries(field: str, value: int) -> None:
     config = OmarGateConfig(
         llm_provider="typesafe", typesafe_api_key="test-only",
         openai_api_key="writer-test-only", **{field: value},
-    )
+     intent_model_pin="model-under-test-1.13.0")
     assert getattr(config, field) == value
 
 
@@ -148,7 +148,7 @@ def test_typesafe_rejects_codex_only() -> None:
         OmarGateConfig(
             llm_provider="typesafe", typesafe_api_key="test-only",
             openai_api_key="writer-test-only", codex_only=True,
-        )
+         intent_model_pin="model-under-test-1.13.0")
 
 
 def test_typesafe_keeps_existing_managed_proxy_restriction() -> None:
@@ -159,7 +159,7 @@ def test_typesafe_keeps_existing_managed_proxy_restriction() -> None:
             openai_api_key="writer-test-only",
             sentinelayer_managed_llm=True,
             sentinelayer_token="test-only",
-        )
+         intent_model_pin="model-under-test-1.13.0")
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "google", "xai"])
@@ -172,7 +172,7 @@ def test_action_forwards_typesafe_inputs_with_matching_defaults() -> None:
     inputs, env = _action_contract()
     defaults = {
         "typesafe_api_key": "",
-        "typesafe_model": "jev-1.13.0",
+        "intent_model_pin": "",
         "typesafe_timeout": "30",
         "typesafe_max_candidates": "50",
         "typesafe_fallback": "true",
@@ -198,7 +198,7 @@ def test_typesafe_defaults_all_generator_paths_to_funded_model(
         llm_provider="typesafe", typesafe_api_key="typed-test-only",
         openai_api_key="writer-test-only", use_codex=use_codex,
         typesafe_fallback=typesafe_fallback,
-    )
+     intent_model_pin="model-under-test-1.13.0")
     assert config.model == config.model_fallback == config.codex_model == "gpt-5.3-codex"
     assert config.llm_provider == "typesafe"
     assert config.use_managed_llm_proxy() is False
@@ -215,7 +215,7 @@ def test_typesafe_requires_openai_writer_key_even_without_optional_fallback(
             openai_api_key=key, use_codex=not disable_optional_paths,
             typesafe_fallback=not disable_optional_paths,
             sentinelayer_token="token-cannot-fund-writer",
-        )
+         intent_model_pin="model-under-test-1.13.0")
 
 
 @pytest.mark.parametrize("field", ["model", "model_fallback", "codex_model"])
@@ -228,7 +228,7 @@ def test_typesafe_rejects_conflicting_generator_model_overrides(field: str, mode
         OmarGateConfig(
             llm_provider="typesafe", typesafe_api_key="typed-test-only",
             openai_api_key="writer-test-only", **{field: model},
-        )
+         intent_model_pin="model-under-test-1.13.0")
 
 
 @pytest.mark.parametrize("field", ["model", "model_fallback", "codex_model"])
@@ -240,7 +240,7 @@ def test_typesafe_rejects_conflicting_environment_models(
         OmarGateConfig(
             llm_provider="typesafe", typesafe_api_key="typed-test-only",
             openai_api_key="writer-test-only",
-        )
+         intent_model_pin="model-under-test-1.13.0")
 
 
 def test_typesafe_accepts_only_exact_funded_explicit_models() -> None:
@@ -248,7 +248,7 @@ def test_typesafe_accepts_only_exact_funded_explicit_models() -> None:
         llm_provider="typesafe", typesafe_api_key="typed-test-only",
         openai_api_key="writer-test-only", model="gpt-5.3-codex",
         model_fallback="gpt-5.3-codex", codex_model="gpt-5.3-codex",
-    )
+     intent_model_pin="model-under-test-1.13.0")
     assert config.model == config.model_fallback == config.codex_model == "gpt-5.3-codex"
     assert {"model", "model_fallback", "codex_model"} <= config.model_fields_set
 
@@ -258,7 +258,7 @@ def test_blank_automatic_generator_inputs_select_typesafe_defaults(blank: str) -
     config = OmarGateConfig(
         llm_provider="typesafe", typesafe_api_key="typed-test-only",
         openai_api_key="writer-test-only", model=blank, model_fallback=blank,
-    )
+     intent_model_pin="model-under-test-1.13.0")
     assert config.model == config.model_fallback == "gpt-5.3-codex"
     assert {"model", "model_fallback"}.isdisjoint(config.model_fields_set)
 
@@ -269,7 +269,7 @@ def test_typesafe_codex_model_must_match_exactly(model: str) -> None:
         OmarGateConfig(
             llm_provider="typesafe", typesafe_api_key="typed-test-only",
             openai_api_key="writer-test-only", codex_model=model,
-        )
+         intent_model_pin="model-under-test-1.13.0")
 
 
 @pytest.mark.parametrize("provider", ["openai", "anthropic", "google", "xai", "typesafe"])
@@ -282,6 +282,7 @@ def test_action_automatic_inputs_preserve_effective_provider_defaults(
     monkeypatch.setenv("INPUT_LLM_PROVIDER", provider)
     monkeypatch.setenv("INPUT_OPENAI_API_KEY", "writer-test-only")
     monkeypatch.setenv("INPUT_TYPESAFE_API_KEY", "typed-test-only")
+    monkeypatch.setenv("INPUT_INTENT_MODEL_PIN", "model-under-test-1.13.0")
     if provider in {"anthropic", "google", "xai"}:
         monkeypatch.setenv("INPUT_" + provider.upper() + "_API_KEY", "alternate-test-only")
 

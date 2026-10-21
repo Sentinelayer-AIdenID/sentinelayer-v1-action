@@ -18,7 +18,7 @@ from omargate.telemetry_runtime import _write_github_outputs
 @pytest.mark.parametrize("usage", [
     None,
     {},
-    {"provider": "typesafe", "model": None, "requested_model": "jev-1.13.0"},
+    {"provider": "typesafe", "model": None, "requested_model": "model-under-test-1.13.0"},
     {"provider": "typesafe", "model": "gpt-5.3-codex"},
 ])
 def test_llm_display_no_attempt_is_disabled_even_with_preflight_usage(usage) -> None:
@@ -29,8 +29,8 @@ def test_llm_display_no_attempt_is_disabled_even_with_preflight_usage(usage) -> 
 
 
 @pytest.mark.parametrize(("success", "usage", "expected"), [
-    (True, {"provider": "typesafe", "model": "jev-1.13.0"}, ("typesafe", "jev-1.13.0")),
-    (False, {"provider": "typesafe", "model": None, "requested_model": "jev-1.13.0"}, ("typesafe", "unknown")),
+    (True, {"provider": "typesafe", "model": "model-under-test-1.13.0"}, ("typesafe", "model-under-test-1.13.0")),
+    (False, {"provider": "typesafe", "model": None, "requested_model": "model-under-test-1.13.0"}, ("typesafe", "unknown")),
     (True, {"provider": "openai", "engine": "codex", "model": "reported-model"}, ("codex", "reported-model")),
     (False, {"provider": "openai", "model": "reported-model"}, ("openai", "reported-model")),
     (True, None, ("llm", "unknown")),
@@ -67,7 +67,7 @@ def test_llm_display_success_without_attempt_flag_does_not_invent_identity_or_fr
 
 def test_preflight_failure_evidence_stays_failed_while_comment_identity_is_disabled() -> None:
     usage = {
-        "provider": "typesafe", "model": None, "requested_model": "jev-1.13.0",
+        "provider": "typesafe", "model": None, "requested_model": "model-under-test-1.13.0",
         "tokens_in": None, "tokens_out": None, "cost_usd": None,
         "typesafe_assessment": {"failure_class": "typesafe_policy_unavailable"},
     }
@@ -80,7 +80,7 @@ def test_preflight_failure_evidence_stays_failed_while_comment_identity_is_disab
     config = OmarGateConfig(
         llm_provider="typesafe", typesafe_api_key="fixture-typed-key",
         openai_api_key="fixture-writer-key", sentinelayer_spec_id="fixture",
-    )
+     intent_model_pin="model-under-test-1.13.0")
 
     evidence = _build_llm_evidence(analysis, config)
 

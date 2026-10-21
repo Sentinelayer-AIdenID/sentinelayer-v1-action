@@ -29,6 +29,7 @@ class OmarGateConfig(BaseSettings):
         frozen=True,
         extra="ignore",
         protected_namespaces=(),  # Allow fields starting with 'model_'
+        hide_input_in_errors=True,
     )
 
     # Required
@@ -58,8 +59,8 @@ class OmarGateConfig(BaseSettings):
         default="",
         description="TypeSafe API key (required if llm_provider=typesafe)",
     )
-    typesafe_model: str = Field(
-        default="jev-1.13.0",
+    intent_model_pin: SecretStr = Field(
+        default="",
         description="Pinned TypeSafe model version for typed candidate assessments",
     )
     typesafe_timeout: conint(ge=1, le=120) = Field(default=30)
@@ -197,12 +198,18 @@ class OmarGateConfig(BaseSettings):
             return value.strip().lower()
         return value
 
-    @field_validator("typesafe_model")
+    @field_validator("intent_model_pin")
     @classmethod
-    def _validate_typesafe_model(cls, value: str) -> str:
-        if not re.fullmatch(r"jev-[0-9]+\.[0-9]+\.[0-9]+", value):
-            raise ValueError("typesafe_model must be a pinned version such as jev-1.13.0")
+    def _validate_intent_model_pin(cls, value: SecretStr) -> SecretStr:
+        pin = value.get_secret_value()
+        if pin and (len(pin) > 128 or re.fullmatch(r"[a-z][a-z0-9-]*-[0-9]+\.[0-9]+\.[0-9]+", pin) is None):
+            raise ValueError("intent_model_pin must be a pinned version")
         return value
+
+    @property
+    def intent_model_reference(self) -> str:
+        from .intent_identity import intent_model_reference
+        return intent_model_reference(self.intent_model_pin.get_secret_value())
 
     @field_validator("comment_tag", mode="before")
     @classmethod
@@ -255,6 +262,8 @@ class OmarGateConfig(BaseSettings):
                 raise ValueError(
                     "openai_api_key is required for the writer and fallback when llm_provider=typesafe"
                 )
+            if not self.intent_model_pin.get_secret_value():
+                raise ValueError("intent_model_pin is required; intent model is unknown")
             if self.codex_only:
                 raise ValueError("codex_only cannot be true when llm_provider=typesafe")
             for name in ("model", "model_fallback", "codex_model"):
