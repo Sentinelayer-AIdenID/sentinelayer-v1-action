@@ -144,7 +144,7 @@ Without a BYO OpenAI key, this mode forwards bounded LLM context through `POST /
 
 ### Option E: TypeSafe Candidate Assessment + OpenAI Writer
 
-This provider first asks the pinned Jev model to assess source-backed candidates. Packaged policy owns the severity/category decisions; `gpt-5.3-codex` writes explanations for fixed verdicts. Generator fallback is a separate review path.
+This provider first asks the pinned intent model model to assess source-backed candidates. Packaged policy owns the severity/category decisions; `gpt-5.3-codex` writes explanations for fixed verdicts. Generator fallback is a separate review path.
 
 **Experimental status:** This configuration does not establish empirical recall, calibrated security quality, independent security/release approval or adoption approval. Use an independently approved action revision before enabling this provider.
 
@@ -156,7 +156,7 @@ This provider first asks the pinned Jev model to assess source-backed candidates
     llm_provider: typesafe
     typesafe_api_key: ${{ secrets.TYPESAFE_API_KEY }}
     openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-    typesafe_model: jev-1.13.0
+    typesafe_model: ${{ secrets.TYPESAFE_MODEL }}
     typesafe_fallback: true
 ```
 
@@ -235,7 +235,7 @@ Omar Gate runs a two-phase analysis pipeline:
 - The AI receives this data + the PR diff + your README — it does NOT crawl the codebase blindly
 - The AI targets specific files identified as high-risk by the deterministic scan
 - This bounds the context sent through the legacy API review path
-- With `llm_provider: typesafe`, Jev assesses complete source-bound candidates and packaged policy decides verdicts; a separate fixed-verdict writer and, when required, generator fallback follow (see [TypeSafe review](docs/CONFIGURATION.md#typesafe-review))
+- With `llm_provider: typesafe`, intent model assesses complete source-bound candidates and packaged policy decides verdicts; a separate fixed-verdict writer and, when required, generator fallback follow (see [TypeSafe review](docs/CONFIGURATION.md#typesafe-review))
 
 ---
 
@@ -351,7 +351,7 @@ beneath a potentially live child.
 | `llm_provider` | `openai` | `openai`, `anthropic`, `google`, `xai`, `typesafe` |
 | `model` | `""` (automatic) | API model: `gpt-4.1-mini` for legacy providers; exactly `gpt-5.3-codex` for TypeSafe |
 | `model_fallback` | `""` (automatic) | API fallback: `gpt-4.1-mini` for legacy providers; exactly `gpt-5.3-codex` for TypeSafe |
-| `typesafe_model` | `jev-1.13.0` | Pinned `jev-MAJOR.MINOR.PATCH` version; mutable aliases rejected |
+| `typesafe_model` | `pinned provider version` | Pinned `provider-MAJOR.MINOR.PATCH` version; mutable aliases rejected |
 | `typesafe_timeout` | `30` | TypeSafe timeout in seconds, 1–120 |
 | `typesafe_max_candidates` | `50` | Maximum complete source candidates, 1–200; budget exhaustion is incomplete coverage |
 | `typesafe_fallback` | `true` | Allow separate `gpt-5.3-codex` generator review when the typed stage cannot complete |
