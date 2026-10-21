@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 import json
 import math
+import re
 import time
 from types import MappingProxyType
 from typing import Any
@@ -23,6 +24,20 @@ _ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 
 class TypeSafeError(RuntimeError):
     """A transport/contract error whose message contains no provider content."""
+
+    @property
+    def reason_code(self) -> str:
+        codes = {
+            "TypeSafe request timed out": "typesafe_timeout",
+            "TypeSafe request was invalid": "typesafe_request_invalid",
+            "TypeSafe request failed": "typesafe_transport_failed",
+            "TypeSafe response was invalid": "typesafe_response_invalid",
+            "TypeSafe response model did not match the requested model": "typesafe_model_mismatch",
+            "TypeSafe response answers were invalid": "typesafe_answers_invalid",
+            "TypeSafe response usage was invalid": "typesafe_usage_invalid",
+        }
+        status = re.fullmatch(r"TypeSafe request failed \(HTTP ([1-5][0-9]{2})\)", str(self))
+        return "typesafe_http_" + status[1] if status else codes.get(str(self), "typesafe_error")
 
 
 @dataclass(frozen=True)
@@ -192,11 +207,17 @@ class TypeSafeClient:
         self._timeout = float(timeout_seconds)
         self._client = client
         self._attempted = False
+        self._observed_usage: dict | None = None
 
     @property
     def attempted(self) -> bool:
         """Whether this client has attempted an HTTP post, not a billed evaluation."""
         return self._attempted
+
+    @property
+    def observed_usage(self) -> dict | None:
+        """Validated counts from an exact-model response, even if its answers fail."""
+        return dict(self._observed_usage) if self._observed_usage is not None else None
 
     async def rate(
         self,
@@ -226,6 +247,7 @@ class TypeSafeClient:
     async def _rate(
         self, state: dict, questions: dict[str, dict], model: str, started: float
     ) -> TypeSafeResult:
+        self._observed_usage = None
         if (
             not isinstance(state, dict)
             or not isinstance(questions, dict)
@@ -264,7 +286,6 @@ class TypeSafeClient:
             raise TypeSafeError("TypeSafe response was invalid") from None
         if not isinstance(raw, dict) or raw.get("model") != model:
             raise TypeSafeError("TypeSafe response model did not match the requested model")
-        parsed = _decode_answers(raw.get("answers"), questions)
         usage = raw.get("usage")
         if not isinstance(usage, dict):
             raise TypeSafeError("TypeSafe response usage was invalid")
@@ -274,6 +295,8 @@ class TypeSafeClient:
                 isinstance(count, bool) or not isinstance(count, int) or count < 0
             ):
                 raise TypeSafeError("TypeSafe response usage was invalid")
+        self._observed_usage = {name: usage.get(name) for name in ("input_tokens", "output_tokens")}
+        parsed = _decode_answers(raw.get("answers"), questions)
         if time.monotonic() - started >= self._timeout:
             raise TypeSafeError("TypeSafe request timed out")
         return TypeSafeResult(
