@@ -157,3 +157,12 @@ def test_console_io_failure_cannot_prevent_persisted_summary(tmp_path, monkeypat
     with pytest.raises(OSError, match="owned fixture broken pipe"):
         write_step_summary(gate, {}, [], "fixture", "1.0.0")
     assert "Incomplete review" in summary_file.read_text(encoding="utf-8")
+
+
+def test_summary_file_io_failure_cannot_prevent_console_report(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path))  # A directory is not a summary file.
+    gate = GateResult(status=GateStatus.BLOCKED, reason="Incomplete review", block_merge=True,
+                      counts=Counts(p0=1), dedupe_key="fixture")
+    with pytest.raises(OSError):
+        write_step_summary(gate, {}, [], "fixture", "1.0.0")
+    assert "Incomplete review" in capsys.readouterr().out

@@ -216,7 +216,11 @@ def write_step_summary(
     md.append("")
 
     report = "\n".join(md)
-    if summary_path:
-        with open(summary_path, "a", encoding="utf-8") as summary_file:
-            summary_file.write(report)
-    _write_console_report(report)
+    try:
+        if summary_path:
+            with open(summary_path, "a", encoding="utf-8") as summary_file:
+                summary_file.write(report)
+    finally:
+        # Either destination can fail independently. Still explain the gate
+        # in the log when a summary path is unwritable.
+        _write_console_report(report)
