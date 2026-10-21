@@ -267,11 +267,11 @@ class OmarGateConfig(BaseSettings):
         # CodexRunner fails gracefully and the orchestrator falls back to LLM API.
 
         provider = self.llm_provider
-        if provider == "anthropic" and not self.anthropic_api_key.get_secret_value():
+        if provider == "anthropic" and not self.anthropic_api_key.get_secret_value().strip():
             raise ValueError("anthropic_api_key is required when llm_provider=anthropic")
-        if provider == "google" and not self.google_api_key.get_secret_value():
+        if provider == "google" and not self.google_api_key.get_secret_value().strip():
             raise ValueError("google_api_key is required when llm_provider=google")
-        if provider == "xai" and not self.xai_api_key.get_secret_value():
+        if provider == "xai" and not self.xai_api_key.get_secret_value().strip():
             raise ValueError("xai_api_key is required when llm_provider=xai")
         if provider == "typesafe":
             if not self.typesafe_api_key.get_secret_value().strip():
