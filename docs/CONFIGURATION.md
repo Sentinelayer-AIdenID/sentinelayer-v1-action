@@ -4,7 +4,7 @@ SentinelLayer (Omar Gate) is configured entirely via GitHub Action inputs (see [
 
 **Notes:**
 - GitHub Actions provides inputs as strings; the action parses booleans (`true`/`false`) and numbers automatically.
-- No single API key is "required" — without any key, only deterministic scanning runs (no AI analysis). AI analysis can run via BYO provider keys or Sentinelayer-managed proxy mode.
+- With the default `openai` provider, an absent key permits deterministic-only operation. Explicit non-OpenAI providers require their provider key. TypeSafe requires both `typesafe_api_key` and `openai_api_key`; Sentinelayer-managed proxy mode supports `openai` only.
 
 ---
 
@@ -16,7 +16,8 @@ SentinelLayer (Omar Gate) is configured entirely via GitHub Action inputs (see [
 |---|---|---|---|
 | `github_token` | secret string | `""` | GitHub token for PR comments, Check Runs, and fetching diffs. Use `${{ secrets.GITHUB_TOKEN }}`. |
 | `publish_github` | bool | `true` | Publish PR comments and Check Runs. Set `false` only for internal probe runs that publish a separate canonical gate. |
-| `openai_api_key` | secret string | `""` | OpenAI API key (for Codex CLI + Responses API). |
+| `openai_api_key` | secret string | `""` | OpenAI API key (for Codex CLI + Responses API); also required for the writer and generator fallback with `llm_provider: typesafe`. |
+| `typesafe_api_key` | secret string | `""` | TypeSafe API key; required with `llm_provider: typesafe`. |
 | `anthropic_api_key` | secret string | `""` | Anthropic API key (for Claude models). |
 | `google_api_key` | secret string | `""` | Google AI API key (for Gemini models). |
 | `xai_api_key` | secret string | `""` | xAI API key (for Grok models). |
@@ -26,13 +27,18 @@ SentinelLayer (Omar Gate) is configured entirely via GitHub Action inputs (see [
 
 | Input | Type | Default | Purpose |
 |---|---|---|---|
-| `llm_provider` | string | `openai` | LLM provider: `openai`, `anthropic`, `google`, `xai`. |
-| `model` | string | `gpt-5.3-codex` | Primary LLM API model (used when Codex CLI is unavailable or disabled). |
-| `model_fallback` | string | `gpt-4.1-mini` | Fallback LLM API model (if primary fails or quota exceeded). |
+| `llm_provider` | string | `openai` | LLM provider: `openai`, `anthropic`, `google`, `xai`, `typesafe`. |
+| `model` | string | `""` (automatic) | Primary API model: resolves to `gpt-4.1-mini` for legacy providers, exactly `gpt-5.3-codex` for TypeSafe. |
+| `model_fallback` | string | `""` (automatic) | API fallback model: resolves to `gpt-4.1-mini` for legacy providers, exactly `gpt-5.3-codex` for TypeSafe. |
+| `intent_model_pin` | string | `""` | Required private `provider-MAJOR.MINOR.PATCH` version; mutable aliases rejected. |
+| `intent_policy` | string | `""` | Required private JSON review profile; missing or invalid profiles refuse typed review. |
+| `typesafe_timeout` | int | `30` | TypeSafe request timeout in seconds, 1–120 inclusive. |
+| `typesafe_max_candidates` | int | `50` | Complete source candidate budget, 1–200 inclusive. Exceeding it requires fallback; candidates are not silently truncated. |
+| `typesafe_fallback` | bool | `true` | Allow separate `gpt-5.3-codex` generator review when the typed stage cannot complete. |
 | `sentinelayer_managed_llm` | bool | `false` | Route OpenAI API path through Sentinelayer-managed proxy. If false, auto-enables when `openai_api_key` is empty and `sentinelayer_token` is set. |
 | `use_codex` | bool | `true` | Enable Codex CLI for deep agentic audit. Falls back to API if Codex fails. |
-| `codex_only` | bool | `false` | Recommended for OpenAI users. Use Codex CLI as the only LLM path. Disables API fallback entirely. |
-| `codex_model` | string | `gpt-5.3-codex` | Model passed to Codex CLI `--model` flag. |
+| `codex_only` | bool | `false` | Use Codex CLI as the only legacy LLM path. Disables API fallback; rejected for TypeSafe. |
+| `codex_model` | string | `gpt-5.3-codex` | Model passed to Codex CLI `--model` flag; TypeSafe requires exactly this value. |
 | `codex_timeout` | int | `300` | Timeout in seconds for Codex CLI execution. |
 | `max_input_tokens` | int | `100000` | Maximum LLM context budget in tokens. Lowering reduces cost; files get truncated or skipped. |
 | `llm_failure_policy` | string | `block` | What happens when LLM fails: `block` (fail-closed), `deterministic_only` (fall back to regex), `allow_with_warning`. |
@@ -45,13 +51,13 @@ SentinelLayer (Omar Gate) is configured entirely via GitHub Action inputs (see [
 | `pr_number` | int | `""` | Target PR for `workflow_dispatch` scans. Ignored when a pull request event supplies the PR number. |
 | `policy_pack` | string | `omar` | Policy pack identifier (used for fingerprinting and deduplication). |
 | `policy_pack_version` | string | `v1` | Policy pack version (included in finding fingerprints). |
-| `run_harness` | bool | `true` | Run the portable security test harness (dep audit, secret-in-git checks). |
+| `run_harness` | bool | `true` | Run the fail-closed dependency audits and portable security harness. Set `false` only to opt out explicitly. |
 
 ### Gate Control
 
 | Input | Type | Default | Purpose |
 |---|---|---|---|
-| `severity_gate` | string | `P1` | Block threshold: `P0` (only criticals), `P1` (criticals + high), `P2` (medium+), `none` (report only, never blocks). |
+| `severity_gate` | string | `P1` | Finding threshold: `P0`, `P1`, `P2`, or `none`. Required dependency-audit integrity can still block at every setting. |
 | `fork_policy` | string | `block` | Fork PR handling: `block` (fail closed), `limited` (deterministic only, no LLM), `allow` (full scan). |
 | `run_deterministic_fix` | bool | `false` | Reserved for future autofix (currently no-op). |
 | `run_llm_fix` | bool | `false` | Reserved for future LLM fix patches (currently no-op). |
@@ -76,7 +82,7 @@ SentinelLayer (Omar Gate) is configured entirely via GitHub Action inputs (see [
 | `telemetry` | bool | `true` | Enable anonymous telemetry (set `false` to opt out). |
 | `share_metadata` | bool | `false` | Explicit opt-in to Tier 2 metadata (overrides `telemetry_tier`). |
 | `share_artifacts` | bool | `false` | Explicit opt-in to Tier 3 artifact upload (overrides `telemetry_tier`). |
-| `training_opt_in` | bool | `false` | Optional training consent. Findings are de-identified; your code is never stored. |
+| `training_opt_in` | bool | `false` | Optional training consent flag; it does not define selected AI-provider storage or retention. See data boundaries below. |
 
 ---
 
@@ -111,6 +117,7 @@ Omar Gate supports multiple LLM providers. Pass the key for your chosen provider
 | Anthropic | `anthropic_api_key` | `ANTHROPIC_API_KEY` | `claude-opus-4-6`, `claude-sonnet-4-5` |
 | Google | `google_api_key` | `GOOGLE_API_KEY` | `gemini-2.5-pro`, `gemini-2.5-flash` |
 | xAI | `xai_api_key` | `XAI_API_KEY` | `grok-3`, `grok-3-mini` |
+| TypeSafe + OpenAI | `typesafe_api_key` + `openai_api_key` | `TYPESAFE_API_KEY` + `OPENAI_API_KEY` | `pinned provider version` candidate assessment + `gpt-5.3-codex` writer/generator |
 
 **OpenAI example:**
 ```yaml
@@ -177,7 +184,7 @@ For Tier 2+, prefer OIDC (see [Telemetry](#telemetry-detailed)) — it requires 
 
 ### Codex CLI vs LLM API
 
-Omar Gate has two LLM execution paths:
+Legacy providers have two LLM execution paths. TypeSafe uses the separate [typed review flow](#typesafe-review) before any generator fallback:
 
 1. **Codex CLI** (`use_codex: true`, default) — Runs `codex exec` with a structured prompt. The CLI has its own sandbox, conversation memory, and can traverse the codebase. Best for deep agentic audit. Requires `openai_api_key`.
 
@@ -195,14 +202,65 @@ When `codex_only: true`, the API fallback is disabled. If Codex fails, the `llm_
 
 These control the **LLM API path** (not Codex CLI, which uses `codex_model`).
 
-- `model`: Primary model. Default `gpt-5.3-codex`. Used when Codex is disabled or unavailable.
-- `model_fallback`: Secondary model. Default `gpt-4.1-mini`. Used if the primary model fails, hits rate limits, or exceeds quota.
+- `model`: Primary API model. An empty action input selects `gpt-4.1-mini` for legacy providers. Used when Codex is disabled or unavailable.
+- `model_fallback`: Secondary API model. An empty action input also selects `gpt-4.1-mini` for legacy providers. Used if the primary model fails, hits rate limits, or exceeds quota.
+- For TypeSafe, empty/omitted `model` and `model_fallback` resolve to exactly `gpt-5.3-codex`; `codex_model` must also be exactly `gpt-5.3-codex`. Other explicit values fail configuration validation. The writer independently uses this fixed model, with its response accepting only the exact model name or a valid dated `gpt-5.3-codex-YYYY-MM-DD` version.
 
 ```yaml
 with:
   model: gpt-5.3-codex
   model_fallback: gpt-4.1-mini
 ```
+
+### TypeSafe review
+
+Set `llm_provider: typesafe` and provide both `typesafe_api_key` and `openai_api_key`. `intent_model_pin` requires a private pinned provider version and accepts only pinned `provider-MAJOR.MINOR.PATCH` names. `codex_only: true` and `sentinelayer_managed_llm: true` are invalid with this provider.
+
+Supply `intent_policy` from a private Actions secret. It must be a complete JSON
+profile with schema `omargate.private-review-policy.v1` and the `routing`, `typed`
+and `generator_instructions` sections. Routing carries domain descriptors,
+questions, critical-path tokens/groups and thresholds; typed assessment carries
+criteria, support floors, templates, instructions and policy/calibration identity.
+Public source validates shapes and bounded values without supplying deployment
+rubric data. Profiles are bounded to 64 KiB, reject duplicate fields and invalid
+probabilities, and are never printed in validation errors. Public evidence uses
+neutral hash references. Model pins and profiles can rotate without an Action
+source release. Obtain a reviewed private profile from the operator.
+
+`review_routing: intent-cascade-v1` uses the [cascade contract](intent-cascade.md).
+Its independent policy stage is mandatory; incomplete coverage cannot be replaced
+by a clean strongest-model answer. It also preserves substantive uncorroborated
+P0/P1 findings. The three-stage typed/writer descriptions below describe the
+legacy compatibility profile, not those cascade exceptions.
+
+**Experimental status:** This configuration does not establish empirical recall, calibrated security quality, independent security/release approval or adoption approval. Use an independently approved action revision before enabling this provider.
+
+The stages have separate responsibilities:
+
+1. **Source-bound candidate assessment:** Complete supported changed files are divided into consecutive spans of at most 40 lines. Candidate identity binds the file, start/end lines, exact source hash and evidence hash. Source bytes are verified before and after assessment; supplied diff head/context lines are checked against source before assessment, while removed lines remain unverified patch context. The intent model returns typed risk probabilities and severity/category choices; source text is untrusted data. Private operator policy owns completeness checks, thresholds, labels, finding text and remediation templates.
+2. **Fixed-verdict explanation:** When findings exist, `gpt-5.3-codex` may explain each exact finding ID once. The response may replace only message/recommendation prose; it cannot change severity, category, source span, evidence, typed reason or finding count. Writer failure preserves the policy-owned typed verdict and template text with a warning and bounded failure metadata; it does not erase the findings or automatically require generator review.
+3. **Generator fallback:** With `typesafe_fallback: true`, an unsuccessful typed stage runs the separate OpenAI `gpt-5.3-codex` review: Codex CLI first when `use_codex: true`, then the API if necessary; `use_codex: false` selects the API directly. `use_codex` does not disable the fixed-verdict writer.
+
+The typed inventory currently supports `pr-diff` with complete, nonempty UTF-8 changed files from the ingest inventory. Each file is limited to 1,000,000 bytes; binary/deleted/renamed/copied or otherwise unsupported source/diff forms require fallback. The supplied diff is bounded to 100,000 UTF-8 bytes; typed state to 24,000 bytes and the state/questions request to 48,000 bytes. Source, state and candidate budgets are completeness checks, not permission to silently truncate coverage. The default candidate cap is 50 (configurable 1–200) and the default request timeout is 30 seconds (configurable 1–120).
+
+**Completeness and failure behavior:**
+
+- Uncertain or malformed answers, missing coverage, invalid policy bindings, unsupported scope and source-integrity failures do not establish successful typed review. Source-integrity failure rejects unverified typed output. Generator fallback or the configured `llm_failure_policy` follows; `block` is the default failure policy.
+- A valid partial policy decision carries confirmed findings plus `unresolved_candidates`. Confirmed findings are passed into fallback composition rather than discarded merely because other candidates remain unresolved. Each lane is guardrailed separately before composition; a stronger guarded fallback can win an exact collision while retaining bounded typed alternate provenance (see below).
+- Any candidate span resolved clean requires generator confirmation, even when other spans emitted findings. For a complete policy decision, a nonempty `generator_required_clean_candidates` list returns `typesafe_clean_requires_generator`. That list contains verified inventory candidate IDs that emitted neither a finding nor an unresolved decision. Partial decisions retain their incomplete reason. Transport success, zero candidates, a finding elsewhere or the policy/calibration identifier alone does not establish confirmed source coverage.
+- Typed P0/P1 in `availability`, `infrastructure`, `race-condition` or `other-security` requires generator review and remains P2 under the current typed guardrails. A complete policy decision returns `typesafe_category_requires_generator` when no clean-candidate condition took precedence. If both trigger sets exist, `typesafe_clean_requires_generator` wins and both `generator_required_clean_candidates` and `generator_required_categories` remain in the assessment.
+- `typesafe_fallback: false` disables generator fallback. It does not upgrade an incomplete, typed-clean or unsupported blocking-category assessment to successful review. Keep `llm_failure_policy: block` for fail-closed operation.
+
+`TYPESAFE_REVIEW.json` retains candidate/source hashes, question bindings, typed answers, policy/calibration identifiers, unresolved reasons and writer/failure metadata when a run directory is provided. `policy_decision_complete` and `typed_assessment_complete` describe policy coverage; `complete` and `review_complete` describe the typed stage's accepted result. A policy-complete all-clean or mixed clean/finding decision can therefore still have `review_complete: false` pending generator review. `generator_required_clean_candidates` and `generator_required_categories` identify the respective trigger sets; an incomplete policy decision separately retains `unresolved_candidates` and its decision reason. The existing `llm_*` outputs describe the resulting review path; inspect the typed assessment and fallback chain to distinguish stages.
+
+**Composition, final merge and provenance:**
+
+- Typed and generator findings are independently guardrailed before composition. A merged record is not sent back through the typed trust path. Generator JSON cannot supply `typed_candidate`, `source` or `rule_id`; both API and Codex parsers reject these unknown fields. Typed binding validation checks structure, while its origin depends on this parser boundary and the verified typed inventory.
+- Composition resolves exact source-bound overlaps by normalized path, complete start/end span and category. Only bound typed candidates receive typed aliases; generator labels are not granted that vocabulary. Final merge also includes `line_end` in its collision key, so otherwise matching findings with different end lines remain separate. Final categories use the typed alias map for bound typed findings, the exact producer map for reviewed non-LLM rows, and otherwise the normalized raw category.
+- A collision selects the strongest already-guardrailed severity (`P0`, `P1`, `P2`, then `P3`), rather than the first input. Trust is a severity tie-break only: reviewed producer, source-bound typed candidate, other deterministic/harness/system, then generator. Remaining ties use finite confidence and stable content identity; final finding order is deterministic. This does not restore an uncorroborated P0/P1 that guardrails already downgraded to P2.
+- The winner remains authoritative at the top level. A non-typed winner does not inherit `typed_candidate`, `typed_verdict`, `typed_reason` or `typed_recommendation`. Alternate `collision_provenance` stores selected identity/verdict metadata, prioritizing typed records, with at most eight alternate records. `collision_provenance_truncated: true` signals omitted alternates or an inherited truncation; it is not a complete archive of all messages, snippets or evidence. Consult `TYPESAFE_REVIEW.json` and original independent evidence for the typed assessment.
+
+These documented source contracts do not demonstrate empirical model recall, calibrated security quality, or independent approval to adopt TypeSafe as the gate. Source review, runtime fixes, independent security review and adoption evidence remain separate.
 
 ### `.sentinelayerignore`
 
@@ -222,6 +280,67 @@ docs/generated/**
 
 ## Gate Control (Detailed)
 
+### `run_harness` and dependency-audit evidence
+
+When `run_harness` is `true`, Omar Gate requires a complete, recognized audit result
+for each applicable ecosystem. Bounded no-follow discovery rejects nested manifests,
+symlink-ambiguous trees, and multi-project layouts as indeterminate rather than
+claiming that an ecosystem is absent.
+
+npm requires `package.json` plus `package-lock.json` or `npm-shrinkwrap.json` at
+lockfile version 2 or 3. Workspaces, peer/peer-optional dependencies, linked packages,
+mixed registries, non-HTTPS sources, and credentialed or missing resolved URLs are
+unsupported. All packages
+must resolve through the exact canonical `https://registry.npmjs.org` origin. Custom
+or private registries, localhost, and IP-literal origins stop before spawn. Omar Gate
+passes only the canonical origin to npm and never forwards registry credentials. The
+output dependency count must match the validated lock and any reported npm
+vulnerability produces vulnerable evidence. Enabling the harness authorizes npm
+audit to send the validated copied lock graph, including package names and versions,
+to that public npm registry endpoint.
+
+Python's supported input is a nonempty root `requirements.txt` containing only exact
+`name==version` pins, with no other Python dependency manifest. The output must match
+the normalized names and exact versions. This is evidence for declared direct pins
+only; `--no-deps` does not prove their transitive closure. **Metadata egress:** with
+the harness enabled, pip-audit may send those pinned names and versions to its public
+vulnerability service. Repository or inherited pip routing—including alternate
+indexes or `find-links` sources—makes the input unsupported and stops before spawning; use
+`run_harness: false` to opt out instead of silently redirecting private metadata.
+`pyproject.toml`, `Pipfile.lock`, Poetry, uv, PDM, `pylock.*`, alternate
+`requirements-*.txt`, and `requirements/*.txt` inputs are conservatively unsupported
+and cannot be ignored alongside `requirements.txt`; `requirements*.in` and
+`requirements/*.in` source manifests are handled the same way.
+
+Rust requires `Cargo.toml`, a valid `Cargo.lock`, and a cargo-audit result whose
+dependency count matches that copied lock. A separately provisioned, version-pinned
+`cargo-audit` executable is required. The composite action does not install it, so an
+applicable Rust audit fails closed until the workflow provisions the reviewed version.
+
+Dependency-audit evidence schema `1.1` carries an exact coverage-scope map:
+`package_lock_registry_graph` for npm, `declared_direct_pins` for pip, and
+`cargo_lock_packages` for Cargo. The gate rejects missing, renamed, or additional
+scope entries before evaluating the finding-severity threshold.
+
+Audit subprocesses use isolated home, config, cache, and temporary directories
+outside the scanned repository. They do not inherit provider credentials,
+GitHub/OIDC tokens, `INPUT_*` values, or repository-controlled tool configuration.
+Only validated credential-free proxy origins, bounded `NO_PROXY` entries, and
+copies of CA material located outside the workspace may be forwarded. npm executes
+the canonical Node binary directly against private copies of the validated manifest
+and lockfile, so it does not load a repository `.npmrc` or an npm command wrapper.
+All supported audit inputs are copied into private scratch space. These boundaries
+isolate local configuration and credentials; they do not make live advisory audits
+offline. Teardown is bounded and the complete subprocess tree must be proven empty.
+If that proof fails, fixed containment-error evidence is emitted and both private
+tool-state and copied-input scratch are retained rather than deleted beneath a child
+whose death is unproven.
+
+Timeouts, missing tools or lockfiles, unsafe inputs, malformed or unrecognized JSON,
+and contradictory exit/result states are indeterminate and block before the normal
+severity threshold is evaluated. This also applies to `severity_gate: none`.
+`run_harness: false` is the only explicit opt-out from the audit-evidence requirement.
+
 ### `severity_gate`
 
 Defines the minimum severity that blocks the merge:
@@ -231,7 +350,7 @@ Defines the minimum severity that blocks the merge:
 | `P0` | Only P0 (critical) | Permissive — only stops catastrophic issues |
 | `P1` | P0 + P1 (critical + high) | **Recommended default** |
 | `P2` | P0 + P1 + P2 (medium+) | Strict — catches more but may increase noise |
-| `none` | Never blocks | Report-only / advisory mode |
+| `none` | No finding severity blocks | Report-only findings; required audit/LLM integrity checks still apply |
 
 ### `fork_policy`
 
@@ -256,6 +375,10 @@ Rate limits are enforced using GitHub Check Run history for the PR head SHA:
 - The limits apply to the Check Run named `Omar Gate` on that commit.
 - `max_daily_scans: 0` disables the daily cap.
 - `min_scan_interval_minutes: 0` disables the cooldown.
+
+Every run requires fresh source-bound review evidence. The run key binds effective review settings, private configuration hashes, dependency-audit contract and UTC day. Remote check names, summaries and external IDs are not authenticated reusable receipts; no prior check can authorize a skipped run.
+
+Rate limits use check history only to enforce cooldown and the rolling daily cap. A limit that prevents a fresh review returns a blocking result with artifacts and telemetry, including when `run_harness: false`. Wait for an allowed scan or adjust the rate-limit policy; skipped reviews cannot inherit a prior pass.
 
 ### `require_cost_confirmation`, `approval_mode`, `approval_label`
 
@@ -305,7 +428,7 @@ permissions:
 
 ## False Positive Defense
 
-Omar Gate uses three independent layers to minimize false positives. **LLM analysis can never unilaterally block a merge.**
+Omar Gate checks deterministic evidence before LLM P0/P1 findings can retain blocking severity. Uncorroborated findings become P2, which is advisory at the default P1 gate; a P2 gate also blocks P2 findings. Fail-closed system findings are separate from model claims.
 
 ### Layer 1: AST & Syntax-Aware Deterministic Analysis
 
@@ -330,23 +453,34 @@ Implemented in [`orchestrator.py:_apply_llm_guardrails()`](../src/omargate/analy
 
 - **File validation**: LLM findings pointing to files not in the scanned diff/ingest are dropped.
 - **Line clamping**: Line numbers are clamped to actual file bounds; hallucinated locations are discarded.
-- **Corroboration requirement**: LLM/Codex P0/P1 findings require a **deterministic or harness finding** within 5 lines of the same file and same category. Without corroboration, the finding is **downgraded to P2** (advisory).
-- This means LLM analysis enriches results (adds context, explanations, risk assessment) but cannot independently block a merge.
+- **Typed-only producer binding**: For a validated TypeSafe candidate, corroborating non-LLM output must match an exact `(source, rule_id, emitted category)` entry in [`_REVIEWED_CORROBORATION_PRODUCERS`](../src/omargate/analyze/orchestrator.py). Missing/unknown rules, relabelled categories, generic infrastructure/quality/web rules and harness-health output do not supply typed corroboration. Producer labels are not authenticated by the typed alias map. For example, `(deterministic, SEC-016, auth)` is accepted for typed auth; the same category with a missing/unknown rule, or `SEC-016` relabelled `csrf`, is rejected.
+- **Legacy LLM/Codex corroboration**: Any finding from the deterministic/harness stages can corroborate when the normalized file and exact emitted category match and its span intersects `[max(1, line_start - 5), line_start + 5]`. The typed producer allowlist does not restrict this existing scanner-rule eligibility. A model-controlled `line_end` does not expand the first-line window; this is not a return to an end-line-expanded window.
+- **Validated TypeSafe corroboration**: A source-bound typed candidate may use its complete reviewed span expanded by 5 lines on each side. Its narrow category alias must match the canonical category of the exact reviewed producer tuple. For example, typed `ci-cd` can match `(harness, HARNESS-CICD-PERMS, ci_cd)`; legacy generator `ci-cd` does not gain that alias. This exception does not widen the legacy rule.
+- **Unsupported typed blocking categories**: `availability`, `infrastructure`, `race-condition` and `other-security` require generator review and never obtain typed corroboration from the current producer map.
+- **Missing corroboration**: LLM/Codex P0/P1 becomes P2 with confidence capped at 0.75 and explicit missing-corroboration metadata. This does not erase the policy-owned typed verdict from its provenance fields.
+
+| Canonical TypeSafe candidate category | Typed labels (trimmed, lowercase; not producer authentication) |
+|---|---|
+| `auth` | `auth`, `auth_bypass`, `csrf` |
+| `injection` | `injection`, `sql_injection`, `sql-injection`, `xss`, `rce`, `path_traversal`, `path-traversal`, `deserialization`, `log_injection`, `log-injection`, `xxe`, `ssti`, `prompt_injection`, `prompt-injection` |
+| `ci-cd` | `ci-cd`, `ci_cd` |
+| Other declared categories | Exact labels only: `crypto`, `secrets`, `privacy`, `ssrf`, `misconfig`, `exposure`, `supply-chain`, `availability`, `infrastructure`, `race-condition`, `other-security` (the last four still require generator review) |
 
 ### What this means in practice
 
 | Finding Source | P0/P1 Blocks Merge? | Notes |
 |---|---|---|
 | Deterministic scanner | Yes | Regex, AST, config rules — high precision |
-| Harness (dep audit, secrets-in-git) | Yes | External tool output (pip-audit, gitleaks) |
-| LLM/Codex with corroboration | Yes | Deterministic finding nearby confirms it |
-| LLM/Codex without corroboration | **No** (downgraded to P2) | Preserved as review hint |
+| Harness (dep audit, secrets-in-git) | Yes | Validated npm, pip-audit, cargo-audit, and gitleaks output |
+| Legacy Codex/OpenAI with corroboration | Yes | Any deterministic/harness scanner rule with exact emitted category nearby confirms it |
+| Source-bound TypeSafe with corroboration | Yes | Reviewed producer/rule/category tuple confirms the canonical typed category |
+| LLM without compatible corroboration | **No** at the default P1 gate (downgraded to P2) | A P2 gate also blocks P2; exact collisions retain the strongest guarded severity |
 
 ### Handling persistent false positives
 
 1. Check if the deterministic scanner rule needs refinement (open an issue or PR).
 2. For entropy findings, verify whether the identifier filter or context filter should exclude the candidate.
-3. For LLM findings, they should already be P2 by guardrails. If still blocking, check corroboration logic.
+3. For uncorroborated LLM P0/P1 findings, check the downgrade to P2 and the selected gate threshold. A P2 gate intentionally includes P2 findings.
 4. Add patterns to `.sentinelayerignore` to exclude known-safe directories.
 5. Add entries to `.gitleaks.toml` allowlist for known test fixtures.
 
@@ -406,22 +540,19 @@ Override with environment variable: `SENTINELAYER_RUNS_DIR`
 
 ---
 
-## Docker Action vs Host Runner
+## Runtime and Import Boundaries
 
-Omar Gate can run in two modes:
+The `action.yml` entry in this revision is a composite action. Dependency installation runs from `${{ github.action_path }}` and invokes both pip upgrade and the hash-locked install with `python -P -m pip`. Analysis runs in `${{ github.workspace }}`, while `PYTHONPATH` is set to the action-owned `src`, `PYTHONSAFEPATH=1` is exported and `python -P -m omargate.main` starts the action package. Import isolation and the scanned repository's working directory are separate concerns.
 
-### Docker Action (default for marketplace consumers)
+The repository also supplies a Docker image; it is not the current `runs.using` mode. Its normal `entrypoint.sh` sets `/app/src` as `PYTHONPATH`, enables safe-path behavior and invokes `python -P -m omargate.main`. A command explicitly supplied to that entrypoint takes its separate command-execution branch. Standalone workflow or self-hosted invocations must establish their own action-owned import path; a generic `python -m` example does not prove the composite action's boundary applies there.
 
-- Uses `action.yml` with `runs.using: docker`.
-- Runs as **root** inside an ephemeral container. GitHub Actions mounts `/github/workspace` and `/github/file_commands` as host UID; non-root breaks post-step writes (`GITHUB_OUTPUT`, `GITHUB_STEP_SUMMARY`).
-- Container is destroyed after the job step.
-- Codex CLI is pre-installed in the image at a pinned version.
+Harness audit commands use an explicit environment allowlist and private home/config/cache/temp state from [`runner.py`](../src/omargate/harness/runner.py). Provider, GitHub/OIDC and `INPUT_*` credentials are excluded. Only validated credential-free proxy origins, bounded `NO_PROXY` entries and copies of CA material outside the scanned workspace may be forwarded. npm uses the canonical Node binary with copied validated inputs instead of repository `.npmrc` or a command wrapper; PATH/CA controls reject lexical and resolved workspace containment. These are configuration/process boundaries, not filesystem or network sandboxes. Live public advisory metadata egress and direct-only Python coverage are described under [`run_harness`](#run_harness-and-dependency-audit-evidence).
 
-### Host Runner (for CI pipelines like `security-review.yml`)
+Codex has a separate allowlist and receives the configured OpenAI/Codex credential and model for its review task. The dependency audit's schema 1.1 scope/outcome evidence and exact serialized audit finding identities are validated before required LLM evidence and the severity threshold. A valid clean outcome applies only to its declared scope; an environment filter or a missing finding alone is not completion evidence.
 
-- Runs `python -m omargate.main` directly on the runner.
-- LLM CLIs are installed via npm in a prior step (with caching).
-- Uses the runner's own user context and Python environment.
-- More control over CLI versions and caching strategy.
+## Data and Rendering Boundaries
 
-Choose Docker for simplicity (one `uses:` line). Choose host runner when you need parallel jobs, custom CLI versions, or shared Python environments.
+- **Selected-provider context:** AI review sends bounded context to the selected provider. TypeSafe candidate evidence and verified diff context pass through recognized secret-source exclusion and diagnostic sanitization. Current source rules include prefixed password/access-key assignments, credential-bearing connection URLs, quoted Authorization/Bearer fields, common token/private-key patterns and designated sensitive file paths. Exclusion substitutes complete recognized source lines; scanner observations are context, not a claim that every unknown secret is detected or excluded.
+- **Fingerprints:** Typed provider state still carries original evidence/source/diff SHA-256 fingerprints alongside display-safe context. A digest is a binding fingerprint, not encryption or proof that a low-entropy omitted value cannot be guessed. Local evidence integrity and provider-payload privacy are separate properties.
+- **Artifacts and retention:** Typed assessment artifacts retain source hashes, candidate/question bindings, answers and completion/failure metadata. Treat artifacts and logs as potentially sensitive. Telemetry flags and the action's local execution do not establish an external provider's storage/retention policy.
+- **Step Summary:** The summary renderer encodes untrusted displayed scalars (including finding path/category/message, reason, synopsis and snapshot strings) while preserving its fixed status/table template. This rendering boundary is separate from JSON/evidence data and from other renderers, including PR-comment location/link formatting; do not infer one sink's safety from another sink's source change.

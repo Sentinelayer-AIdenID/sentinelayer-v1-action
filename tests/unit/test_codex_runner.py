@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pytest
 
+from omargate.analyze.codex import codex_runner
 from omargate.analyze.codex.codex_runner import (
     CodexRunner,
+    _codex_child_env,
     extract_codex_cli_failure,
     parse_codex_findings,
 )
@@ -78,6 +80,107 @@ def test_extract_codex_cli_failure_prefers_terminal_event() -> None:
     )
 
     assert extract_codex_cli_failure(stdout) == "unexpected status 401 Unauthorized"
+
+
+def test_codex_child_env_is_an_exact_process_allowlist() -> None:
+    inherited = {
+        "PATH": "/tools/bin",
+        "HOME": "/home/runner",
+        "TMPDIR": "/tmp",
+        "LANG": "en_US.UTF-8",
+        "SYSTEMROOT": r"C:\Windows",
+        "COMSPEC": r"C:\Windows\System32\cmd.exe",
+        "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+        "CODEX_HOME": "/home/runner/.codex",
+        "PYTHONPATH": "/attacker/imports",
+        "NODE_OPTIONS": "--require=/attacker/preload.js",
+        "INPUT_OPENAI_API_KEY": "input-openai-secret",
+        "OPENAI_API_KEY": "ambient-openai-secret",
+        "CODEX_API_KEY": "ambient-codex-secret",
+        "CODEX_MODEL": "ambient-model",
+        "TYPESAFE_API_KEY": "typesafe-secret",
+        "INPUT_TYPESAFE_API_KEY": "input-typesafe-secret",
+        "ANTHROPIC_API_KEY": "anthropic-secret",
+        "GEMINI_API_KEY": "gemini-secret",
+        "XAI_API_KEY": "xai-secret",
+        "GITHUB_TOKEN": "github-secret",
+        "INPUT_SENTINELAYER_TOKEN": "sentinelayer-secret",
+        "SENTINELAYER_TOKEN": "sentinelayer-secret-2",
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "oidc-secret",
+        "AWS_SECRET_ACCESS_KEY": "aws-secret",
+        "DATABASE_PASSWORD": "database-secret",
+        "GENERIC_TOKEN": "generic-secret",
+    }
+
+    child = _codex_child_env(
+        api_key="intended-codex-key",
+        model="gpt-5.3-codex",
+        inherited=inherited,
+    )
+
+    assert child == {
+        "PATH": "/tools/bin",
+        "HOME": "/home/runner",
+        "TMPDIR": "/tmp",
+        "LANG": "en_US.UTF-8",
+        "SYSTEMROOT": r"C:\Windows",
+        "COMSPEC": r"C:\Windows\System32\cmd.exe",
+        "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+        "CODEX_HOME": "/home/runner/.codex",
+        "OPENAI_API_KEY": "intended-codex-key",
+        "CODEX_API_KEY": "intended-codex-key",
+        "CODEX_MODEL": "gpt-5.3-codex",
+    }
+
+
+@pytest.mark.anyio
+async def test_codex_subprocess_receives_only_the_bounded_child_env(
+    tmp_path: Path, monkeypatch
+) -> None:
+    inherited = {
+        "PATH": "/tools/bin",
+        "HOME": "/home/runner",
+        "TEMP": str(tmp_path),
+        "CODEX_HOME": "/home/runner/.codex",
+        "TYPESAFE_API_KEY": "typesafe-secret",
+        "ANTHROPIC_API_KEY": "anthropic-secret",
+        "GITHUB_TOKEN": "github-secret",
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "oidc-secret",
+        "CUSTOM_PASSWORD": "password-secret",
+    }
+    captured: dict[str, str] = {}
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self, input: bytes | None = None):  # noqa: A002
+            assert input == b"audit prompt"
+            return b"", b""
+
+    async def fake_create(*args, **kwargs):  # noqa: ANN001
+        captured.update(kwargs["env"])
+        output_path = Path(args[args.index("--output-last-message") + 1])
+        output_path.write_text('{"no_findings": true}', encoding="utf-8")
+        return FakeProc()
+
+    monkeypatch.setattr(codex_runner.os, "environ", inherited)
+    monkeypatch.setattr("shutil.which", lambda _: "codex")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+
+    result = await CodexRunner(
+        api_key="intended-codex-key", model="gpt-5.3-codex"
+    ).run_audit(prompt="audit prompt", working_dir=str(tmp_path))
+
+    assert result.success is True
+    assert captured == {
+        "PATH": "/tools/bin",
+        "HOME": "/home/runner",
+        "TEMP": str(tmp_path),
+        "CODEX_HOME": "/home/runner/.codex",
+        "OPENAI_API_KEY": "intended-codex-key",
+        "CODEX_API_KEY": "intended-codex-key",
+        "CODEX_MODEL": "gpt-5.3-codex",
+    }
 
 
 @pytest.mark.anyio

@@ -98,6 +98,7 @@ def _counts_from_summary(summary: str) -> Counts:
         p1=_extract("P1"),
         p2=_extract("P2"),
         p3=_extract("P3"),
+        p4=_extract("P4"),
     )
 
 
@@ -116,6 +117,7 @@ def _counts_from_check_run_output(summary: str, text: str) -> Counts:
                 p1=int(payload.get("P1", 0) or 0),
                 p2=int(payload.get("P2", 0) or 0),
                 p3=int(payload.get("P3", 0) or 0),
+                p4=int(payload.get("P4", 0) or 0),
             )
     except Exception:
         pass
@@ -218,6 +220,7 @@ def _write_preflight_artifacts(
         "P1": int(gate_result.counts.p1),
         "P2": int(gate_result.counts.p2),
         "P3": int(gate_result.counts.p3),
+        "P4": int(gate_result.counts.p4),
     }
     pack_summary_path = write_pack_summary(
         run_dir=run_dir,

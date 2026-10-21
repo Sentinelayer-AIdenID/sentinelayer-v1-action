@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -150,8 +151,11 @@ def test_review_brief_redacts_provider_error_details() -> None:
             "line_start": 0,
             "line_end": 0,
             "message": (
-                "LLM failed for consumer projects/123456789012 and "
-                "project_id=my-prod-project with key AIzaSyDUMMYDUMMYDUMMYDUMMYDUMMY"
+                "".join((
+                    'LLM failed for consumer projects/123456789012 and project_id=my-prod-project with key',
+                    ' AI',
+                    'zaSyDUMMYDUMMYDUMMYDUMMYDUMMY',
+                ))
             ),
             "recommendation": "Retry when provider capacity is healthy.",
         }
@@ -168,8 +172,45 @@ def test_review_brief_redacts_provider_error_details() -> None:
     assert "LLM Failure" in content
     assert "123456789012" not in content
     assert "my-prod-project" not in content
-    assert "AIza" not in content
-    assert "[redacted-provider-id]" in content
+    assert "".join(('AI', 'za')) not in content
+    assert "&#91;redacted&#45;provider&#45;id&#93;" in content
+
+
+def test_review_brief_neutralizes_finding_prose_before_inline_embedding() -> None:
+    findings = [
+        {
+            "severity": "P1",
+            "category": "auth\n# forged category",
+            "file_path": "src/auth/session.py",
+            "line_start": 10,
+            "line_end": 12,
+            "message": "</details>\n## forged [click](https://evil.test)\x00\u202e",
+            "recommendation": "Use [patch](javascript:alert(1))\r\n<details>",
+            "fix_plan": "",
+        }
+    ]
+    original = deepcopy(findings)
+
+    content = render_review_brief(
+        run_id="run-boundary",
+        findings=findings,
+        ingest=_make_ingest(["src/auth/session.py"]),
+        scan_mode="pr-diff",
+        version="1.0.0",
+    )
+
+    assert findings == original
+    assert "\n# forged category" not in content
+    assert "\n## forged" not in content
+    assert "[click](" not in content
+    assert "[patch](" not in content
+    assert "<details>" not in content
+    assert "</details>" not in content
+    assert "\x00" not in content
+    assert "\u202e" not in content
+    assert "auth &#35; forged category" in content
+    assert "&#60;&#47;details&#62;" in content
+    assert "&#91;patch&#93;&#40;javascript&#58;alert&#40;1&#41;&#41;" in content
 
 
 def test_review_brief_no_persona_names() -> None:

@@ -123,6 +123,7 @@ def test_llm_p1_with_corroboration_stays_blocking(tmp_path: Path, monkeypatch: p
             "line_end": 53,
             "message": "Auth flow guard missing",
             "source": "deterministic",
+            "rule_id": "SEC-016",
         }
     ]
 

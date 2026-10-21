@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 from omargate.comment import MARKER_PREFIX, marker, marker_prefix, render_pr_comment
 from omargate.models import Counts, GateResult, GateStatus
 
@@ -198,21 +200,68 @@ def test_comment_redacts_provider_error_details() -> None:
                 "line_start": 0,
                 "category": "LLM Failure",
                 "message": (
-                    "LLM analysis failed: 403 PERMISSION_DENIED consumer "
-                    "projects/123456789012 with key AIzaSyDUMMYDUMMYDUMMYDUMMYDUMMY."
+                    "".join((
+                        'LLM analysis failed: 403 PERMISSION_DENIED consumer projects/123456789012 with key AI',
+                        'zaSyDUMMYDUMMYDUMMYDUMMYDUMMY.',
+                    ))
                 ),
                 "fix_plan": "Retry once provider capacity is healthy.",
             }
         ],
         warnings=[
-            "Fallback failed for project_id=my-prod-project token=sk-testtesttesttest"
+            "".join(('Fallback failed for project_id=my-prod-project token=sk', '-testtesttesttest'))
         ],
         head_sha="deadbeef",
     )
 
-    assert "PERMISSION_DENIED" in body
+    assert "PERMISSION&#95;DENIED" in body
     assert "123456789012" not in body
     assert "my-prod-project" not in body
-    assert "AIza" not in body
-    assert "sk-testtesttesttest" not in body
-    assert "[redacted-provider-id]" in body
+    assert "".join(('AI', 'za')) not in body
+    assert "".join(('sk', '-testtesttesttest')) not in body
+    assert "&#91;redacted&#45;provider&#45;id&#93;" in body
+
+
+def test_comment_neutralizes_untrusted_finding_markdown_without_mutation() -> None:
+    findings = [
+        {
+            "severity": "P1",
+            "file_path": "app.py",
+            "line_start": 10,
+            "category": "auth\n## forged category",
+            "message": "</details>\r\n# forged [click](https://evil.test)\x00\u202e",
+            "recommendation": (
+                "Use [patch](javascript:alert(1))\n"
+                "<details><summary>forged recommendation</summary>"
+            ),
+            "fix_plan": "",
+        }
+    ]
+    original = deepcopy(findings)
+
+    body = render_pr_comment(
+        result=_gate_result(),
+        run_id="run-boundary",
+        repo_full_name="acme/demo",
+        pr_number=42,
+        dashboard_url=None,
+        artifacts_url=None,
+        estimated_cost_usd=None,
+        version="1.2.0",
+        findings=findings,
+        head_sha="deadbeef",
+    )
+
+    assert findings == original
+    assert body.count("<details>") == 2
+    assert body.count("</details>") == 2
+    assert "\n## forged category" not in body
+    assert "\n# forged" not in body
+    assert "[click](" not in body
+    assert "[patch](" not in body
+    assert "<summary>forged recommendation" not in body
+    assert "\x00" not in body
+    assert "\u202e" not in body
+    assert "auth &#35;&#35; forged category" in body
+    assert "&#60;&#47;details&#62;" in body
+    assert "&#91;click&#93;&#40;https&#58;&#47;&#47;evil&#46;test&#41;" in body

@@ -5,6 +5,12 @@ on:
       - main
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      intent_canary:
+        description: Run the bounded paid synthetic cascade trial
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -16,7 +22,7 @@ jobs:
     env:
       PYTHONPATH: src
       RUFF_VERSION: "0.15.0"
-      PYTEST_VERSION: "8.4.2"
+      PYTEST_VERSION: "9.0.3"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
@@ -179,6 +185,7 @@ jobs:
 
   omar-review:
     name: Omar Review
+    if: github.event_name != 'workflow_dispatch' || !inputs.intent_canary
     needs: [quality-gates, build-provenance, secret-scanning]
     runs-on: ubuntu-22.04
     env:
@@ -219,7 +226,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Prepare global npm bin path
         run: |
@@ -352,6 +359,38 @@ jobs:
           name: sentinelayer-${{ steps.omar.outputs.run_id }}
           path: .sentinelayer/runs/${{ steps.omar.outputs.run_id }}
           if-no-files-found: warn
+
+  intent-canary:
+    name: Synthetic intent cascade trial
+    if: github.event_name == 'workflow_dispatch' && inputs.intent_canary
+    needs: [quality-gates, secret-scanning]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 50
+    env:
+      PYTHONPATH: src
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - name: Install pinned dependencies
+        run: python -P -m pip install --require-hashes -r requirements.lock.txt
+      - name: Run synthetic trial
+        env:
+          INPUT_OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          INPUT_TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          INPUT_INTENT_MODEL_PIN: ${{ secrets.INTENT_MODEL_PIN }}
+          INPUT_INTENT_POLICY: ${{ secrets.INTENT_POLICY_CANARY }}
+          INPUT_INTENT_PRICE_PROFILE: typesafe-input-20261020
+        run: python -P scripts/intent_canary.py
+      - name: Upload bounded synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: intent-canary-${{ github.sha }}
+          path: canary-evidence/intent-canary.json
+          if-no-files-found: error
+          retention-days: 14
 
   deploy:
     name: Deploy Artifact

@@ -12,6 +12,7 @@ from .eng_quality_helpers import (
     python_httpx_calls,
     python_interpolated_sql_lines,
     strip_js_comments_and_strings,
+    bounded_python_deadline_loops,
 )
 from .pattern_scanner import Finding, _truncate_snippet
 
@@ -154,10 +155,10 @@ class EngQualityScanner:
     def _scan_state_updates_in_loops(self, files: dict[str, str]) -> list[Finding]:
         rule = _Rule(
             pattern_id="EQ-001",
-            severity="P2",
+            severity="P4",
             category="frontend",
-            message="State updates inside map/forEach can cause render thrash and subtle ordering bugs.",
-            recommendation="Batch updates and set state once (or use functional updates); avoid setState inside loops.",
+            message="Advisory: review repeated state replacements for stale-value intent; React batches updates.",
+            recommendation="Verify the intended final state. React batches updates; functional updaters may intentionally compose queued changes. Do not infer a render count from setter calls.",
             fix_plan="Accumulate results in a local array/object and call the setter once after the loop. Example: replace items.forEach(... setRows(...)) with const nextRows = items.map(...); setRows(nextRows).",
         )
         regex = re.compile(
@@ -168,11 +169,14 @@ class EngQualityScanner:
         for path, content in self._iter_files(files, exts=_JS_EXTS):
             if ".d.ts" in path.lower():
                 continue
-            for m in regex.finditer(content):
+            for m in regex.finditer(self._strip_js_comments_and_strings(content)):
+                argument = content[m.end():].lstrip()
+                if re.match(r"(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>", argument):
+                    continue
                 line = self._index_to_line(content, m.start())
                 snippet = self._line_snippet(content, line, line)
                 findings.append(
-                    self._make_finding(rule, file_path=path, line_start=line, snippet=snippet)
+                    self._make_finding(rule, file_path=path, line_start=line, snippet=snippet, confidence=0.6)
                 )
         return findings
 
@@ -679,9 +683,12 @@ class EngQualityScanner:
         for path, content in self._iter_files(files, exts=_BACKEND_EXTS):
             if self._is_test_file(path):
                 continue
+            deadline_bounded = bounded_python_deadline_loops(content) if path.endswith(".py") else set()
             lines = content.splitlines()
             for idx, line in enumerate(lines):
                 if not while_true_re.search(line):
+                    continue
+                if idx + 1 in deadline_bounded:
                     continue
                 window = "\\n".join(lines[idx : min(idx + 40, len(lines))])
                 if bounded_re.search(window):

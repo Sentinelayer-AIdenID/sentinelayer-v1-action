@@ -190,15 +190,15 @@ def test_cost_approval_with_label() -> None:
     assert status == "label_approved"
 
 
-def test_dedupe_detects_existing_run() -> None:
+def test_remote_check_metadata_does_not_authorize_gate_reuse() -> None:
     gh = DummyGitHub(
         runs=[
             {"external_id": "abc", "status": "completed", "html_url": "https://example.com/run/1"}
         ]
     )
     should_skip, url = asyncio.run(check_dedupe(gh, "headsha", "abc"))
-    assert should_skip is True
-    assert url == "https://example.com/run/1"
+    assert should_skip is False
+    assert url is None
 
 
 def test_rate_limit_cooldown_blocks() -> None:

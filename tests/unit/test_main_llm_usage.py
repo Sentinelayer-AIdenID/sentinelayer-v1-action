@@ -1,11 +1,97 @@
 from __future__ import annotations
 
+from policy_fixture import FAKE_POLICY_JSON
+
 from types import SimpleNamespace
 
+import pytest
+
 from omargate.config import OmarGateConfig
-from omargate.main import _build_llm_evidence, _llm_fallback_used
+from omargate.main import (
+    _build_llm_evidence,
+    _llm_display_cost,
+    _llm_display_identity,
+    _llm_fallback_used,
+)
 from omargate.models import Counts, GateResult, GateStatus
 from omargate.telemetry_runtime import _write_github_outputs
+
+
+@pytest.mark.parametrize("usage", [
+    None,
+    {},
+    {"provider": "typesafe", "model": None, "requested_model": "model-under-test-1.13.0"},
+    {"provider": "typesafe", "model": "gpt-5.3-codex"},
+])
+def test_llm_display_no_attempt_is_disabled_even_with_preflight_usage(usage) -> None:
+    analysis = SimpleNamespace(llm_attempted=False, llm_success=False, llm_usage=usage)
+
+    assert _llm_display_identity(analysis) == ("disabled", "n/a")
+    assert _llm_display_cost(analysis) == 0.0
+
+
+@pytest.mark.parametrize(("success", "usage", "expected"), [
+    (True, {"provider": "typesafe", "model": "model-under-test-1.13.0"}, ("typesafe", "model-under-test-1.13.0")),
+    (False, {"provider": "typesafe", "model": None, "requested_model": "model-under-test-1.13.0"}, ("typesafe", "unknown")),
+    (True, {"provider": "openai", "engine": "codex", "model": "reported-model"}, ("codex", "reported-model")),
+    (False, {"provider": "openai", "model": "reported-model"}, ("openai", "reported-model")),
+    (True, None, ("llm", "unknown")),
+    (False, None, ("llm", "unknown")),
+    (True, {"provider": "openai", "model": "  "}, ("openai", "unknown")),
+])
+def test_llm_display_attempt_uses_only_observed_model(success, usage, expected) -> None:
+    analysis = SimpleNamespace(llm_attempted=True, llm_success=success, llm_usage=usage)
+
+    assert _llm_display_identity(analysis) == expected
+
+
+@pytest.mark.parametrize(("success", "usage", "expected"), [
+    (False, None, None),
+    (False, {"provider": "typesafe", "cost_usd": None}, None),
+    (False, {"cost_usd": 0.125}, 0.125),
+    (False, {"cost_usd": 0}, 0.0),
+    (True, None, None),
+    (True, {"cost_usd": None}, None),
+    (True, {"cost_usd": 0.125}, 0.125),
+])
+def test_llm_display_attempt_cost_is_unknown_unless_reported(success, usage, expected) -> None:
+    analysis = SimpleNamespace(llm_attempted=True, llm_success=success, llm_usage=usage)
+
+    assert _llm_display_cost(analysis) == expected
+
+
+def test_llm_display_success_without_attempt_flag_does_not_invent_identity_or_free_cost() -> None:
+    analysis = SimpleNamespace(llm_attempted=False, llm_success=True, llm_usage=None)
+
+    assert _llm_display_identity(analysis) == ("llm", "unknown")
+    assert _llm_display_cost(analysis) is None
+
+
+def test_preflight_failure_evidence_stays_failed_while_comment_identity_is_disabled() -> None:
+    usage = {
+        "provider": "typesafe", "model": None, "requested_model": "model-under-test-1.13.0",
+        "tokens_in": None, "tokens_out": None, "cost_usd": None,
+        "typesafe_assessment": {"failure_class": "typesafe_policy_unavailable"},
+    }
+    analysis = SimpleNamespace(
+        llm_usage=usage, llm_attempted=False, llm_success=False,
+        llm_output_valid=False, llm_no_findings_reported=False,
+        llm_reported_finding_count=0, llm_count=1, llm_parse_error_count=0,
+        llm_failure_class="typesafe_policy_unavailable",
+    )
+    config = OmarGateConfig(
+        llm_provider="typesafe", typesafe_api_key="fixture-typed-key",
+        openai_api_key="fixture-writer-key", sentinelayer_spec_id="fixture",
+     intent_model_pin="model-under-test-1.13.0", intent_policy=FAKE_POLICY_JSON)
+
+    evidence = _build_llm_evidence(analysis, config)
+
+    assert _llm_display_identity(analysis) == ("disabled", "n/a")
+    assert evidence["attempted"] is False and evidence["success"] is False
+    assert evidence["output_valid"] is False and evidence["model"] == ""
+    assert evidence["provider"] == "typesafe" and evidence["usage_recorded"] is True
+    assert evidence["failure_class"] == "typesafe_policy_unavailable"
+    assert analysis.llm_usage is usage and usage["model"] is None
 
 
 def test_llm_fallback_used_detects_configured_fallback_model() -> None:

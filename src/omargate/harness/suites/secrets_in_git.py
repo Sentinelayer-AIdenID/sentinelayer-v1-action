@@ -104,7 +104,6 @@ class SecretsInGitSuite(SecuritySuite):
                         severity = f.severity
                         confidence = f.confidence
                         message = f"{f.message} (found in git history)"
-
                         # Historical entropy findings are high-noise; keep as advisory only.
                         if f.pattern_id == "SEC-ENTROPY":
                             severity = "P3"

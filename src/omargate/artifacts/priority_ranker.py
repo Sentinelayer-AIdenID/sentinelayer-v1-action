@@ -57,7 +57,7 @@ CATEGORIES: Dict[str, Dict[str, object]] = {
     },
 }
 
-SEVERITY_SCORE = {"P0": 20, "P1": 10, "P2": 3, "P3": 1}
+SEVERITY_SCORE = {"P0": 20, "P1": 10, "P2": 3, "P3": 1, "P4": 0}
 CATEGORY_SCORE = {
     "auth": 5,
     "payment": 5,

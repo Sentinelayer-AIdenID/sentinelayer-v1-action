@@ -271,7 +271,7 @@ def test_dockerfile_root_user_waiver_suppresses_finding() -> None:
 
 def test_env_file_committed_detected_as_p0() -> None:
     files = {
-        ".env": "OPENAI_API_KEY=sk-test\n",
+        ".env": "".join(('OPENAI_API_KEY=sk', '-test\n')),
         ".env.example": "OPENAI_API_KEY=\n",
     }
     scanner = EngQualityScanner(tech_stack=[])
