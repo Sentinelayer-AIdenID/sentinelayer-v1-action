@@ -919,7 +919,6 @@ def _load_npm_audit_input(
             or not isinstance(peer_metadata, dict)
             or bool(peer_metadata)
             or record.get("link") is True
-            or record.get("peer") is True
             or record.get("peerOptional") is True
             or not isinstance(record.get("version"), str)
             or not record.get("version")
