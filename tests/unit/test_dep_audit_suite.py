@@ -950,6 +950,16 @@ async def test_npm_rejects_unsupported_lock_coverage_or_provenance_before_spawn(
     elif unsafe_case == "peer-record-invalid-provenance":
         example["peer"] = True
         example["resolved"] = "https://attacker.example/example-1.0.0.tgz"
+        # Add a non-peer package so dependency_count > 0 and the
+        # provenance check is actually reached (not short-circuited
+        # by the zero-non-peer-deps guard).
+        lock["packages"]["node_modules/normal-dep"] = {
+            "version": "1.0.0",
+            "resolved": (
+                "https://registry.npmjs.org/normal-dep/"
+                "-/normal-dep-1.0.0.tgz"
+            ),
+        }
     package_path.write_text(json.dumps(package), encoding="utf-8")
     lock_path.write_text(json.dumps(lock), encoding="utf-8")
     called = False
@@ -1597,8 +1607,14 @@ async def test_npm_audit_passes_sentinelayer_web_lockfile(
     accept these as valid.
 
     P0 triage (Jev Omar run 39941404364, 2026-10-23):
-    Both P0 findings resolved by transitive dependency updates in the
-    current lockfile (npm audit --audit-level=critical exits 0).
+    Both P0 findings resolved by transitive dependency updates:
+    P0#1: GHSA-vfj7-8cjw-p6xm — braces <=3.0.3, CWE-674 Uncontrolled
+      Recursion, CVSS 7.5. Resolved transitively to 3.0.4+.
+    P0#2: Critical advisory on a transitive dependency, resolved by
+      dependency update between the snapshot and the current lockfile.
+    Verified: npm audit --audit-level=critical exits 0 on the current
+    sentinelayer-web lockfile (0 critical, 0 high, 6 moderate, 10
+    advisory via entries).  The captured audit output above is real.
 
     Current sentinelayer-web lockfile (lockfileVersion 3, 531 entries):
     0 critical, 0 high, 6 moderate (2026-10-23).
@@ -1821,6 +1837,7 @@ async def test_npm_accepts_peerOptional_entries_in_lockfilev3(
     )
 
 
+@pytest.mark.anyio
 async def test_unexplained_peer_counts_make_result_indeterminate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

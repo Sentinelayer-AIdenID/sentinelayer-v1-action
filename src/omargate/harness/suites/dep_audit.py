@@ -836,6 +836,22 @@ class _NpmAuditInput:
     peer_optional_count: int
 
 
+
+def _is_optional_peer(packages: dict[str, object], package_name: str) -> bool:
+    """Return True if any package declares *package_name* as an optional peer
+    via peerDependenciesMeta."""
+    for _pkg_path, record in packages.items():
+        if not isinstance(record, dict):
+            continue
+        meta = record.get("peerDependenciesMeta")
+        if not isinstance(meta, dict):
+            continue
+        entry = meta.get(package_name)
+        if isinstance(entry, dict) and entry.get("optional") is True:
+            return True
+    return False
+
+
 def _load_npm_audit_input(
     package_json: Path, lockfile: Path
 ) -> _NpmAuditInput | None:
@@ -937,18 +953,26 @@ def _load_npm_audit_input(
         # package_paths but exclude from the dependency count because
         # npm audit does not report vulnerabilities on peer deps.
         # Gate on version: peer:true is a v3+ feature; reject in v2.
-        if record.get("peer") is True:
+        if record.get("peer") is True or record.get("peerOptional") is True:
             if lock_version < 3:
                 return None
             package_paths.add(package_path)
-            peer_count += 1
+            # In lockfileVersion 3, a peer dependency may be optional
+            # per the consumer's peerDependenciesMeta even when the
+            # package record carries peer:true (not peerOptional:true).
+            # npm audit reports these as peerOptional, so we must
+            # derive the count from the actual consumer metadata.
+            pkg_name = package_path.split("node_modules/", 1)[-1]
+            is_optional = record.get("peerOptional") is True or (
+                lock_version >= 3
+                and _is_optional_peer(packages, pkg_name)
+            )
+            if is_optional:
+                peer_optional_count += 1
+            else:
+                peer_count += 1
             continue
-        if record.get("peerOptional") is True:
-            if lock_version < 3:
-                return None
-            package_paths.add(package_path)
-            peer_optional_count += 1
-            continue
+
         # lockfileVersion 2 strict checks: transitive peer dependency
         # names must be a subset of root declared dependencies, and
         # peerDependenciesMeta must be empty. npm 10+ (lockfileVersion 3)
