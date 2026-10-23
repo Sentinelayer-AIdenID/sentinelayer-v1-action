@@ -136,6 +136,25 @@ def _llm_display_identity(analysis, **kwargs) -> tuple[str, str]:
     return engine, model
 
 
+def _provider_key_present(config) -> bool:
+    """Return True when the configured LLM provider has a non-empty API key."""
+    try:
+        provider = config.llm_provider
+        if provider == "openai":
+            return bool(config.openai_api_key.get_secret_value().strip())
+        if provider == "anthropic":
+            return bool(config.anthropic_api_key.get_secret_value().strip())
+        if provider == "google":
+            return bool(config.google_api_key.get_secret_value().strip())
+        if provider == "xai":
+            return bool(config.xai_api_key.get_secret_value().strip())
+        if provider == "typesafe":
+            return bool(config.typesafe_api_key.get_secret_value().strip())
+        return False
+    except Exception:
+        return False
+
+
 def _llm_display_cost(analysis) -> tuple[Optional[float], bool]:
     """Return (cost_usd, complete) for the LLM review.
 
@@ -892,11 +911,7 @@ async def async_main() -> int:
                     try:
                         llm_engine_used, llm_model_used = _llm_display_identity(
                             analysis,
-                            llm_enabled=bool(
-                                config.openai_api_key.get_secret_value().strip()
-                                if config.llm_provider == "openai"
-                                else config.typesafe_api_key.get_secret_value().strip()
-                            ),
+                            llm_enabled=_provider_key_present(config),
                             routing=(analysis.llm_usage or {}).get("review_routing"),
                         )
 
