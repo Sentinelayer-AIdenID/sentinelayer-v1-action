@@ -932,12 +932,7 @@ def _load_npm_audit_input(
         # (e.g. package.json says optional but the lockfile does not)
         # signals a tampered or regenerated lockfile.
         for key in set(package_peer_metadata) & set(lock_peer_metadata):
-            pkg_meta = package_peer_metadata.get(key)
-            lock_meta = lock_peer_metadata.get(key)
-            if isinstance(pkg_meta, dict) and isinstance(lock_meta, dict):
-                if pkg_meta.get("optional") != lock_meta.get("optional"):
-                    return None
-            elif pkg_meta != lock_meta:
+            if package_peer_metadata.get(key) != lock_peer_metadata.get(key):
                 return None
     dependency_sections = (
         "dependencies",
