@@ -205,6 +205,72 @@ def _top_findings_section(
 
     return "\n".join(lines)
 
+def _review_chain_section(llm_evidence, review_routing, llm_engine, llm_model):
+    """Render the review chain: triage, route, reviewer, and call outcome.
+
+    Shows what the intent cascade decided and what actually happened, so a reader
+    can see at a glance whether a review was refused, attempted, or completed —
+    and never mistakes a refused review for a disabled one.
+    """
+    evidence = llm_evidence or {}
+    routing = review_routing or {}
+
+    lines = ["", "### Review chain", ""]
+
+    # Triage row
+    triage_status = routing.get("triage_status", "")
+    failure_reason = routing.get("source_failure_reason", "")
+    if triage_status:
+        status_display = triage_status.replace("_", " ")
+        lines.append("- **Triage:** `" + status_display + "`")
+        if failure_reason:
+            lines.append("  - Reason: `" + failure_reason + "`")
+    elif evidence.get("failure_class"):
+        lines.append("- **Triage:** not reached (`" + str(evidence["failure_class"]) + "`)")
+    else:
+        lines.append("- **Triage:** not available")
+
+    # Route + reviewer row
+    routes = routing.get("routes", [])
+    if routes:
+        lines.append("- **Route:**")
+        for i, r in enumerate(routes):
+            tier = r.get("tier", "?")
+            req_model = r.get("model", "?")
+            effort = r.get("effort", "?")
+            success = r.get("success")
+            reported = r.get("reported_model", "")
+            has_reported = isinstance(reported, str) and reported != ""
+            identity_matches = r.get("identity_matches")
+            attempted = has_reported or identity_matches is True
+            lines.append("  " + str(i + 1) + ". `" + tier + "` \u2192 `" + req_model + "` / `" + effort + "`")
+            if attempted:
+                status_mark = "passed" if success else "failed"
+                returned_display = reported if has_reported else "unknown"
+                lines.append("     - Attempted: yes, returned `" + returned_display + "` \u2014 **" + status_mark + "**")
+            else:
+                lines.append("     - Attempted: no")
+    else:
+        if llm_engine == "refused":
+            lines.append("- **Route:** refused (`" + llm_model + "`)")
+        elif llm_engine == "disabled":
+            lines.append("- **Route:** LLM not configured")
+        else:
+            lines.append("- **Route:** `" + llm_engine + "` / `" + llm_model + "`")
+
+    # Evidence row
+    attempted = evidence.get("attempted")
+    success = evidence.get("success")
+    failure_class = evidence.get("failure_class")
+    if attempted is not None:
+        lines.append("- **Attempted:** " + str(attempted))
+    if success is not None:
+        lines.append("- **Success:** " + str(success))
+    if failure_class:
+        lines.append("- **Failure class:** `" + str(failure_class) + "`")
+
+    return "\n".join(lines) + "\n"
+
 def _codebase_snapshot_section(codebase_snapshot: Optional[dict]) -> str:
     if not codebase_snapshot:
         return ""
@@ -256,6 +322,8 @@ def render_pr_comment(
     codebase_snapshot: Optional[dict] = None,
     codebase_synopsis: Optional[str] = None,
     comment_tag: str = "",
+    llm_evidence: Optional[dict] = None,
+    review_routing: Optional[dict] = None,
 ) -> str:
     """
     Render the PR comment for Omar Gate.
@@ -336,6 +404,11 @@ def render_pr_comment(
         )
 
     # Counts table with explicit blocking semantics.
+    review_chain_section = _review_chain_section(
+        llm_evidence=llm_evidence, review_routing=review_routing,
+        llm_engine=llm_engine, llm_model=llm_model,
+    )
+
     lines = [
         f"## 🛡️ Omar Gate: {status_badge}",
         "",
@@ -347,6 +420,7 @@ def render_pr_comment(
         + f" • **Cost (est.):** `{estimated_cost_value}`"
         + (f" • **Cost (usage estimate):** `{actual_cost_value}`" if actual_cost_usd is not None else ""),
         model_cost_section,
+        review_chain_section,
         "",
         f"**Result:** {result.reason}",
         "",

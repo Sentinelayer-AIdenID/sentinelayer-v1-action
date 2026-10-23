@@ -17,17 +17,18 @@ from omargate.models import Counts, GateResult, GateStatus
 from omargate.telemetry_runtime import _write_github_outputs
 
 
-@pytest.mark.parametrize("usage", [
-    None,
-    {},
-    {"provider": "typesafe", "model": None, "requested_model": "model-under-test-1.13.0"},
-    {"provider": "typesafe", "model": "gpt-5.3-codex"},
+@pytest.mark.parametrize("usage,expected_identity", [
+    (None, ("disabled", "n/a")),
+    ({}, ("disabled", "n/a")),
+    ({"provider": "typesafe", "model": None, "requested_model": "model-under-test-1.13.0"}, ("disabled", "n/a")),
+    ({"provider": "typesafe", "model": "gpt-5.3-codex"}, ("disabled", "n/a")),
 ])
-def test_llm_display_no_attempt_is_disabled_even_with_preflight_usage(usage) -> None:
+def test_llm_display_no_attempt_is_disabled_even_with_preflight_usage(usage, expected_identity) -> None:
     analysis = SimpleNamespace(llm_attempted=False, llm_success=False, llm_usage=usage)
 
-    assert _llm_display_identity(analysis) == ("disabled", "n/a")
-    assert _llm_display_cost(analysis) == 0.0
+    assert _llm_display_identity(analysis) == expected_identity
+    # Not attempted, not successful, no cost ledger → cost unknown (None, never 0.0)
+    assert _llm_display_cost(analysis) is None
 
 
 @pytest.mark.parametrize(("success", "usage", "expected"), [
@@ -86,7 +87,7 @@ def test_preflight_failure_evidence_stays_failed_while_comment_identity_is_disab
 
     evidence = _build_llm_evidence(analysis, config)
 
-    assert _llm_display_identity(analysis) == ("disabled", "n/a")
+    assert _llm_display_identity(analysis) == ("refused", "typesafe_policy_unavailable")
     assert evidence["attempted"] is False and evidence["success"] is False
     assert evidence["output_valid"] is False and evidence["model"] == ""
     assert evidence["provider"] == "typesafe" and evidence["usage_recorded"] is True
@@ -237,3 +238,49 @@ def test_github_outputs_expose_live_llm_evidence(tmp_path, monkeypatch) -> None:
     assert "llm_findings_count=0\n" in output
     assert "llm_parse_error_count=2\n" in output
     assert "llm_failure_class=invalid_output\n" in output
+
+
+def test_refused_review_reports_refused_not_disabled() -> None:
+    """PR #660 scenario: attempted=False, success=False, failure_class set.
+    Should report 'refused' with the failure class, not 'disabled'."""
+    usage = {
+        "provider": "typesafe", "model": None, "requested_model": "model-under-test-1.13.0",
+        "tokens_in": None, "tokens_out": None, "cost_usd": None,
+        "review_routing": {
+            "triage_status": "source_scope_incomplete",
+            "source_failure_reason": "candidate_budget_exceeded",
+            "routes": [{"tier": "deep", "model": "gpt-6-sol", "effort": "max",
+                         "success": False, "reported_model": "", "identity_matches": False}],
+        },
+    }
+    analysis = SimpleNamespace(
+        llm_usage=usage, llm_attempted=False, llm_success=False,
+        llm_output_valid=False, llm_failure_class="cascade_source_scope_incomplete",
+    )
+
+    assert _llm_display_identity(analysis) == ("refused", "cascade_source_scope_incomplete")
+    # Cost unknown (not $0.00) when the review was refused
+    assert _llm_display_cost(analysis) is None
+
+
+def test_refused_review_with_cost_ledger_reports_known_cost() -> None:
+    """Refused review with partial cost ledger: report known cost, not total."""
+    usage = {
+        "provider": "typesafe",
+        "cost_ledger": {"complete": False, "known_estimated_usd": 0.042,
+                        "estimated_total_usd": None, "calls": [
+                            {"estimated_usd": 0.042, "stage": "triage", "model": "intent-model:abc123",
+                             "provider": "typesafe"},
+                        ]},
+        "review_routing": {
+            "triage_status": "source_scope_incomplete",
+            "source_failure_reason": "candidate_budget_exceeded",
+        },
+    }
+    analysis = SimpleNamespace(
+        llm_usage=usage, llm_attempted=False, llm_success=False,
+        llm_output_valid=False, llm_failure_class="cascade_source_scope_incomplete",
+    )
+
+    assert _llm_display_identity(analysis) == ("refused", "cascade_source_scope_incomplete")
+    assert _llm_display_cost(analysis) == 0.042

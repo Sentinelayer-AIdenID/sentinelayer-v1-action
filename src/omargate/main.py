@@ -100,8 +100,16 @@ def _llm_fallback_used(llm_usage: dict, model_fallback: str) -> bool:
 
 
 def _llm_display_identity(analysis) -> tuple[str, str]:
-    """Display observed execution identity, without substituting request config."""
+    """Display observed execution identity, without substituting request config.
+
+    When a review was refused before inference (attempted=False, failure_class set),
+    report it as 'refused' with the failure class rather than pretending LLM was
+    disabled. Only return 'disabled' when there is genuinely no LLM configuration.
+    """
     if not analysis.llm_attempted and not analysis.llm_success:
+        failure_class = getattr(analysis, "llm_failure_class", None)
+        if failure_class and str(failure_class) not in ("not_attempted", "disabled"):
+            return "refused", str(failure_class)
         return "disabled", "n/a"
     usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
     engine = str(usage.get("engine") or usage.get("provider") or "llm").strip() or "llm"
@@ -110,12 +118,22 @@ def _llm_display_identity(analysis) -> tuple[str, str]:
 
 
 def _llm_display_cost(analysis) -> Optional[float]:
-    """Keep an attempted review's unreported cost unknown, including failures."""
+    """Keep an attempted review's unreported cost unknown, including failures.
+
+    When cost_ledger is present but incomplete (estimated_total_usd is None),
+    return None rather than zero — a partial cost ledger means something was
+    attempted or estimated, and claiming $0 would be misleading. An unrefined
+    refused review with a cost ledger also returns None rather than 0.0.
+    """
     usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
     if isinstance(usage.get("cost_ledger"), dict):
-        return usage["cost_ledger"].get("estimated_total_usd")
+        ledger = usage["cost_ledger"]
+        if ledger.get("complete"):
+            return ledger.get("estimated_total_usd")
+        known = ledger.get("known_estimated_usd")
+        return float(known) if known is not None else None
     if not analysis.llm_attempted and not analysis.llm_success:
-        return 0.0
+        return None
     cost = usage.get("cost_usd")
     return float(cost) if cost is not None else None
 
@@ -891,6 +909,8 @@ async def async_main() -> int:
                             head_sha=ctx.head_sha,
                             server_url=server_url,
                             comment_tag=config.comment_tag,
+                            llm_evidence=_build_llm_evidence(analysis, config),
+                            review_routing=(analysis.llm_usage or {}).get("review_routing"),
                         )
                         comment_url = gh.create_or_update_pr_comment(
                             ctx.pr_number,
