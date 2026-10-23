@@ -884,6 +884,9 @@ def _any_consumer_marks_optional(
             continue
         if not isinstance(record, dict):
             continue
+        peer_deps = record.get("peerDependencies")
+        if not isinstance(peer_deps, dict) or package_name not in peer_deps:
+            continue
         meta = record.get("peerDependenciesMeta")
         if not isinstance(meta, dict):
             continue
