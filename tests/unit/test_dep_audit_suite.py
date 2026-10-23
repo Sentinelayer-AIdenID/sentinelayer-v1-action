@@ -2254,6 +2254,8 @@ async def test_peer_origins_are_collected_in_registry_check(
     assert result.dependency_count == 1  # only normal-dep
     assert result.peer_count == 1  # peer-dep is not optional
 
+
+@pytest.mark.anyio
 async def test_required_nested_peer_is_resolved(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
