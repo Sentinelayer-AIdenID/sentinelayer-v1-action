@@ -115,10 +115,11 @@ def _llm_display_identity(analysis, **kwargs) -> tuple[str, str]:
     if not analysis.llm_attempted and not analysis.llm_success:
         reason = ""
         if isinstance(routing, dict):
-            reason = str(routing.get("source_failure_reason", ""))
+            raw = routing.get("source_failure_reason", "")
+            reason = str(raw).strip() if raw else ""
         if not reason:
-            reason = str(getattr(analysis, "llm_failure_class", "") or "")
-        reason = reason.strip()
+            raw = getattr(analysis, "llm_failure_class", None)
+            reason = str(raw).strip() if raw else ""
         if reason:
             return "NOT_ATTEMPTED", reason
         return "NOT_ATTEMPTED", "unknown"
