@@ -921,7 +921,6 @@ def _load_npm_audit_input(
             or peer_dependencies is None
             or not isinstance(peer_metadata, dict)
             or record.get("link") is True
-            or record.get("peerOptional") is True
         ):
             return None
         if (

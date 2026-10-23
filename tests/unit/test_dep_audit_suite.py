@@ -1596,21 +1596,15 @@ async def test_npm_audit_passes_sentinelayer_web_lockfile(
     @types/aria-query, dom-accessibility-api, etc.).  The gate must
     accept these as valid.
 
-    The two P0 (critical-severity) findings at the time of the run:
-    1. GHSA-vfj7-8cjw-p6xm — braces <=3.0.3 stack-exhaustion DoS
-       (CVSS 7.5).  Resolution: transitive dependency update between the
-       run snapshot and current lockfile.  npm now classifies this
-       advisory as HIGH severity (not critical).
-    2. GHSA-c2jc-4qpr-9m9f — acorn <=8.14.0 ReDoS via regex in parsing
-       (retracted advisory; GHSA-c2jc-4qpr-9m9f, CVSS 5.3, downgraded
-       from critical before retraction).  Resolution: transitive update.
-       npm no longer reports this advisory.
+    P0 triage (Jev Omar run 39941404364, 2026-10-23):
+    Both P0 findings resolved by transitive dependency updates in the
+    current lockfile (npm audit --audit-level=critical exits 0).
 
-    Current sentinelayer-web lockfile (lockfileVersion 3, 531 deps):
-    0 critical, 5 high, 6 moderate.  The gate must accept this lockfile
-    and produce a clean outcome (since critical=0, and --audit-level=critical
-    would exit 0).  This test uses a faithful fixture capturing the
-    exact peer:true pattern from the real lockfile."""
+    Current sentinelayer-web lockfile (lockfileVersion 3, 531 entries):
+    0 critical, 0 high, 6 moderate (2026-10-23).
+    This test validates the structural lockfile-acceptance rules: it
+    uses a minimal fixture that captures the exact peer:true pattern
+    from the real lockfile and proves the gate produces a clean outcome."""
 
     # Faithful fixture extracted from sentinelayer-web package-lock.json:
     # - root devDependencies -> @testing-library/react
@@ -1740,6 +1734,93 @@ async def test_npm_audit_passes_sentinelayer_web_lockfile(
 
 
 @pytest.mark.anyio
+
+@pytest.mark.anyio
+async def test_npm_accepts_peerOptional_entries_in_lockfilev3(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """peerOptional:true entries must not be rejected by the early
+    unsafe-lockfile guard.  In lockfileVersion 3, npm emits
+    peerOptional:true markers on optional peer dependencies (e.g.
+    @types/react when marked optional in peerDependenciesMeta).
+    The early rejection block must not include peerOptional so the
+    dedicated handler below it can track them in package_paths and
+    increment peer_optional_count."""
+
+    package = {
+        "name": "test-project",
+        "version": "1.0.0",
+        "dependencies": {"react": "^18.0.0"},
+        "devDependencies": {"@types/react": "^18.0.0"},
+    }
+    pkg_path = tmp_path / "package.json"
+    pkg_path.write_text(json.dumps(package), encoding="utf-8")
+
+    lock = {
+        "name": "test-project",
+        "version": "1.0.0",
+        "lockfileVersion": 3,
+        "packages": {
+            "": package,
+            "node_modules/react": {
+                "version": "18.3.1",
+                "resolved": (
+                    "https://registry.npmjs.org/react/-/react-18.3.1.tgz"
+                ),
+            },
+            # peerOptional:true — optional peer, must be accepted
+            "node_modules/@types/react": {
+                "version": "18.3.12",
+                "resolved": (
+                    "https://registry.npmjs.org/@types/"
+                    "react/-/react-18.3.12.tgz"
+                ),
+                "dev": True,
+                "peerOptional": True,
+            },
+        },
+    }
+    lock_path = tmp_path / "package-lock.json"
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    non_peer_count = 1  # react
+    peer_optional_count = 1  # @types/react
+    total = non_peer_count + peer_optional_count
+
+    called = False
+
+    async def _fake_run_command(
+        *_args: object, **_kwargs: object
+    ) -> CommandResult:
+        nonlocal called
+        called = True
+        stdout = json.dumps({
+            "auditReportVersion": 2,
+            "vulnerabilities": {},
+            "metadata": {
+                "vulnerabilities": _npm_metadata(critical=0, total=0),
+                "dependencies": {
+                    "prod": non_peer_count,
+                    "dev": 0,
+                    "optional": 0,
+                    "peer": 0,
+                    "peerOptional": peer_optional_count,
+                    "total": total,
+                },
+            },
+        })
+        return _result(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(dep_audit, "run_command", _fake_run_command)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is True
+    assert outcome.state == "clean", (
+        f"Expected clean but got {outcome.state}: {outcome.reason_code}"
+    )
+
+
 async def test_unexplained_peer_counts_make_result_indeterminate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
