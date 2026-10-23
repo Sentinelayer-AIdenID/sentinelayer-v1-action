@@ -861,19 +861,13 @@ def _is_optional_peer(
 ) -> bool:
     """Return True if the consumer at *consumer_path* declares
     *package_name* as an optional peer via peerDependenciesMeta."""
-    # Walk up ancestor paths to find the nearest consumer with metadata.
-    parts = consumer_path.rstrip("/").split("/")
-    for i in range(len(parts), -1, -1):
-        ancestor = "/".join(parts[:i])
-        record = packages.get(ancestor)
-        if not isinstance(record, dict):
-            continue
+    record = packages.get(consumer_path)
+    if isinstance(record, dict):
         meta = record.get("peerDependenciesMeta")
-        if not isinstance(meta, dict):
-            continue
-        entry = meta.get(package_name)
-        if isinstance(entry, dict) and entry.get("optional") is True:
-            return True
+        if isinstance(meta, dict):
+            entry = meta.get(package_name)
+            if isinstance(entry, dict) and entry.get("optional") is True:
+                return True
     return False
 
 
