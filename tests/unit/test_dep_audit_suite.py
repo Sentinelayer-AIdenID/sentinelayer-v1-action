@@ -1580,12 +1580,21 @@ async def test_all_nonapplicable_ecosystems_emit_complete_exact_evidence(
     }
 
 
+
 @pytest.mark.anyio
 async def test_npm_audit_passes_sentinelayer_web_lockfile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """P0 triage for Jev Omar run 39941404364 (2026-10-23).
+
+    Reproduces the exact pattern that tripped unsafe_lockfile: a v3
+    lockfile with peer:true entries that are not directly referenced
+    by any package's peerDependencies.  In npm 10+ lockfileVersion 3
+    output, transitive peer chains produce unreferenced peer:true
+    records (e.g. @testing-library/dom's peer dependencies such as
+    @types/aria-query, dom-accessibility-api, etc.).  The gate must
+    accept these as valid.
 
     The two P0 (critical-severity) findings at the time of the run:
     1. GHSA-vfj7-8cjw-p6xm — braces <=3.0.3 stack-exhaustion DoS
@@ -1597,54 +1606,97 @@ async def test_npm_audit_passes_sentinelayer_web_lockfile(
        from critical before retraction).  Resolution: transitive update.
        npm no longer reports this advisory.
 
-    Current sentinelayer-web lockfile (lockfileVersion 3, 530 deps):
+    Current sentinelayer-web lockfile (lockfileVersion 3, 531 deps):
     0 critical, 5 high, 6 moderate.  The gate must accept this lockfile
     and produce a clean outcome (since critical=0, and --audit-level=critical
-    would exit 0).  This test uses a faithful subset:"""
-    _prepare_project(tmp_path, "npm")
-    package_path = tmp_path / "package.json"
-    lock_path = tmp_path / "package-lock.json"
+    would exit 0).  This test uses a faithful fixture capturing the
+    exact peer:true pattern from the real lockfile."""
 
-    # Simulate a realistic v3 lockfile with a peer:true entry and
-    # transitive peer deps — the features that originally tripped
-    # unsafe_lockfile.
+    # Faithful fixture extracted from sentinelayer-web package-lock.json:
+    # - root devDependencies -> @testing-library/react
+    # - @testing-library/react peerDependencies -> @testing-library/dom
+    # - @testing-library/dom (peer:true) with unreferenced peer:true children
     package = {
         "name": "sentinelayer-web",
         "version": "0.0.0",
-        "dependencies": {"example": "1.0.0", "other": "2.0.0"},
-        "devDependencies": {"dev-lib": "1.0.0"},
+        "dependencies": {},
+        "devDependencies": {"@testing-library/react": "^16.0.0"},
     }
+    package_path = tmp_path / "package.json"
     package_path.write_text(json.dumps(package), encoding="utf-8")
+
     lock = {
         "name": "sentinelayer-web",
         "version": "0.0.0",
         "lockfileVersion": 3,
         "packages": {
             "": package,
-            "node_modules/example": {
-                "version": "1.0.0",
+            "node_modules/@testing-library/react": {
+                "version": "16.3.0",
                 "resolved": (
-                    "https://registry.npmjs.org/example/-/example-1.0.0.tgz"
+                    "https://registry.npmjs.org/@testing-library/"
+                    "react/-/react-16.3.0.tgz"
                 ),
-                "peerDependencies": {"peer-lib": ">=1.0.0"},
-                "peerDependenciesMeta": {"peer-lib": {"optional": True}},
+                "dev": True,
+                "peerDependencies": {
+                    "@testing-library/dom": "^10.0.0",
+                    "@types/react": "^18.0.0 || ^19.0.0",
+                    "@types/react-dom": "^18.0.0 || ^19.0.0",
+                },
+                "peerDependenciesMeta": {
+                    "@types/react": {"optional": True},
+                    "@types/react-dom": {"optional": True},
+                },
             },
-            "node_modules/other": {
-                "version": "2.0.0",
+            # peer:true — referenced by @testing-library/react's peerDependencies
+            "node_modules/@testing-library/dom": {
+                "version": "10.4.1",
                 "resolved": (
-                    "https://registry.npmjs.org/other/-/other-2.0.0.tgz"
+                    "https://registry.npmjs.org/@testing-library/"
+                    "dom/-/dom-10.4.1.tgz"
                 ),
+                "dev": True,
+                "peer": True,
+                "dependencies": {
+                    "@types/aria-query": "^5.0.1",
+                    "dom-accessibility-api": "^0.5.9",
+                },
             },
-            "node_modules/dev-lib": {
-                "version": "1.0.0",
+            # Unreferenced peer:true — transitively resolved, no consumer
+            # declares peerDependencies for these.  This is the exact
+            # pattern that originally tripped unsafe_lockfile.
+            "node_modules/@types/aria-query": {
+                "version": "5.0.4",
                 "resolved": (
-                    "https://registry.npmjs.org/dev-lib/-/dev-lib-1.0.0.tgz"
+                    "https://registry.npmjs.org/@types/"
+                    "aria-query/-/aria-query-5.0.4.tgz"
                 ),
+                "dev": True,
+                "peer": True,
+            },
+            "node_modules/dom-accessibility-api": {
+                "version": "0.5.16",
+                "resolved": (
+                    "https://registry.npmjs.org/dom-accessibility-api/"
+                    "-/dom-accessibility-api-0.5.16.tgz"
+                ),
+                "dev": True,
                 "peer": True,
             },
         },
     }
+    lock_path = tmp_path / "package-lock.json"
     lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    non_peer_count = sum(
+        1 for k, v in lock["packages"].items()
+        if k != "" and v.get("peer") is not True
+    )
+    peer_count = sum(
+        1 for k, v in lock["packages"].items()
+        if k != "" and v.get("peer") is True
+    )
+    total = non_peer_count + peer_count
 
     called = False
 
@@ -1653,21 +1705,18 @@ async def test_npm_audit_passes_sentinelayer_web_lockfile(
     ) -> CommandResult:
         nonlocal called
         called = True
-        # Realistic audit metadata matching the lockfile:
-            # non-peer deps: example(1) + other(1) = 2
-        # peer deps: dev-lib is peer:true = 1 peer
         stdout = json.dumps({
             "auditReportVersion": 2,
             "vulnerabilities": {},
             "metadata": {
                 "vulnerabilities": _npm_metadata(critical=0, total=0),
                 "dependencies": {
-                    "prod": 2,
-                        "dev": 0,
+                    "prod": 0,
+                    "dev": non_peer_count,
                     "optional": 0,
-                    "peer": 1,
+                    "peer": peer_count,
                     "peerOptional": 0,
-                        "total": 3,
+                    "total": total,
                 },
             },
         })
@@ -1680,6 +1729,14 @@ async def test_npm_audit_passes_sentinelayer_web_lockfile(
     assert outcome.state == "clean", (
         f"Expected clean but got {outcome.state}: {outcome.reason_code}"
     )
+    assert peer_count == 3, (
+        f"Expected 3 peer:true entries, got {peer_count}"
+    )
+    assert non_peer_count == 1, (
+        f"Expected 1 non-peer entry, got {non_peer_count}"
+    )
+
+
 
 
 @pytest.mark.anyio

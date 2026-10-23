@@ -302,6 +302,7 @@ def _parse_npm_vulnerability_count(
     *,
     expected_dependency_count: int,
     expected_peer_count: int = 0,
+    expected_peer_optional_count: int = 0,
 ) -> Optional[int]:
     if not isinstance(payload, dict) or "error" in payload:
         return None
@@ -346,6 +347,8 @@ def _parse_npm_vulnerability_count(
     if dependency_counts["total"] - dependency_counts["peer"] - dependency_counts["peerOptional"] != expected_dependency_count:
         return None
     if dependency_counts["peer"] != expected_peer_count:
+        return None
+    if dependency_counts.get("peerOptional", 0) != expected_peer_optional_count:
         return None
 
     records = payload.get("vulnerabilities")
@@ -830,6 +833,7 @@ class _NpmAuditInput:
     dependency_count: int
     registry_origin: str
     peer_count: int
+    peer_optional_count: int
 
 
 def _load_npm_audit_input(
@@ -894,6 +898,7 @@ def _load_npm_audit_input(
     origins: set[str] = set()
     dependency_count = 0
     peer_count = 0
+    peer_optional_count = 0
     for package_path, record in packages.items():
         if package_path == "":
             continue
@@ -939,6 +944,12 @@ def _load_npm_audit_input(
             package_paths.add(package_path)
             peer_count += 1
             continue
+        if record.get("peerOptional") is True:
+            if lock_version < 3:
+                return None
+            package_paths.add(package_path)
+            peer_optional_count += 1
+            continue
         # lockfileVersion 2 strict checks: transitive peer dependency
         # names must be a subset of root declared dependencies, and
         # peerDependenciesMeta must be empty. npm 10+ (lockfileVersion 3)
@@ -956,6 +967,14 @@ def _load_npm_audit_input(
         return None
     if any(f"node_modules/{name}" not in package_paths for name in declared_names):
         return None
+    # lockfileVersion 3: peer:true entries are accepted as valid.
+    # npm 10+ produces peer:true records for transitive peer dependency
+    # chains that may not have a direct peerDependencies reference from
+    # any single package in the lockfile.  The peer count is still validated
+    # against npm audit's reported counters, and every entry's resolved
+    # URL is checked for registry origin, preserving the fail-closed
+    # security model.
+
     # lockfileVersion 3: every non-optional transitive peer must resolve
     # to a locked package entry.  Peer deps marked optional via
     # peerDependenciesMeta are allowed to be absent.
@@ -970,12 +989,28 @@ def _load_npm_audit_input(
             optional = peer_meta.get(peer_name, {})
             if isinstance(optional, dict) and optional.get("optional") is True:
                 continue
-            if f"node_modules/{peer_name}" not in packages:
+            # Resolve peer from ancestor node_modules paths.
+            # Standard flat layout: node_modules/{peer_name}
+            # Nested layout: node_modules/<consumer>/node_modules/{peer_name}
+            if f"node_modules/{peer_name}" in packages:
+                continue
+            consumer_dir = "/".join(package_path.split("/")[:-1])
+            resolved = False
+            # Walk up ancestor paths
+            parts = consumer_dir.split("/")
+            for i in range(len(parts), -1, -1):
+                ancestor = "/".join(parts[:i])
+                ancestor_nm = f"{ancestor}/node_modules/{peer_name}" if ancestor else f"node_modules/{peer_name}"
+                if ancestor_nm in packages:
+                    resolved = True
+                    break
+            if not resolved:
                 return None
     return _NpmAuditInput(
         dependency_count=dependency_count,
         registry_origin=next(iter(origins)),
         peer_count=peer_count,
+        peer_optional_count=peer_optional_count,
     )
 
 
@@ -1280,6 +1315,9 @@ class DepAuditSuite(SecuritySuite):
                                 ),
                                 expected_peer_count=(
                                     audit_input.peer_count
+                                ),
+                                expected_peer_optional_count=(
+                                    audit_input.peer_optional_count
                                 ),
                             ),
                         )
