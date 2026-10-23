@@ -1180,3 +1180,28 @@ def test_pylock_missing_file_not_excluded(tmp_path: Path):
             scan_mode="pr-diff", max_candidates=50,
             dep_audit_evidence=dep_audit_evidence,
         )
+
+
+def test_pylock_txt_not_classified_as_lockfile(tmp_path: Path):
+    """pylock.txt is not a valid pip lockfile format — it must stay as an
+    ordinary review candidate, never excluded by dep_audit_coverage."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "pylock.txt").write_text("some text\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/app.py"}]}
+    changed = ["src/app.py", "pylock.txt"]
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "pip", "applicable": True, "state": "clean"}],
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "pylock.txt" in paths, "pylock.txt must stay as a candidate"
+    assert inventory.policy_excluded == ()

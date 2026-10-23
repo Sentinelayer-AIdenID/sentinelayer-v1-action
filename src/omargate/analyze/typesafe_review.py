@@ -47,7 +47,7 @@ def _is_dep_audit_lockfile(path: str) -> bool:
         if isinstance(entry, tuple):
             prefix, min_len = entry
             if name.startswith(prefix) and len(name) > min_len:
-                if prefix == "pylock." and (name.endswith(".py") or name.endswith(".pyi")):
+                if prefix == "pylock." and (name.endswith(".py") or name.endswith(".pyi") or name.endswith(".txt")):
                     continue
                 return True
         elif name == entry:
@@ -73,7 +73,7 @@ def _lockfile_coverage_receipt(
         return _npm_lockfile_receipt(relative, dep_audit_evidence, absolute_path)
     if name == "Cargo.lock":
         return _cargo_lockfile_receipt(relative, dep_audit_evidence, absolute_path)
-    if name.startswith("pylock.") and len(name) > len("pylock.") and not name.endswith((".py", ".pyi")):
+    if name.startswith("pylock.") and len(name) > len("pylock.") and not name.endswith((".py", ".pyi", ".txt")):
         return _pip_lockfile_receipt(relative, dep_audit_evidence, absolute_path)
     return None
 
