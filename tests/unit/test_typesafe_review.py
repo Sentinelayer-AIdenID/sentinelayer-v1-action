@@ -367,7 +367,7 @@ async def test_policy_cannot_emit_malformed_findings(tmp_path: Path, changes):
 async def test_budget_refusal_happens_before_client_without_clipping(tmp_path: Path):
     inventory = source_inventory(tmp_path, "a" * 24_001 + "\n")
     client = FakeClient()
-    with pytest.raises(TypeSafeReviewIncomplete, match="source_budget_exceeded"):
+    with pytest.raises(TypeSafeReviewIncomplete, match="typed_context_budget_exceeded"):
         await review(tmp_path, inventory, client=client)
     assert client.calls == []
 
@@ -620,7 +620,7 @@ async def test_bound_diff_scanner_context_counts_toward_budget_without_clipping(
     inventory = source_inventory(tmp_path, "before = 1\nresult = before + 2\n")
     context = bound_fixture_context(tmp_path, inventory, scanner_message="x" * 24_001)
     client = MixedFakeClient()
-    with pytest.raises(TypeSafeReviewIncomplete, match="source_budget_exceeded"):
+    with pytest.raises(TypeSafeReviewIncomplete, match="typed_context_budget_exceeded"):
         await review_inventory(
             repo_root=tmp_path, inventory=inventory, policy=MixedFixturePolicy(), client=client,
             model=MODEL, context=context,
@@ -842,3 +842,41 @@ async def test_assessment_includes_policy_excluded_with_lockfile(tmp_path: Path)
         "path": "package-lock.json", "reason": "dep_audit_coverage",
     }
 
+
+
+def test_pylock_pyi_stays_candidate_not_excluded_as_lockfile(tmp_path: Path):
+    """pylock.pyi is a Python stub file, not a lockfile. The pylock. prefix
+    guard must exclude .pyi as well as .py to keep stubs in the review."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "pylock.pyi").write_text("LOCK_VERSION: int = 1\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/pylock.pyi"}]}
+    changed = ["src/pylock.pyi"]
+    dep_audit_evidence = {
+        "outcomes": [{"ecosystem": "pip", "applicable": True, "state": "clean"}],
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "src/pylock.pyi" in paths
+    assert inventory.policy_excluded == ()
+
+
+def test_generated_minified_file_refused_even_when_utf8_valid_and_no_nul(tmp_path: Path):
+    """A .min.js file classified as 'generated' must be refused even when
+    it contains valid UTF-8 and no NUL byte.  The direct-read path must
+    independently classify files, not just check for NUL/encoding."""
+    (tmp_path / "bundle.min.js").write_text("var x=1;var y=2;\n", encoding="utf-8")
+
+    ingest: dict = {"files": []}
+    changed = ["bundle.min.js"]
+
+    with pytest.raises(TypeSafeReviewIncomplete, match="unsupported_source_type"):
+        build_inventory(
+            repo_root=tmp_path, ingest=ingest, changed_files=changed,
+            scan_mode="pr-diff", max_candidates=50,
+        )

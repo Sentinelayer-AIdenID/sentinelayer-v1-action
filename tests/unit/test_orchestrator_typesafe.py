@@ -1850,3 +1850,66 @@ async def test_completed_typed_p0_survives_writer_failure_without_a_new_decision
         {"warnings": result.warnings, "usage": result.llm_usage}
     )
     assert source_marker not in capsys.readouterr().err
+
+
+@pytest.mark.anyio
+async def test_pr_with_tests_and_lockfile_reaches_client_and_routes_exclusion(tmp_path, monkeypatch):
+    """Orchestrator regression for the original ticket: a PR with source + tests
+    + a dep-audit-covered lockfile must attempt the typed client, include the
+    test file as a candidate, and record the lockfile in the assessment's
+    policy_excluded.  Fails before the fix: source_outside_inventory on tests."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_main.py").write_text("def test_x(): assert True\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/main.py"}], "stats": {"total_files": 1, "in_scope_files": 1}}
+    monkeypatch.setattr(module, "run_ingest", lambda *_args, **_kwargs: copy.deepcopy(ingest))
+
+    instance, _, _ = orchestrator(tmp_path, monkeypatch, fallback=False, run_harness=False)
+    client = FixtureClient()
+    monkeypatch.setattr(module, "TypeSafeClient", lambda *args, **kwargs: client)
+    monkeypatch.setattr(module, "load_policy", lambda *_args: FixturePolicy())
+
+    dep_audit_evidence = {
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+    }
+
+    result = await instance._run_typesafe_analysis(
+        ingest=ingest,
+        changed_files=["src/main.py", "tests/test_main.py", "package-lock.json"],
+        scan_mode="pr-diff",
+        deterministic_findings=[finding()],
+        dep_audit_evidence=dep_audit_evidence,
+        diff_content=(
+            "diff --git a/src/main.py b/src/main.py\n"
+            "--- a/src/main.py\n"
+            "+++ b/src/main.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+x = 1\n"
+            "diff --git a/tests/test_main.py b/tests/test_main.py\n"
+            "--- /dev/null\n"
+            "+++ b/tests/test_main.py\n"
+            "@@ -0,0 +1 @@\n"
+            "+def test_x(): assert True\n"
+        ),
+    )
+
+    assert result.attempted, "typed client must be called"
+    assert client.attempted, "FixtureClient.attempted must be True"
+    assert len(client.calls) >= 1, "client.rate must have been called"
+
+    assessment = (result.usage or {}).get("typesafe_assessment", {})
+    excluded = assessment.get("policy_excluded", [])
+    assert len(excluded) == 1, f"expected 1 policy_excluded entry, got {len(excluded)}"
+    assert excluded[0]["path"] == "package-lock.json"
+    assert excluded[0]["reason"] == "dep_audit_coverage"
+
+    candidate_paths = {
+        c["file_path"] for c in assessment.get("candidates", [])
+    }
+    assert "src/main.py" in candidate_paths
+    assert "tests/test_main.py" in candidate_paths
+    assert "package-lock.json" not in candidate_paths

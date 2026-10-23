@@ -16,6 +16,7 @@ from typing import Any, Protocol
 
 from ..intent_identity import intent_model_reference, redact_intent_pin
 from ..redaction import redact_secret_source, sanitize_public_error
+from ..ingest.file_classifier import classify_file
 from .typesafe_client import (
     ChoiceAnswer,
     TypeSafeClient,
@@ -65,7 +66,7 @@ def _is_dep_audit_lockfile(path: str) -> bool:
         if isinstance(entry, tuple):
             prefix, min_len = entry
             if name.startswith(prefix) and len(name) > min_len:
-                if prefix == "pylock." and name.endswith(".py"):
+                if prefix == "pylock." and (name.endswith(".py") or name.endswith(".pyi")):
                     continue
                 return True
         elif name == entry:
@@ -84,7 +85,7 @@ def _lockfile_coverage_receipt(
     name = path.rsplit("/", 1)[-1]
     ecosystem = _DEP_AUDIT_ECOSYSTEM_FOR_PATH.get(name)
     if ecosystem is None:
-        if name.startswith("pylock.") and len(name) > len("pylock.") and not name.endswith(".py"):
+        if name.startswith("pylock.") and len(name) > len("pylock.") and not name.endswith(".py") and not name.endswith(".pyi"):
             ecosystem = "pip"
         else:
             return None
@@ -249,6 +250,9 @@ def build_inventory(
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             raise TypeSafeReviewIncomplete("unsupported_source_encoding") from None
+        classification = classify_file(relative)
+        if classification.category == "generated":
+            raise TypeSafeReviewIncomplete("unsupported_source_type")
         if _is_dep_audit_lockfile(relative):
             receipt = _lockfile_coverage_receipt(relative, dep_audit_evidence)
             if receipt is not None:
@@ -363,7 +367,7 @@ async def review_inventory(
     }
     # Conservative byte budgets supplement server token limits; nothing is clipped.
     if len(json.dumps(state, ensure_ascii=False).encode("utf-8")) > MAX_STATE_BYTES:
-        raise TypeSafeReviewIncomplete("source_budget_exceeded")
+        raise TypeSafeReviewIncomplete("typed_context_budget_exceeded")
     request_bytes = json.dumps({"state": state, "questions": plan.questions}, ensure_ascii=False).encode("utf-8")
     if len(request_bytes) > 48_000:
         raise TypeSafeReviewIncomplete("typed_question_budget_exceeded")
