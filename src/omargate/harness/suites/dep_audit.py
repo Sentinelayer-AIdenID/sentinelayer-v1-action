@@ -1083,6 +1083,22 @@ def _load_npm_audit_input(
                     break
             if not resolved:
                 return None
+    # lockfileVersion 3: validate root peerDependencies too.
+    # The loop above skips the root record (package_path == ""),
+    # so required root peers can escape the coverage check.
+    # Root peers declared in both package.json and the lockfile
+    # root record must resolve to a validated lock entry; only
+    # optional peers (per peerDependenciesMeta) may be absent.
+    if lock_version == 3:
+        root_peers = _dependency_mapping(root_record, "peerDependencies")
+        if root_peers:
+            root_peer_meta = root_record.get("peerDependenciesMeta", {})
+            for peer_name in root_peers:
+                optional = root_peer_meta.get(peer_name, {})
+                if isinstance(optional, dict) and optional.get("optional") is True:
+                    continue
+                if f"node_modules/{peer_name}" not in packages:
+                    return None
     return _NpmAuditInput(
         dependency_count=dependency_count,
         registry_origin=next(iter(origins)),

@@ -1584,20 +1584,24 @@ async def test_all_nonapplicable_ecosystems_emit_complete_exact_evidence(
 
 
 @pytest.mark.anyio
-async def test_npm_audit_passes_sentinelayer_web_lockfile(
+async def test_npm_audit_passes_unreferenced_peer_true_chain(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reproduces the exact pattern that tripped unsafe_lockfile: a v3
-    lockfile with peer:true entries that are not directly referenced
-    by any package's peerDependencies.  In npm 10+ lockfileVersion 3
-    output, transitive peer chains produce unreferenced peer:true
-    records.  The gate must accept these as valid.
+    """v3 lockfiles with unreferenced peer:true transitive chains must
+    be accepted.  In npm 10+ lockfileVersion 3 output, transitive peer
+    chains produce peer:true records with no direct peerDependencies
+    reference from any consumer package (e.g. @testing-library/dom
+    pulls in @types/aria-query and dom-accessibility-api as peer:true
+    children).  The gate must resolve these transitively and accept them.
 
-    Uses a faithful fixture extracted from sentinelayer-web
-    package-lock.json capturing the @testing-library/dom peer chain
-    pattern (peer:true entries with unreferenced peer:true children
-    such as @types/aria-query and dom-accessibility-api)."""
+    This fixture captures the @testing-library/dom peer chain pattern
+    observed in sentinelayer-web.  The original unsafe_lockfile was
+    triggered by a second, independent issue: root peerDependenciesMeta
+    keys in the lockfile absent from package.json (covered by
+    test_v3_rejects_root_peer_metadata_not_in_package_json).  A full
+    end-to-end regression with the actual web lockfile requires the
+    sentinelayer-web repo workspace (not available in this box)."""
 
     # Faithful fixture extracted from sentinelayer-web package-lock.json:
     # - root devDependencies -> @testing-library/react
@@ -2412,4 +2416,137 @@ async def test_conflicting_root_peer_metadata_value_rejected(
     )
     assert outcome.state == "indeterminate", (
         f"Expected indeterminate but got {outcome.state}: {outcome.reason_code}"
+    )
+
+
+@pytest.mark.anyio
+async def test_v3_rejects_unresolved_required_root_peer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A required root peer (not marked optional in peerDependenciesMeta)
+    must resolve to a lockfile entry.  lockfileVersion 3 root records
+    may carry peerDependencies; the gate must validate that each
+    required peer has a corresponding packages entry, not only check
+    transitive (non-root) peer resolution."""
+    package = {
+        "name": "test-project",
+        "version": "1.0.0",
+        "peerDependencies": {"react": ">=18.0.0"},
+        "peerDependenciesMeta": {"react": {"optional": False}},
+    }
+    pkg_path = tmp_path / "package.json"
+    pkg_path.write_text(json.dumps(package), encoding="utf-8")
+
+    # react is a required root peer but absent from packages — must reject
+    lock = {
+        "name": "test-project",
+        "version": "1.0.0",
+        "lockfileVersion": 3,
+        "packages": {
+            "": {
+                "name": "test-project",
+                "version": "1.0.0",
+                "peerDependencies": {"react": ">=18.0.0"},
+                "peerDependenciesMeta": {"react": {"optional": False}},
+            },
+            "node_modules/lodash": {
+                "version": "4.17.21",
+                "resolved": (
+                    "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"
+                ),
+            },
+        },
+    }
+    lock_path = tmp_path / "package-lock.json"
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    called = False
+
+    async def _should_not_run(*_args: object, **_kwargs: object) -> CommandResult:
+        nonlocal called
+        called = True
+        raise AssertionError("unsafe lockfile must not spawn audit")
+
+    monkeypatch.setattr(dep_audit, "run_command", _should_not_run)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is False, (
+        "npm audit must not be spawned for a lockfile with an "
+        "unresolved required root peer"
+    )
+    assert outcome.reason_code == "unsafe_lockfile", (
+        f"Expected unsafe_lockfile but got {outcome.reason_code}"
+    )
+
+
+@pytest.mark.anyio
+async def test_v3_accepts_optional_root_peer_without_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An optional root peer does not need a packages entry.
+    lockfileVersion 3 root records may carry peerDependencies with
+    corresponding peerDependenciesMeta marking them optional; these
+    must be allowed to be absent."""
+    package = {
+        "name": "test-project",
+        "version": "1.0.0",
+        "peerDependencies": {"typescript": ">=5.0.0"},
+        "peerDependenciesMeta": {"typescript": {"optional": True}},
+    }
+    pkg_path = tmp_path / "package.json"
+    pkg_path.write_text(json.dumps(package), encoding="utf-8")
+
+    lock = {
+        "name": "test-project",
+        "version": "1.0.0",
+        "lockfileVersion": 3,
+        "packages": {
+            "": {
+                "name": "test-project",
+                "version": "1.0.0",
+                "peerDependencies": {"typescript": ">=5.0.0"},
+                "peerDependenciesMeta": {"typescript": {"optional": True}},
+            },
+            "node_modules/lodash": {
+                "version": "4.17.21",
+                "resolved": (
+                    "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"
+                ),
+            },
+        },
+    }
+    lock_path = tmp_path / "package-lock.json"
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    called = False
+
+    async def _fake_run_command(
+        *_args: object, **_kwargs: object
+    ) -> CommandResult:
+        nonlocal called
+        called = True
+        stdout = json.dumps({
+            "auditReportVersion": 2,
+            "vulnerabilities": {},
+            "metadata": {
+                "vulnerabilities": _npm_metadata(critical=0, total=0),
+                "dependencies": {
+                    "prod": 0, "dev": 1, "optional": 0,
+                    "peer": 0, "peerOptional": 0, "total": 1,
+                },
+            },
+        })
+        return _result(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(dep_audit, "run_command", _fake_run_command)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is True, (
+        "npm audit must be spawned for a valid lockfile with "
+        "optional root peer absent"
+    )
+    assert outcome.state == "clean", (
+        f"Expected clean but got {outcome.state}: {outcome.reason_code}"
     )
