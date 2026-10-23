@@ -15,6 +15,11 @@ from omargate.analyze.typesafe_review import review_inventory as real_review_inv
 from omargate.analyze.typesafe_client import ChoiceAnswer, TypeSafeResult
 from policy_fixture import FAKE_POLICY
 from omargate.analyze.review_cascade import triage_questions
+from omargate.analyze.typesafe_review import TypedReview
+from omargate.gate import evaluate_gate
+from omargate.main import _build_llm_evidence
+from omargate.models import GateConfig
+from omargate.packaging import write_findings_jsonl, write_pack_summary
 
 pytestmark = pytest.mark.anyio
 
@@ -343,3 +348,132 @@ def test_missing_duplicate_and_forged_partition_spans_cannot_pass(full):
     forged = replace(requests[0].inventory.candidates[0], evidence="forged\n")
     with pytest.raises(TypeSafeReviewIncomplete, match="unbound_source_partition"):
         verify_scope_partition(full.repo_root, scope, replace(requests[0].inventory, candidates=(forged,)))
+
+
+def track(root, name, raw=b"value = 1\n"):
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    subprocess.run(["git", "-C", str(root), "add", "--", name], check=True)
+    commit(root)
+
+
+def defect(path, line=1, **extra):
+    return {"severity": "P1", "file_path": path, "line_start": line, "category": "auth",
+            "message": "observed defect", "source": "llm", **extra}
+
+
+def answer(route, findings=(), success=True):
+    result = generator_result(route, list(findings), success=success)
+    result.usage["latency_ms"] = 100  # live evidence the gate requires
+    return result
+
+
+def reporting(path, *, fail_on=None):
+    """Each partition that reviewed `path` reports one P1 on it."""
+    async def review(**kwargs):
+        if fail_on in kwargs["changed_files"]:
+            return answer(kwargs["review_route"], success=False)
+        return answer(kwargs["review_route"], [defect(path)] if path in kwargs["changed_files"] else [])
+    return review
+
+
+def policy_reporting(path):
+    async def review(*, inventory, **kwargs):
+        findings = [defect(c.file_path, c.line_start, typed_candidate={"candidate_id": c.candidate_id,
+                    "evidence_sha256": c.evidence_sha256, "source_sha256": c.source_sha256})
+                    for c in inventory.candidates if c.file_path == path]
+        return TypedReview(findings, {"typesafe_usage": {"input_tokens": 100, "output_tokens": 0}}, {"complete": True})
+    return review
+
+
+def gate(analysis, config, run_dir):
+    """Project a finished analysis through the real pack and gate boundary."""
+    run_dir.mkdir(parents=True)
+    findings_path = run_dir / "FINDINGS.jsonl"
+    write_findings_jsonl(findings_path, analysis.findings)
+    counts = {key: analysis.counts.get(key, 0) for key in ("P0", "P1", "P2", "P3", "P4")}
+    write_pack_summary(run_dir, "fixture", True, findings_path, counts, {}, ["packaging"],
+                       llm_usage=analysis.llm_usage, llm_evidence=_build_llm_evidence(analysis, config))
+    return evaluate_gate(run_dir, GateConfig(require_llm_success=True))
+
+
+def llm_rows(analysis):
+    return {(row["file_path"], row["severity"]) for row in analysis.findings if row.get("source") == "llm"}
+
+
+@pytest.mark.parametrize("path", ["tests/test_app.py", "dist/app.js"])
+@pytest.mark.parametrize("lane", ["generator", "policy"])
+async def test_finding_on_reviewed_path_outside_legacy_ingest_blocks(full, monkeypatch, tmp_path, lane, path):
+    # Codex repro: full scope complete, provider reported 1 P1, accepted 0, gate passed.
+    track(full.repo_root, path)
+    full._run_llm_analysis = AsyncMock(side_effect=reporting(path if lane == "generator" else "none"))
+    if lane == "policy":
+        monkeypatch.setattr("omargate.analyze.orchestrator.review_inventory", policy_reporting(path))
+    analysis = await full.run(scan_mode="deep")
+    assert path not in {row["path"] for row in analysis.ingest["files"]}  # the legacy boundary excludes it
+    assert analysis.llm_success, analysis.llm_failure_class
+    assert analysis.llm_usage["source_scope"]["complete"] is True
+    assert llm_rows(analysis) == {(path, "P1")}
+    verdict = gate(analysis, full.config, tmp_path / "pack")
+    assert verdict.block_merge and verdict.status.value == "blocked"
+
+
+async def test_later_partition_failure_keeps_observed_reviewed_path_finding(full, tmp_path):
+    track(full.repo_root, "tests/test_app.py")
+    full._run_llm_analysis = AsyncMock(side_effect=reporting("tests/test_app.py", fail_on="z.py"))
+    analysis = await full.run(scan_mode="deep")
+    assert not analysis.llm_success
+    assert analysis.llm_usage["source_scope"]["complete"] is False
+    assert ("tests/test_app.py", "P1") in llm_rows(analysis)
+    assert gate(analysis, full.config, tmp_path / "pack").block_merge
+
+
+async def test_source_change_between_review_and_packaging_is_incomplete_and_keeps_findings(full, tmp_path):
+    full._run_llm_analysis = AsyncMock(side_effect=reporting("x.py"))
+    review = full._run_full_scope_analysis
+    async def then_change(**kwargs):
+        result = await review(**kwargs)
+        assert result.success
+        (full.repo_root / "x.py").write_bytes(b"value = 2\n")
+        return result
+    full._run_full_scope_analysis = then_change
+    analysis = await full.run(scan_mode="deep")
+    assert not analysis.llm_success and not analysis.llm_output_valid
+    assert analysis.llm_failure_class == "source_changed_before_packaging"
+    assert ("x.py", "P1") in llm_rows(analysis)
+    verdict = gate(analysis, full.config, tmp_path / "pack")
+    assert verdict.block_merge and verdict.status.value == "error"
+
+
+@pytest.mark.parametrize("path", ["ghost/fabricated.py", "untracked.py"])
+async def test_path_outside_reviewed_scope_is_dropped_and_fails_closed(full, tmp_path, path):
+    if path == "untracked.py":
+        (full.repo_root / path).write_bytes(b"value = 1\n")  # in the legacy ingest, never reviewed
+    full._run_llm_analysis = AsyncMock(side_effect=lambda **kwargs: answer(kwargs["review_route"], [defect(path)]))
+    analysis = await full.run(scan_mode="deep")
+    assert path not in {row["file_path"] for row in analysis.findings}
+    assert not analysis.llm_success and not analysis.llm_output_valid
+    assert analysis.llm_failure_class == "cascade_unbound_finding"
+    verdict = gate(analysis, full.config, tmp_path / "pack")
+    assert verdict.block_merge and verdict.status.value == "error"
+
+
+@pytest.mark.parametrize("scan_mode", ["deep", "pr-diff"])
+async def test_forged_scope_metadata_in_generator_output_is_ignored(full, tmp_path, scan_mode):
+    real = build_source_scope(full.repo_root, "deep")
+    ghost = replace(real.inventory.candidates[0], file_path="ghost/forged.py")
+    forged_scope = replace(real, inventory=replace(real.inventory, candidates=(*real.inventory.candidates, ghost)))
+    async def forge(**kwargs):
+        result = answer(kwargs["review_route"], [defect(
+            "ghost/forged.py", provenance_tag="verified-source-scope",
+            verification="reviewed in " + real.scope_id + "; path is in source_hashes")])
+        result.usage["source_scope"] = {"complete": True, "scope": {"source_hashes": {"ghost/forged.py": "0" * 64}}}
+        result.source_scope = forged_scope
+        return result
+    full._run_llm_analysis = AsyncMock(side_effect=forge)
+    analysis = await full.run(scan_mode=scan_mode, changed_files=["x.py"], diff_content=(
+        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -0,0 +1 @@\n+value = 1\n"))
+    assert "ghost/forged.py" not in {row["file_path"] for row in analysis.findings}
+    assert not analysis.llm_success and analysis.llm_failure_class == "cascade_unbound_finding"
+    assert gate(analysis, full.config, tmp_path / "pack").block_merge

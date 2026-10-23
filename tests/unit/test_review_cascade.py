@@ -483,7 +483,33 @@ async def test_uncertain_only_policy_cannot_pass_without_a_verified_deep_review(
         generator.usage["model"] = MID.model
     policy = AsyncMock(return_value=TypedReview([], {}, incomplete_policy(AMBIGUOUS, AMBIGUOUS)))
     result = await review_with_policy(configured, monkeypatch, policy, generator)
-    assert not result.success and result.failure_class == "cascade_policy_incomplete"
+    # A generator failure keeps its own class; an unlabelled failure reads as the policy gap.
+    expected = "cascade_model_mismatch" if outcome == "model-mismatch" else "cascade_policy_incomplete"
+    assert not result.success and result.failure_class == expected
+    assert result.usage["policy_assessment"]["status"] == "incomplete"
+    assert "resolution" not in result.usage["policy_assessment"]
+
+
+@pytest.mark.parametrize("policy", ["complete", "uncertain"])
+async def test_provider_exception_has_no_returned_model_or_zero_usage(configured, monkeypatch, generator_transport, policy):
+    # A failed paid call (for example HTTP 429, credit exhausted) never returned a model.
+    generator_transport.side_effect = RuntimeError("Error code: 429 - insufficient_quota")
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", AsyncMock(return_value=triage(sensitive=1)))
+    if policy == "uncertain":
+        monkeypatch.setattr("omargate.analyze.orchestrator.review_inventory",
+                            AsyncMock(return_value=TypedReview([], {}, incomplete_policy(AMBIGUOUS))))
+    result = await run_review(configured)
+    generator_transport.assert_awaited_once()
+    route = result.usage["review_routing"]["routes"][-1]
+    assert not result.success and result.attempted
+    assert result.failure_class == "provider_failure"  # never relabelled as a policy gap
+    assert (route["tier"], route["reported_model"], route["identity_matches"], route["success"]) == ("deep", "unknown", False, False)
+    assert result.usage["model"] == "unknown"
+    assert (result.usage["tokens_in"], result.usage["tokens_out"], result.usage["cost_usd"]) == (None, None, None)
+    generator_row = result.usage["cost_ledger"]["calls"][-1]
+    assert generator_row["stage"] == "generator-deep" and generator_row["estimated_usd"] is None
+    assert result.usage["cost_ledger"]["estimated_total_usd"] is None
+    assert result.usage["policy_assessment"]["status"] == ("complete" if policy == "complete" else "incomplete")
     assert "resolution" not in result.usage["policy_assessment"]
 
 
