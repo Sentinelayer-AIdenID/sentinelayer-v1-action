@@ -738,18 +738,27 @@ def test_lockfile_stays_candidate_without_dep_audit(tmp_path: Path):
 
 def test_src_and_tests_reviewed_lockfile_excluded(tmp_path: Path):
     """Regression for the ticket scenario: source and test files are reviewed,
-    lockfile is visibly excluded. Verifies the src + tests + lockfile routing
-    case that the original tests did not exercise."""
+    lockfile is visibly excluded via dep_audit_coverage. Verifies the src +
+    tests + lockfile routing case and confirms policy_excluded is populated."""
+    import hashlib
     (tmp_path / "src").mkdir()
     (tmp_path / "tests").mkdir()
     (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
     (tmp_path / "tests" / "test_main.py").write_text("def test_x(): assert True\n", encoding="utf-8")
-    (tmp_path / "poetry.lock").write_text('[[package]]\nname = "requests"\n', encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
 
+    real_hash = hashlib.sha256((tmp_path / "package-lock.json").read_bytes()).hexdigest()
     ingest = {"files": [{"path": "src/main.py"}]}
-    changed = ["src/main.py", "tests/test_main.py", "poetry.lock"]
+    changed = ["src/main.py", "tests/test_main.py", "package-lock.json"]
     dep_audit_evidence = {
-        "outcomes": [{"ecosystem": "pip", "applicable": True, "state": "clean"}],
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": real_hash,
+            "outcome": {"state": "clean"},
+        }]},
     }
 
     inventory = build_inventory(
@@ -760,8 +769,8 @@ def test_src_and_tests_reviewed_lockfile_excluded(tmp_path: Path):
     paths = {c.file_path for c in inventory.candidates}
     assert "src/main.py" in paths
     assert "tests/test_main.py" in paths
-    assert "poetry.lock" in paths, "poetry.lock is not audited by dep_audit.py — must stay as candidate"
-    assert inventory.policy_excluded == ()
+    assert "package-lock.json" not in paths, "audited lockfile must be excluded from candidates"
+    assert inventory.policy_excluded == (("package-lock.json", "dep_audit_coverage"),)
 
 
 def test_lockfile_without_applicable_audit_stays_candidate(tmp_path: Path):
