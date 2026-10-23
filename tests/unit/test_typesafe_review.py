@@ -367,7 +367,7 @@ async def test_policy_cannot_emit_malformed_findings(tmp_path: Path, changes):
 async def test_budget_refusal_happens_before_client_without_clipping(tmp_path: Path):
     inventory = source_inventory(tmp_path, "a" * 24_001 + "\n")
     client = FakeClient()
-    with pytest.raises(TypeSafeReviewIncomplete, match="typed_context_budget_exceeded"):
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_budget_exceeded"):
         await review(tmp_path, inventory, client=client)
     assert client.calls == []
 
@@ -620,7 +620,7 @@ async def test_bound_diff_scanner_context_counts_toward_budget_without_clipping(
     inventory = source_inventory(tmp_path, "before = 1\nresult = before + 2\n")
     context = bound_fixture_context(tmp_path, inventory, scanner_message="x" * 24_001)
     client = MixedFakeClient()
-    with pytest.raises(TypeSafeReviewIncomplete, match="typed_context_budget_exceeded"):
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_budget_exceeded"):
         await review_inventory(
             repo_root=tmp_path, inventory=inventory, policy=MixedFixturePolicy(), client=client,
             model=MODEL, context=context,
@@ -677,15 +677,36 @@ async def test_policy_prose_reuses_existing_redactor_with_bound_source_and_verdi
     assert finding["model_source"] == intent_model_reference(MODEL)
     assert result.assessment["source_hashes"] == dict(inventory.source_hashes)
 
+# --- Tests added for fix: lockfile exclusion via dep_audit receipts (ticket 78efd938) ---
+
+def test_lockfile_excluded_with_dep_audit_coverage(tmp_path: Path):
+    """When dep_audit_evidence confirms coverage for a lockfile, it goes to
+    policy_excluded rather than the candidate list. The file is recognized
+    but not reviewed by the LLM — the dependency audit already covers it."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("answer = 42\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "package-lock.json"]
+    dep_audit_evidence = {
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "src/main.py" in paths
+    assert "package-lock.json" not in paths, "lockfile with dep_audit coverage must be excluded"
+    assert inventory.policy_excluded == (("package-lock.json", "dep_audit_coverage"),)
 
 
-# --- Tests added for fix: remove lockfile pre-exclusion (ticket 78efd938) ---
-
-def test_lockfile_is_ordinary_review_candidate(tmp_path: Path):
-    """Lockfiles are now ordinary review candidates — they pass through the
-    same size/encoding/path checks as any other changed text file. The
-    dep_audit suite does not provide equivalent coverage, so build_inventory
-    must not pre-exclude them."""
+def test_lockfile_stays_candidate_without_dep_audit(tmp_path: Path):
+    """Without dep_audit_evidence, a lockfile stays as an ordinary candidate.
+    This is the fail-safe: no evidence means no exclusion."""
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main.py").write_text("answer = 42\n", encoding="utf-8")
     (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
@@ -698,43 +719,66 @@ def test_lockfile_is_ordinary_review_candidate(tmp_path: Path):
         scan_mode="pr-diff", max_candidates=50,
     )
     paths = {c.file_path for c in inventory.candidates}
-    assert "package-lock.json" in paths
+    assert "package-lock.json" in paths, "lockfile without dep_audit must be a candidate"
     assert "src/main.py" in paths
     assert inventory.policy_excluded == ()
 
 
-def test_all_lockfile_types_are_candidates(tmp_path: Path):
-    """Every lockfile type that dep_audit.py names is now an ordinary review
-    candidate. pylock.* files were wrongly excluded because they were matched
-    by a prefix that also matches ordinary source (src/pylock.py)."""
+def test_src_and_tests_reviewed_lockfile_excluded(tmp_path: Path):
+    """Regression for the ticket scenario: source and test files are reviewed,
+    lockfile is visibly excluded. Verifies the src + tests + lockfile routing
+    case that the original tests did not exercise."""
     (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
     (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
-
-    lockfiles = [
-        "package-lock.json", "npm-shrinkwrap.json",
-        "Pipfile.lock", "poetry.lock", "uv.lock", "pdm.lock",
-        "Cargo.lock", "pylock.toml",
-    ]
-    for name in lockfiles:
-        (tmp_path / name).write_text('{"key": "value"}\n', encoding="utf-8")
+    (tmp_path / "tests" / "test_main.py").write_text("def test_x(): assert True\n", encoding="utf-8")
+    (tmp_path / "poetry.lock").write_text('[[package]]\nname = "requests"\n', encoding="utf-8")
 
     ingest = {"files": [{"path": "src/main.py"}]}
-    changed = ["src/main.py"] + lockfiles
+    changed = ["src/main.py", "tests/test_main.py", "poetry.lock"]
+    dep_audit_evidence = {
+        "outcomes": [{"ecosystem": "pip", "applicable": True, "state": "clean"}],
+    }
 
     inventory = build_inventory(
         repo_root=tmp_path, ingest=ingest, changed_files=changed,
-        scan_mode="pr-diff", max_candidates=200,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
     )
     paths = {c.file_path for c in inventory.candidates}
-    for name in lockfiles:
-        assert name in paths, f"{name} should be a review candidate"
+    assert "src/main.py" in paths
+    assert "tests/test_main.py" in paths
+    assert "poetry.lock" not in paths
+    assert inventory.policy_excluded == (("poetry.lock", "dep_audit_coverage"),)
+
+
+def test_lockfile_without_applicable_audit_stays_candidate(tmp_path: Path):
+    """A dep_audit outcome marked not-applicable means the audit did not run
+    for that ecosystem; the lockfile must stay as a review candidate."""
+    (tmp_path / "Cargo.lock").write_text("# Cargo.lock\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text("fn main() {}\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/lib.rs"}]}
+    changed = ["src/lib.rs", "Cargo.lock"]
+    dep_audit_evidence = {
+        "outcomes": [{"ecosystem": "cargo", "applicable": False, "state": "not_applicable"}],
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "Cargo.lock" in paths, "not-applicable audit must not exclude lockfile"
     assert inventory.policy_excluded == ()
 
 
 def test_pylock_py_not_excluded(tmp_path: Path):
-    """src/pylock.py is ordinary source, not a lockfile. The old _is_lockfile
-    matched pylock.* which caught src/pylock.py and dropped it from review.
-    Now that check is removed, src/pylock.py must be a normal candidate."""
+    """src/pylock.py is ordinary source, not a lockfile. The prefix guard
+    requires len(name) > 8 for 'pylock.', so 'pylock.py' (8 chars) does
+    not match — it stays as a normal candidate."""
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "pylock.py").write_text("LOCK_VERSION = 1\n", encoding="utf-8")
 
@@ -751,20 +795,28 @@ def test_pylock_py_not_excluded(tmp_path: Path):
 
 
 @pytest.mark.anyio
-async def test_assessment_always_includes_policy_excluded_key(tmp_path: Path):
-    """The assessment output must always include the policy_excluded key so
-    REVIEW_ROUTING.json and the orchestrator's _assess_cascade_policy can
-    emit it. Even when empty it must be present."""
+async def test_assessment_includes_policy_excluded_with_lockfile(tmp_path: Path):
+    """The assessment output includes policy_excluded entries with path and
+    reason so REVIEW_ROUTING.json can show 'covered by dependency audit'."""
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main.py").write_text("answer = 42\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
 
     ingest = {"files": [{"path": "src/main.py"}]}
-    changed = ["src/main.py"]
+    changed = ["src/main.py", "package-lock.json"]
+    dep_audit_evidence = {
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+    }
 
     inventory = build_inventory(
         repo_root=tmp_path, ingest=ingest, changed_files=changed,
         scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
     )
     result = await review(tmp_path, inventory)
     assert "policy_excluded" in result.assessment
-    assert result.assessment["policy_excluded"] == []
+    assert len(result.assessment["policy_excluded"]) == 1
+    assert result.assessment["policy_excluded"][0] == {
+        "path": "package-lock.json", "reason": "dep_audit_coverage",
+    }
+

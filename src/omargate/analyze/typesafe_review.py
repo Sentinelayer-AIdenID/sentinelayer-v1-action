@@ -28,6 +28,82 @@ MAX_STATE_BYTES = 24_000
 LINES_PER_CANDIDATE = 40
 
 
+
+# Lockfile names covered by the dependency audit suite (dep_audit.py).
+# Each entry is either a literal filename or a (prefix, min_length) tuple.
+# Only files matching these and confirmed by an actual audit receipt from
+# the same run may be recorded as policy_excluded; never a blanket ignore.
+_DEP_AUDIT_LOCKFILES: tuple[str | tuple[str, int], ...] = (
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "Pipfile.lock",
+    "poetry.lock",
+    "uv.lock",
+    "pdm.lock",
+    "Cargo.lock",
+    ("pylock.", 7),
+)
+
+_DEP_AUDIT_ECOSYSTEM_FOR_PATH: dict[str, str] = {
+    "package-lock.json": "npm",
+    "npm-shrinkwrap.json": "npm",
+    "pnpm-lock.yaml": "npm",
+    "yarn.lock": "npm",
+    "Pipfile.lock": "pip",
+    "poetry.lock": "pip",
+    "uv.lock": "pip",
+    "pdm.lock": "pip",
+    "Cargo.lock": "cargo",
+}
+
+
+def _is_dep_audit_lockfile(path: str) -> bool:
+    name = path.rsplit("/", 1)[-1]
+    for entry in _DEP_AUDIT_LOCKFILES:
+        if isinstance(entry, tuple):
+            prefix, min_len = entry
+            if name.startswith(prefix) and len(name) > min_len:
+                if prefix == "pylock." and name.endswith(".py"):
+                    continue
+                return True
+        elif name == entry:
+            return True
+    return False
+
+
+def _lockfile_coverage_receipt(
+    path: str, dep_audit_evidence: dict | None,
+) -> str | None:
+    """Return a coverage reason if this lockfile has verified dep-audit
+    coverage from the same run.  None means no verified receipt: the file
+    must stay in the review inventory (fail safe)."""
+    if dep_audit_evidence is None:
+        return None
+    name = path.rsplit("/", 1)[-1]
+    ecosystem = _DEP_AUDIT_ECOSYSTEM_FOR_PATH.get(name)
+    if ecosystem is None:
+        if name.startswith("pylock.") and len(name) > len("pylock.") and not name.endswith(".py"):
+            ecosystem = "pip"
+        else:
+            return None
+    outcomes = dep_audit_evidence.get("outcomes") or ()
+    if not isinstance(outcomes, (list, tuple)):
+        return None
+    for outcome in outcomes:
+        if not isinstance(outcome, dict):
+            continue
+        if outcome.get("ecosystem") != ecosystem:
+            continue
+        if not outcome.get("applicable", True):
+            return None
+        state = outcome.get("state")
+        if state not in ("clean", "vulnerable"):
+            return None
+        return "dep_audit_coverage"
+    return None
+
 class TypeSafeReviewIncomplete(ValueError):
     """A bounded reason, safe to retain without source or credential bodies."""
 
@@ -145,6 +221,7 @@ def _source_path(repo_root: Path, relative: str) -> Path:
 def build_inventory(
     *, repo_root: Path, ingest: dict, changed_files: list[str] | None,
     scan_mode: str, max_candidates: int,
+    dep_audit_evidence: dict | None = None,
 ) -> ReviewInventory:
     """Cover complete changed source files, without silently truncating a scope.
 
@@ -160,7 +237,13 @@ def build_inventory(
         raise TypeSafeReviewIncomplete("invalid_candidate_budget")
     candidates: list[ReviewCandidate] = []
     hashes: list[tuple[str, str]] = []
+    excluded: list[tuple[str, str]] = []
     for relative in sorted(set(changed_files)):
+        if _is_dep_audit_lockfile(relative):
+            receipt = _lockfile_coverage_receipt(relative, dep_audit_evidence)
+            if receipt is not None:
+                excluded.append((relative, receipt))
+                continue
         path = _source_path(repo_root, relative)
         if path.stat().st_size > MAX_FILE_BYTES:
             raise TypeSafeReviewIncomplete("source_budget_exceeded")
@@ -189,7 +272,7 @@ def build_inventory(
             ))
             if len(candidates) > max_candidates:
                 raise TypeSafeReviewIncomplete("candidate_budget_exceeded")
-    return ReviewInventory(tuple(candidates), tuple(hashes), scan_mode)
+    return ReviewInventory(tuple(candidates), tuple(hashes), scan_mode, tuple(excluded))
 
 
 def verify_sources(repo_root: Path, inventory: ReviewInventory) -> None:
@@ -280,7 +363,7 @@ async def review_inventory(
     }
     # Conservative byte budgets supplement server token limits; nothing is clipped.
     if len(json.dumps(state, ensure_ascii=False).encode("utf-8")) > MAX_STATE_BYTES:
-        raise TypeSafeReviewIncomplete("typed_context_budget_exceeded")
+        raise TypeSafeReviewIncomplete("source_budget_exceeded")
     request_bytes = json.dumps({"state": state, "questions": plan.questions}, ensure_ascii=False).encode("utf-8")
     if len(request_bytes) > 48_000:
         raise TypeSafeReviewIncomplete("typed_question_budget_exceeded")

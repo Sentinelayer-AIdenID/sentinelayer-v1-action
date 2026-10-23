@@ -796,6 +796,7 @@ class AnalysisOrchestrator:
                 deterministic_findings=det_findings + harness_findings,
                 quick_learn=quick_learn, spec_context=spec_context,
                 diff_content=diff_content, run_dir=run_dir,
+                dep_audit_evidence=dependency_audit_evidence,
             )
             verified_scope = result.source_scope
             record_llm_result(result)
@@ -810,6 +811,7 @@ class AnalysisOrchestrator:
                     deterministic_findings=det_findings,
                     run_dir=run_dir,
                     diff_content=diff_content,
+                    dep_audit_evidence=dependency_audit_evidence,
                 )
                 record_llm_result(typed_result)
                 if typed_result.warning:
@@ -1074,6 +1076,7 @@ class AnalysisOrchestrator:
         deterministic_findings: List[dict], quick_learn: Optional[QuickLearnSummary],
         spec_context: Optional[dict], diff_content: Optional[str],
         run_dir: Optional[Path],
+        dep_audit_evidence: Optional[dict] = None,
         _source_scope=None, _inventory=None, _typed_context=None,
         _generator_context=None,
     ) -> LLMAnalysisResult:
@@ -1103,6 +1106,7 @@ class AnalysisOrchestrator:
             inventory = _inventory if _inventory is not None else build_inventory(
                 repo_root=self.repo_root, ingest=ingest, changed_files=changed_files,
                 scan_mode=scan_mode, max_candidates=self.config.typesafe_max_candidates,
+                dep_audit_evidence=dep_audit_evidence,
             )
             state = {"candidates": [candidate.state() for candidate in inventory.candidates]}
             if any(candidate["evidence_redacted"] for candidate in state["candidates"]):
@@ -1436,6 +1440,7 @@ class AnalysisOrchestrator:
         self, *, ingest: dict, changed_files: Optional[List[str]], scan_mode: str,
         deterministic_findings: List[dict], run_dir: Optional[Path] = None,
         diff_content: Optional[str] = None,
+        dep_audit_evidence: Optional[dict] = None,
     ) -> LLMAnalysisResult:
         attempted = False
         client = None
@@ -1449,6 +1454,7 @@ class AnalysisOrchestrator:
             inventory = build_inventory(
                 repo_root=self.repo_root, ingest=ingest, changed_files=changed_files,
                 scan_mode=scan_mode, max_candidates=self.config.typesafe_max_candidates,
+                dep_audit_evidence=dep_audit_evidence,
             )
             policy = load_policy(self.config.intent_policy.get_secret_value())
             context = build_typed_context(
