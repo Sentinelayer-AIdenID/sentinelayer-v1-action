@@ -173,7 +173,7 @@ inputs:
     default: 'gpt-5.3-codex'
 
   reasoning_effort:
-    description: 'Reasoning effort for the non-routed LLM call and Codex CLI (none|minimal|low|medium|high|xhigh|max). Empty keeps the provider default. Codex CLI accepts at most xhigh, so max reaches it as xhigh. intent-cascade-v1 routes set their own effort.'
+    description: 'Reasoning effort for the non-routed OpenAI API call and Codex CLI (none|minimal|low|medium|high|xhigh|max). Empty keeps the provider default. Codex CLI accepts at most xhigh, so max reaches it as xhigh. The managed proxy cannot carry an effort and refuses such requests. A configured model_fallback on another provider runs at its own default and is reported under its own model name. intent-cascade-v1 routes set their own effort.'
     required: false
     default: ''
 

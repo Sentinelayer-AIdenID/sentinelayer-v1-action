@@ -546,3 +546,48 @@ async def test_managed_proxy_refuses_a_requested_reasoning_effort(monkeypatch) -
     assert result.success is False
     assert "cannot apply reasoning_effort=max" in (result.error or "")
     assert posts == []
+
+
+@pytest.mark.anyio
+async def test_requested_effort_applies_to_openai_and_a_configured_fallback_is_a_reported_downgrade(monkeypatch) -> None:
+    # Contract (#129, codex-warden review): reasoning_effort applies to the OpenAI API path (and the Codex CLI). A configured
+    # model_fallback on another provider runs at its own default; the result is reported under the model that actually
+    # answered, never under the requested model, so the downgrade is visible rather than silent.
+    from types import SimpleNamespace
+
+    calls: list[tuple[str, str | None]] = []
+
+    class _OpenAIFailing:
+        async def call(self, **kwargs):
+            calls.append(("openai", client.reasoning_effort))
+            raise RuntimeError("primary unavailable")
+
+        def estimate_cost(self, *_args):
+            return 0.0
+
+    class _GeminiAnswering:
+        async def call(self, **kwargs):
+            calls.append(("google", None))
+            return SimpleNamespace(content='{"no_findings": true}', input_tokens=10, output_tokens=5,
+                                   model="gemini-2.5-flash", completed=True, raw_usage=None)
+
+        def estimate_cost(self, *_args):
+            return 0.0
+
+    client = LLMClient(
+        api_key="sk_test_dummy",
+        llm_provider="openai",
+        primary_model="gpt-6-sol",
+        fallback_model="gemini-2.5-flash",
+        google_api_key="g_test_dummy",
+        reasoning_effort="max",
+        max_retries=1,
+    )
+    monkeypatch.setattr(client, "_get_provider", lambda name: _OpenAIFailing() if name == "openai" else _GeminiAnswering())
+
+    result = await client.analyze(system_prompt="s", user_content="u", max_tokens=16384)
+
+    assert calls == [("openai", "max"), ("google", None)]
+    assert result.success is True
+    assert result.usage.model == "gemini-2.5-flash"
+    assert result.usage.provider == "google"
