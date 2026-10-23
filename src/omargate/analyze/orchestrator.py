@@ -173,6 +173,28 @@ _TYPED_CATEGORIES_REQUIRING_GENERATOR = frozenset({
     "other-security",
 })
 
+# Valid but unconfident intent answers; only these may defer to a verified deep review.
+_POLICY_UNCERTAINTY_REASONS = frozenset({
+    "policy_clean_answer_uncertain",
+    "policy_clean_severity_tail_too_high",
+    "policy_risk_answer_ambiguous",
+    "policy_severity_answer_uncertain",
+    "policy_category_answer_uncertain",
+    "policy_support_probability_too_low",
+})
+
+
+def _policy_only_uncertain(assessment: Mapping) -> bool:
+    """True only for a completed policy call whose every unresolved span is uncertain."""
+    unresolved = assessment.get("unresolved_candidates")
+    return (assessment.get("status") == "incomplete"
+            and assessment.get("decision_reason") == "policy_review_incomplete"
+            and "failure_class" not in assessment and "reason_code" not in assessment
+            and type(unresolved) is list and bool(unresolved)
+            and all(type(row) is dict and isinstance(row.get("candidate_id"), str)
+                    and isinstance(row.get("reason"), str)
+                    and row["reason"] in _POLICY_UNCERTAINTY_REASONS for row in unresolved))
+
 
 def _canonical_typed_category(value: object) -> str | None:
     if not isinstance(value, str):
@@ -1167,7 +1189,14 @@ class AnalysisOrchestrator:
                 result.findings = self._merge_findings(previous_findings, result.findings)
                 result.no_findings_reported = False
                 result.reported_finding_count = len(result.findings)
-            if not policy_assessment["complete"] and source_verified:
+            if (not policy_assessment["complete"] and source_verified and route.tier == "deep"
+                    and result.success and result.output_valid and result.attempted and not unexpected_model
+                    and _policy_only_uncertain(policy_assessment)):
+                # Owner decision: uncertain intent answers escalate; the verified
+                # deep review's findings decide (P0/P1 block downstream, clean passes).
+                policy_assessment["resolution"] = "deep_review_decided"
+                policy_assessment["uncertain_candidate_count"] = len(policy_assessment["unresolved_candidates"])
+            elif not policy_assessment["complete"] and source_verified:
                 result.success = False
                 result.output_valid = False
                 result.failure_class = "cascade_policy_incomplete"
