@@ -125,6 +125,23 @@ def _probability(value: Any) -> bool:
     )
 
 
+# TypeSafe reports each Choice probability rounded to hundredths (jev-1.14.0, measured
+# 2026-10-23: a six-option answer summed to 0.99), so an honest distribution can miss
+# 1.0 by half a hundredth per option. Values off that grid were not rounded and keep
+# float tolerance; the bound never exceeds what rounding the reported options explains.
+_REPORTED_STEP = 0.01
+
+
+def is_unit_distribution(probabilities: Mapping[str, float]) -> bool:
+    values = [float(value) for value in probabilities.values()]
+    on_grid = all(
+        math.isclose(value, round(value / _REPORTED_STEP) * _REPORTED_STEP, rel_tol=0.0, abs_tol=1e-9)
+        for value in values
+    )
+    tolerance = _REPORTED_STEP / 2 * len(values) + 1e-9 if on_grid else 1e-6
+    return math.isclose(math.fsum(values), 1.0, rel_tol=0.0, abs_tol=tolerance)
+
+
 def validate_answers(
     answers: dict[str, TypeSafeAnswer], questions: dict[str, dict]
 ) -> dict[str, TypeSafeAnswer]:
@@ -155,10 +172,10 @@ def validate_answers(
         ):
             raise TypeSafeError("TypeSafe response answers were invalid")
         probabilities = {option: float(value) for option, value in answer.probabilities.items()}
-        # The primary docs specify an approximately-unit distribution but no
-        # numeric tolerance. 1e-6 is our wire-rounding tolerance, not calibration.
+        # The primary docs specify an approximately-unit distribution but no numeric
+        # tolerance; the reported rounding is the tolerance, not calibration.
         if (
-            not math.isclose(math.fsum(probabilities.values()), 1.0, rel_tol=0.0, abs_tol=1e-6)
+            not is_unit_distribution(probabilities)
             or probabilities[answer.choice] != max(probabilities.values())
         ):
             raise TypeSafeError("TypeSafe response answers were invalid")

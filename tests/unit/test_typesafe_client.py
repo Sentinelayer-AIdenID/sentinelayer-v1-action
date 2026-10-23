@@ -434,6 +434,39 @@ async def test_malformed_choice_distribution_or_confidence_is_rejected(kind):
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "probabilities",
+    [
+        # jev-1.14.0 reports hundredths; live on 2026-10-23 a six-option answer summed to 0.99
+        {"P0": 0.02, "P1": 0.8, "P2": 0.1, "P3": 0.04, "none": 0.03},
+        {"P0": 0.05, "P1": 0.8, "P2": 0.1, "P3": 0.04, "none": 0.02},
+    ],
+)
+async def test_choice_rounded_to_reported_hundredths_is_accepted_unchanged(probabilities):
+    payload = mixed_projection()
+    payload["answers"]["severity"]["probabilities"] = probabilities
+    result, _ = await evaluate_mixed(payload)
+    assert dict(result.answers["severity"].probabilities) == probabilities
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "probabilities",
+    [
+        # five hundredths can miss unit by at most 0.025; 0.97 is beyond any rounding
+        {"P0": 0.0, "P1": 0.8, "P2": 0.1, "P3": 0.04, "none": 0.03},
+        # off the hundredths grid nothing was rounded, so only float tolerance applies
+        {"P0": 0.039, "P1": 0.8, "P2": 0.1, "P3": 0.04, "none": 0.02},
+    ],
+)
+async def test_choice_sum_beyond_reported_rounding_is_rejected(probabilities):
+    payload = mixed_projection()
+    payload["answers"]["severity"]["probabilities"] = probabilities
+    with pytest.raises(TypeSafeError, match="answers were invalid"):
+        await evaluate_mixed(payload)
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("field", ["probability", "confidence"])
 async def test_nonfinite_choice_values_and_duplicate_option_keys_are_not_accepted(field):
     payload = mixed_projection()

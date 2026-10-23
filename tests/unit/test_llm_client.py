@@ -55,6 +55,21 @@ async def test_llm_client_retry_on_timeout() -> None:
 
 
 @pytest.mark.anyio
+async def test_failed_call_reports_no_returned_model_and_unknown_usage() -> None:
+    """A request that never returned a response has no model identity or zero usage."""
+    client = LLMClient(api_key="test", max_retries=1, allow_fallback=False)
+    create = AsyncMock(side_effect=RuntimeError("Error code: 429 - insufficient_quota"))
+    client._client = SimpleNamespace(responses=SimpleNamespace(create=create))
+
+    result = await client.analyze("system", "user")
+
+    assert result.success is False
+    create.assert_awaited_once()
+    assert result.usage.model == "unknown"
+    assert (result.usage.tokens_in, result.usage.tokens_out, result.usage.cost_usd) == (None, None, None)
+
+
+@pytest.mark.anyio
 async def test_llm_client_fallback_to_secondary_model() -> None:
     """Falls back to secondary model when primary fails."""
     client = LLMClient(api_key="test")

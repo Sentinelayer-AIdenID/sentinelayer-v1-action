@@ -22,14 +22,19 @@ from ...redaction import sanitize_public_error
 @dataclass
 class LLMUsage:
     model: str
-    tokens_in: int
-    tokens_out: int
-    cost_usd: float
+    tokens_in: int | None  # None: no response reported usage, which stays unknown
+    tokens_out: int | None
+    cost_usd: float | None
     latency_ms: int
     provider: str = "openai"
     route: str = "byo"
     fallback_chain: Optional[str] = None
     raw_usage: Optional[dict] = None
+
+
+def _unreturned_usage(provider: str, latency_ms: int = 0, **fields) -> LLMUsage:
+    """A call without a response reports no model, and its billed usage is unknown, not zero."""
+    return LLMUsage("unknown", None, None, None, latency_ms, provider=provider, **fields)
 
 
 @dataclass
@@ -200,32 +205,14 @@ class LLMClient:
         except httpx.TimeoutException:
             return LLMResponse(
                 content="",
-                usage=LLMUsage(
-                    model,
-                    0,
-                    0,
-                    0.0,
-                    int((time.time() - start) * 1000),
-                    provider="openai",
-                    route=route,
-                    fallback_chain=fallback_chain,
-                ),
+                usage=_unreturned_usage("openai", int((time.time() - start) * 1000), route=route, fallback_chain=fallback_chain),
                 success=False,
                 error=f"Managed LLM proxy timeout after {self.timeout}s",
             )
         except Exception as exc:
             return LLMResponse(
                 content="",
-                usage=LLMUsage(
-                    model,
-                    0,
-                    0,
-                    0.0,
-                    int((time.time() - start) * 1000),
-                    provider="openai",
-                    route=route,
-                    fallback_chain=fallback_chain,
-                ),
+                usage=_unreturned_usage("openai", int((time.time() - start) * 1000), route=route, fallback_chain=fallback_chain),
                 success=False,
                 error=f"Managed LLM proxy request failed: {exc}",
             )
@@ -251,16 +238,7 @@ class LLMClient:
                 pass
             return LLMResponse(
                 content="",
-                usage=LLMUsage(
-                    model,
-                    0,
-                    0,
-                    0.0,
-                    latency_ms,
-                    provider="openai",
-                    route=route,
-                    fallback_chain=fallback_chain,
-                ),
+                usage=_unreturned_usage("openai", latency_ms, route=route, fallback_chain=fallback_chain),
                 success=False,
                 error=error_message,
             )
@@ -276,16 +254,7 @@ class LLMClient:
         except Exception as exc:
             return LLMResponse(
                 content="",
-                usage=LLMUsage(
-                    model,
-                    0,
-                    0,
-                    0.0,
-                    latency_ms,
-                    provider="openai",
-                    route=route,
-                    fallback_chain=fallback_chain,
-                ),
+                usage=_unreturned_usage("openai", latency_ms, route=route, fallback_chain=fallback_chain),
                 success=False,
                 error=f"Managed LLM proxy response parsing failed: {exc}",
             )
@@ -364,8 +333,8 @@ class LLMClient:
         fallback_provider = fallback_response.usage.provider
         return "->".join(
             [
-                f"primary:{primary_provider}/{primary_response.usage.model}:capacity_failed",
-                f"fallback:{fallback_provider}/{fallback_response.usage.model}:capacity_failed",
+                f"primary:{primary_provider}/{self.primary_model}:capacity_failed",
+                f"fallback:{fallback_provider}/{self.fallback_model}:capacity_failed",
                 f"managed:openai/{managed_model}:{managed_status}",
             ]
         )
@@ -521,7 +490,7 @@ class LLMClient:
 
         return LLMResponse(
             content="",
-            usage=LLMUsage(model, 0, 0, 0.0, 0, provider=provider_name),
+            usage=_unreturned_usage(provider_name),
             success=False,
             error=last_error,
         )

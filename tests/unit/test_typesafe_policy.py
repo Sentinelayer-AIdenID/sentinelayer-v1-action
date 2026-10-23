@@ -15,6 +15,7 @@ import sys
 import pytest
 
 from omargate.analyze import typesafe_policy as policy_module
+from omargate.analyze.typesafe_client import is_unit_distribution
 from omargate.redaction import sanitize_public_error
 
 POLICY = policy_module.SecurityReviewPolicy(FAKE_POLICY)
@@ -101,6 +102,7 @@ def live_contract_modules(monkeypatch: pytest.MonkeyPatch) -> None:
     review.TypeSafeReviewIncomplete = TypeSafeReviewIncomplete
     client = ModuleType("omargate.analyze.typesafe_client")
     client.ChoiceAnswer = ChoiceAnswer
+    client.is_unit_distribution = is_unit_distribution
     monkeypatch.setitem(sys.modules, review.__name__, review)
     monkeypatch.setitem(sys.modules, client.__name__, client)
 
@@ -554,6 +556,26 @@ def test_malformed_choice_is_incomplete(prefix: str, malformation: str) -> None:
         replace_answer(answers, prefix, malformed),  # type: ignore[arg-type]
     )
     assert_incomplete(decision, f"policy_{prefix}_answer_malformed")
+
+
+@pytest.mark.parametrize("prefix", ["severity", "category"])
+def test_choice_rounded_to_reported_hundredths_is_not_malformed(prefix: str) -> None:
+    # jev-1.14.0 reports hundredths, so a real answer can sum to 0.99 (live, 2026-10-23)
+    candidates = (candidate(),)
+    answers = complete_answers(candidates)
+    _, choice_question = question(candidates, prefix)
+    criteria = choice_question["criteria"]
+    selected = "P1" if prefix == "severity" else "auth"
+    probabilities = {key: 0.0 for key in criteria}
+    probabilities[selected] = 0.95
+    for key in [key for key in criteria if key != selected][:4]:
+        probabilities[key] = 0.01
+    decision = POLICY.decide(
+        candidates,
+        replace_answer(answers, prefix, ChoiceAnswer(selected, probabilities, 0.97)),
+    )
+    assert decision.complete
+    assert [(finding.severity, finding.category) for finding in decision.findings] == [("P1", "auth")]
 
 
 @pytest.mark.parametrize("prefix", ["severity", "category"])
