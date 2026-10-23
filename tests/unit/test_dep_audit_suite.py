@@ -2110,14 +2110,15 @@ async def test_v3_rejects_root_peer_metadata_not_in_package_json(
 
 
 @pytest.mark.anyio
-async def test_nested_optional_peer_is_counted_as_peerOptional(
+async def test_nested_optional_peer_is_counted_as_peer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Nested optional peer dependencies (e.g.
     node_modules/parent/node_modules/@types/react) must be counted as
-    peerOptional when the consumer declares the peer optional via
-    peerDependenciesMeta."""
+    peer, not peerOptional.  npm counts peerOptional only when the
+    record itself carries peerOptional:true; consumer
+    peerDependenciesMeta does not affect the counter."""
     package = {
         "name": "test-nested-peers",
         "version": "1.0.0",
@@ -2156,8 +2157,8 @@ async def test_nested_optional_peer_is_counted_as_peerOptional(
     lock_path.write_text(json.dumps(lock), encoding="utf-8")
 
     non_peer_count = 1  # parent
-    peer_optional_count = 1  # @types/react (nested, optional)
-    total = non_peer_count + peer_optional_count
+    peer_count = 1  # @types/react (nested, optional peer counted as peer)
+    total = non_peer_count + peer_count
 
     called = False
 
@@ -2175,8 +2176,8 @@ async def test_nested_optional_peer_is_counted_as_peerOptional(
                     "prod": non_peer_count,
                     "dev": 0,
                     "optional": 0,
-                    "peer": 0,
-                    "peerOptional": peer_optional_count,
+                    "peer": peer_count,
+                    "peerOptional": 0,
                     "total": total,
                 },
             },
@@ -2190,8 +2191,8 @@ async def test_nested_optional_peer_is_counted_as_peerOptional(
     assert outcome.state == "clean", (
         f"Expected clean but got {outcome.state}: {outcome.reason_code}"
     )
-    assert peer_optional_count == 1, (
-        f"Expected 1 peerOptional entry, got {peer_optional_count}"
+    assert peer_count == 1, (
+        f"Expected 1 peer entry, got {peer_count}"
     )
 
 
@@ -2922,17 +2923,15 @@ async def test_real_pages_tooling_lockfile_full_audit_passes(
 
 
 @pytest.mark.anyio
-async def test_hoisted_peer_optional_detected_by_any_consumer(
+async def test_hoisted_peer_optional_counted_as_peer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A hoisted peer at node_modules/<name> whose consumer is a non-root
-    package that marks it optional must be counted as peerOptional, not peer.
-
-    The peer entry is at the top level (hoisted) so _peer_consumer_path
-    returns the root record, which does not mark it optional.  But a
-    non-root consumer (node_modules/consumer-a) declares it optional via
-    peerDependenciesMeta, and _any_consumer_marks_optional must find it."""
+    """A hoisted peer at node_modules/<name> whose consumer marks it
+    optional via peerDependenciesMeta must be counted as peer, not
+    peerOptional.  npm counts peerOptional only when the record itself
+    carries peerOptional:true; consumer metadata does not affect the
+    counter."""
     package = {
         "name": "audit-test",
         "version": "1.0.0",
@@ -2984,8 +2983,8 @@ async def test_hoisted_peer_optional_detected_by_any_consumer(
                     "prod": 1,
                     "dev": 0,
                     "optional": 0,
-                    "peer": 0,
-                    "peerOptional": 1,
+                    "peer": 1,
+                    "peerOptional": 0,
                     "total": 2,
                 },
             },

@@ -838,65 +838,6 @@ class _NpmAuditInput:
 
 
 
-def _peer_consumer_path(package_path: str, pkg_name: str) -> str:
-    """Return the consumer path for a peer dependency at *package_path*.
-
-    For a top-level peer ``node_modules/<name>`` the consumer is the
-    root (``""``).  For a nested peer
-    ``node_modules/<parent>/node_modules/<name>`` the consumer is
-    ``node_modules/<parent>``.
-    """
-    suffix = "node_modules/" + pkg_name
-    if package_path == suffix:
-        return ""
-    # package_path is validated to start with "node_modules/" and not
-    # contain empty/relative components, so endswith("/"+suffix) must
-    # hold for all nested peer entries.
-    return package_path[: -len("/" + suffix)]
-
-
-def _is_optional_peer(
-    packages: dict[str, object],
-    consumer_path: str,
-    package_name: str,
-) -> bool:
-    """Return True if the consumer at *consumer_path* declares
-    *package_name* as an optional peer via peerDependenciesMeta."""
-    record = packages.get(consumer_path)
-    if isinstance(record, dict):
-        meta = record.get("peerDependenciesMeta")
-        if isinstance(meta, dict):
-            entry = meta.get(package_name)
-            if isinstance(entry, dict) and entry.get("optional") is True:
-                return True
-    return False
-
-def _any_consumer_marks_optional(
-    packages: dict[str, object],
-    package_name: str,
-) -> bool:
-    """Return True if any package in *packages* declares *package_name*
-    as an optional peer via peerDependenciesMeta.  This handles hoisted
-    peers whose physical path is ``node_modules/<name>`` but whose
-    consumer is a non-root package."""
-    for path, record in packages.items():
-        if not path:
-            continue
-        if not isinstance(record, dict):
-            continue
-        peer_deps = record.get("peerDependencies")
-        if not isinstance(peer_deps, dict) or package_name not in peer_deps:
-            continue
-        meta = record.get("peerDependenciesMeta")
-        if not isinstance(meta, dict):
-            continue
-        entry = meta.get(package_name)
-        if isinstance(entry, dict) and entry.get("optional") is True:
-            return True
-    return False
-
-
-
 def _load_npm_audit_input(
     package_json: Path, lockfile: Path
 ) -> _NpmAuditInput | None:
@@ -1024,28 +965,19 @@ def _load_npm_audit_input(
         # lockfileVersion 3 marks peer dependency entries with peer:true.
         # These are not independently resolved; validate provenance above
         # (resolved URL must be registry-origin), then track them in
-        # package_paths but exclude from the dependency count because
-        # npm audit does not report vulnerabilities on peer deps.
+        # package_paths but exclude from the dependency count — npm audit
+        # includes peer records in its bulk payload but does not report
+        # vulnerabilities on them independently.
         # Gate on version: peer:true is a v3+ feature; reject in v2.
         if record.get("peer") is True or record.get("peerOptional") is True:
             if lock_version < 3:
                 return None
             package_paths.add(package_path)
-            # In lockfileVersion 3, a peer dependency may be optional
-            # per the consumer's peerDependenciesMeta even when the
-            # package record carries peer:true (not peerOptional:true).
-            # npm audit reports these as peerOptional, so we must
-            # derive the count from the actual consumer metadata.
-            pkg_name = package_path.rsplit("node_modules/", 1)[-1]
-            consumer_path = _peer_consumer_path(package_path, pkg_name)
-            is_optional = record.get("peerOptional") is True or (
-                lock_version >= 3
-                and (
-                    _is_optional_peer(packages, consumer_path, pkg_name)
-                    or _any_consumer_marks_optional(packages, pkg_name)
-                )
-            )
-            if is_optional:
+            # npm counts a record as peerOptional only when the record
+            # itself carries peerOptional:true — never from consumer
+            # peerDependenciesMeta.  All other peer records (including
+            # optional peers marked by consumers) are counted as peer.
+            if record.get("peerOptional") is True:
                 peer_optional_count += 1
             else:
                 peer_count += 1
