@@ -111,8 +111,11 @@ def _llm_display_identity(analysis, **kwargs) -> tuple[str, str]:
     triage's source_failure_reason when the review was not attempted.
     """
     routing = kwargs.get("routing") if kwargs else None
+    llm_enabled = kwargs.get("llm_enabled", True) if kwargs else True
 
     if not analysis.llm_attempted and not analysis.llm_success:
+        if not llm_enabled:
+            return "disabled", "n/a"
         reason = ""
         if isinstance(routing, dict):
             raw = routing.get("source_failure_reason", "")
@@ -889,6 +892,11 @@ async def async_main() -> int:
                     try:
                         llm_engine_used, llm_model_used = _llm_display_identity(
                             analysis,
+                            llm_enabled=bool(
+                                config.openai_api_key.get_secret_value().strip()
+                                if config.llm_provider == "openai"
+                                else config.typesafe_api_key.get_secret_value().strip()
+                            ),
                             routing=(analysis.llm_usage or {}).get("review_routing"),
                         )
 

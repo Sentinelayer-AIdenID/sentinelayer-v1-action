@@ -293,3 +293,19 @@ def test_refused_review_with_cost_ledger_reports_known_cost() -> None:
     cost, complete = _llm_display_cost(analysis)
     assert cost == 0.042
     assert complete is False  # Incomplete ledger — subtotal only
+
+
+def test_disabled_llm_returns_disabled_state() -> None:
+    """When llm_enabled=False, returns ('disabled', 'n/a') regardless of other fields."""
+    analysis = SimpleNamespace(
+        llm_usage=None, llm_attempted=False, llm_success=False,
+        llm_failure_class=None,
+    )
+    assert _llm_display_identity(analysis, llm_enabled=False) == ("disabled", "n/a")
+
+    # Even with a failure_class, disabled takes precedence
+    analysis2 = SimpleNamespace(
+        llm_usage={"provider": "openai"}, llm_attempted=False, llm_success=False,
+        llm_failure_class="some_failure",
+    )
+    assert _llm_display_identity(analysis2, llm_enabled=False) == ("disabled", "n/a")

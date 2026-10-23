@@ -142,7 +142,7 @@ def test_review_chain_attempted_failed() -> None:
     """Call attempted but provider failure, identity mismatched."""
     kwargs = _base_kwargs()
     kwargs.update(
-        llm_engine="ATTEMPTED-FAILED",
+        llm_engine="openai",
         llm_model="unknown",
         actual_cost_usd=None,
         cost_ledger_complete=False,
@@ -168,7 +168,7 @@ def test_review_chain_attempted_failed() -> None:
     )
     body = render_pr_comment(**kwargs)
 
-    assert "`ATTEMPTED-FAILED` (`unknown`)" in body
+    assert "`openai` (`unknown`)" in body
     assert "**Cost (usage):** unknown (subtotal)" in body
     assert "### Review chain" in body
     assert "     - Attempted: yes, returned `unknown`" in body
