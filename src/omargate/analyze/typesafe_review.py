@@ -41,13 +41,6 @@ _DEP_AUDIT_LOCKFILES: tuple[str | tuple[str, int], ...] = (
     ("pylock.", 7),
 )
 
-_DEP_AUDIT_ECOSYSTEM_FOR_PATH: dict[str, str] = {
-    "package-lock.json": "npm",
-    "npm-shrinkwrap.json": "npm",
-    "Cargo.lock": "cargo",
-}
-
-
 def _is_dep_audit_lockfile(path: str) -> bool:
     name = path.rsplit("/", 1)[-1]
     for entry in _DEP_AUDIT_LOCKFILES:
