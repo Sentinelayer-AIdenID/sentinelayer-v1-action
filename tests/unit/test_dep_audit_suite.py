@@ -1597,9 +1597,14 @@ async def test_npm_audit_passes_unreferenced_peer_true_chain(
 
     This fixture captures the @testing-library/dom peer chain pattern
     observed in sentinelayer-web.  The original unsafe_lockfile was
-    triggered by a second, independent issue: root peerDependenciesMeta
-    keys in the lockfile absent from package.json (covered by
-    test_v3_rejects_root_peer_metadata_not_in_package_json).  A
+    triggered by an independent issue: the ebfcb813 per-package
+    peerDependencies subset check (clause (a)) rejected
+    ``node_modules/@babel/helper-module-transforms`` because it
+    declares ``@babel/core`` as a peerDependency and ``@babel/core``
+    is not in root declared dependencies (covered by
+    test_original_ebfcb813_rejection_reproduced).  The root
+    peerDependenciesMeta rejection path is tested separately in
+    test_v3_rejects_root_peer_metadata_not_in_package_json.  A
     full end-to-end smoke test with the actual web lockfile is at
     test_real_sentinelayer_web_lockfile_passes_audit."""
 
@@ -2564,6 +2569,128 @@ async def test_v3_accepts_optional_root_peer_without_entry(
 #   excludes tests/**, ticket 78efd938).  It is NOT in scope for this PR
 #   (dep_audit lockfile validation) and must be fixed independently.
 #   No severity lowering; this is an evidence-based disposition.
+
+@pytest.mark.anyio
+async def test_original_ebfcb813_rejection_reproduced() -> None:
+    """Reproduce the exact ORIGINAL ebfcb813 rejection against the
+    hash-bound sentinelayer-web fixture (package.json
+    sha256=f565a5c2..., package-lock.json sha256=f1e9c2db...).
+
+    The original gate returned None for any non-root lockfile record
+    with:
+      (a) peerDependencies naming packages not declared at the root
+      (b) a non-empty peerDependenciesMeta on that record
+      (c) peer/peerOptional flags (not handled as valid peer:true)
+
+    The FIRST hit in alphabetical lockfile order is clause (a):
+    ``node_modules/@babel/helper-module-transforms`` declares
+    ``@babel/core`` as a peerDependency, and ``@babel/core`` is not
+    in sentinelayer-web's root dependencies/devDependencies/
+    optionalDependencies.  This single predicate caused the gate
+    to return None → unsafe_lockfile → indeterminate audit."""
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    pkg_path = fixtures / (
+        "package-sentinelayer-web-34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json"
+    )
+    lock_path = fixtures / (
+        "package-lock-sentinelayer-web-"
+        "34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json"
+    )
+
+    package_payload = dep_audit._load_bounded_json_file(
+        pkg_path, dep_audit._MAX_NPM_INPUT_BYTES
+    )
+    lock_payload = dep_audit._load_bounded_json_file(
+        lock_path, dep_audit._MAX_NPM_INPUT_BYTES
+    )
+    packages = lock_payload.get("packages")
+    root_record = packages[""]
+
+    declared_names: set[str] = set()
+    for section in ("dependencies", "devDependencies", "optionalDependencies"):
+        section_deps = dep_audit._dependency_mapping(root_record, section)
+        if isinstance(section_deps, dict):
+            declared_names.update(section_deps)
+
+    assert "@babel/core" not in declared_names, (
+        "precondition: @babel/core must NOT be in root declared deps"
+    )
+
+    # Walk in lockfile key order, reproducing the ORIGINAL un-version-gated
+    # ebfcb813 per-package check: return None for any record with
+    # (a) undeclared peer, (b) non-empty peerDependenciesMeta, or
+    # (c) peer/peerOptional flag.
+    first_hit_path = None
+    first_hit_clause = None
+    first_hit_detail = None
+
+    for package_path, record in packages.items():
+        if package_path == "":
+            continue
+        if not isinstance(record, dict):
+            continue
+
+        peer_deps = (
+            dep_audit._dependency_mapping(record, "peerDependencies")
+            if isinstance(record, dict)
+            else None
+        )
+        peer_meta = (
+            record.get("peerDependenciesMeta", {})
+            if isinstance(record, dict)
+            else None
+        )
+
+        # Clause (c): peer/peerOptional flags (original rejected these)
+        if record.get("peer") is True or record.get("peerOptional") is True:
+            if first_hit_path is None:
+                first_hit_path = package_path
+                first_hit_clause = "c"
+                first_hit_detail = (
+                    f"peer={record.get('peer')}, "
+                    f"peerOptional={record.get('peerOptional')}"
+                )
+
+        # Clause (a): undeclared peer dependency names
+        if peer_deps:
+            undeclared = set(peer_deps) - declared_names
+            if undeclared:
+                if first_hit_path is None:
+                    first_hit_path = package_path
+                    first_hit_clause = "a"
+                    first_hit_detail = sorted(undeclared)
+
+        # Clause (b): non-empty peerDependenciesMeta
+        if isinstance(peer_meta, dict) and peer_meta:
+            if first_hit_path is None:
+                first_hit_path = package_path
+                first_hit_clause = "b"
+                first_hit_detail = sorted(peer_meta.keys())
+
+    # Assert: clause (a) is the first hit, on @babel/helper-module-transforms
+    assert first_hit_clause == "a", (
+        f"Expected clause (a) first hit, got clause ({first_hit_clause})"
+    )
+    assert first_hit_path == (
+        "node_modules/@babel/helper-module-transforms"
+    ), (
+        f"Expected @babel/helper-module-transforms, got {first_hit_path}"
+    )
+    assert first_hit_detail == ["@babel/core"], (
+        f"Expected ['@babel/core'], got {first_hit_detail}"
+    )
+
+    # Now prove the CURRENT (fixed) code accepts the same fixture
+    audit_input = dep_audit._load_npm_audit_input(pkg_path, lock_path)
+    assert audit_input is not None, (
+        "CURRENT _load_npm_audit_input must accept the web lockfile"
+    )
+    assert audit_input.dependency_count == 521
+    assert audit_input.peer_count == 9
+    assert audit_input.peer_optional_count == 0
+    assert audit_input.registry_origin == "https://registry.npmjs.org"
+
+
 @pytest.mark.anyio
 async def test_real_sentinelayer_web_lockfile_passes_audit() -> None:
     """Smoke test: the real sentinelayer-web lockfile (commit 34cd5aa,
@@ -2571,20 +2698,24 @@ async def test_real_sentinelayer_web_lockfile_passes_audit() -> None:
     unreferenced transitive peer chains) must pass _load_npm_audit_input
     without tripping unsafe_lockfile.
 
-    The old gate at ebfcb813 rejected this lockfile at dep_audit.py:1064
-    (per-package peerDependencies subset check): the v2-era rule required
-    every transitive peer dependency name to be a subset of root declared
-    dependencies.  The specific entry that trips it:
-    ``node_modules/@babel/helper-module-transforms`` declares
-    ``@babel/core`` as a peerDependency, but ``@babel/core`` is NOT in
-    sentinelayer-web's root dependencies/devDependencies/optionalDependencies.
-    The v3 fix (0b2a8c0) version-gates that check to lockfileVersion 2
-    only, and also drops the peerDependenciesMeta-empty requirement
-    which was blocking per-package metadata entries.  This lockfile has
-    no root peerDependencies or peerDependenciesMeta, so it does not
-    exercise the root peer validation added in 804e456 / 24715f4; those
-    paths are covered by the dedicated root-peer rejection / acceptance
-    tests below."""
+    The old gate at ebfcb813 rejected this lockfile in
+    _load_npm_audit_input's per-package loop (clause (a)): any
+    non-root record with peerDependencies naming packages not
+    declared at the root returns None.  The first hit is
+    ``node_modules/@babel/helper-module-transforms`` whose
+    ``peerDependencies`` includes ``@babel/core`` — but
+    ``@babel/core`` is NOT in sentinelayer-web's root
+    dependencies/devDependencies/optionalDependencies.
+    The fix version-gates that check to lockfileVersion 2 only
+    (0b2a8c0), and also drops the peerDependenciesMeta-empty
+    requirement (clause (b)) which was blocking per-package
+    metadata entries.  Clause (c) — peer/peerOptional flags — is
+    now handled as a valid peer:true path.  The original rejection
+    is reproduced in test_original_ebfcb813_rejection_reproduced.
+    This lockfile has no root peerDependencies or
+    peerDependenciesMeta, so it does not exercise the root peer
+    validation added in 804e456 / 24715f4; those paths are covered
+    by the dedicated root-peer rejection / acceptance tests below."""
     fixtures = Path(__file__).resolve().parent.parent / "fixtures"
     pkg_path = fixtures / (
         "package-sentinelayer-web-34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json"
