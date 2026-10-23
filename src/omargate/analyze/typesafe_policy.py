@@ -113,7 +113,7 @@ def _choice_evidence(
     answer: object,
     criteria: Mapping[str, str],
 ) -> tuple[_ChoiceEvidence | None, str | None]:
-    from .typesafe_client import ChoiceAnswer
+    from .typesafe_client import ChoiceAnswer, is_unit_distribution
 
     if (
         type(answer) is not ChoiceAnswer
@@ -128,7 +128,7 @@ def _choice_evidence(
     if not all(_is_probability(value) for value in probabilities.values()):
         return None, "malformed_choice_answer"
     normalized = {key: float(probabilities[key]) for key in criteria}
-    if not math.isclose(math.fsum(normalized.values()), 1.0, rel_tol=0.0, abs_tol=1e-6):
+    if not is_unit_distribution(normalized):
         return None, "malformed_choice_answer"
     selected_probability = normalized[answer.choice]
     ordered = sorted(normalized.values(), reverse=True)
