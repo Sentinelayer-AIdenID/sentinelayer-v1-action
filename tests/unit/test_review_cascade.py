@@ -403,6 +403,116 @@ async def test_incomplete_source_policy_keeps_review_unknown_after_clean_deep_re
     assert not result.success and result.failure_class == "cascade_policy_incomplete"
 
 
+AMBIGUOUS = "policy_risk_answer_ambiguous"
+
+
+def incomplete_policy(*reasons, **overrides):
+    ids = [f"candidate-{index}" for index in range(len(reasons))]
+    return {"complete": False, "decision_reason": "policy_review_incomplete",
+            "candidates": [{"candidate_id": candidate_id} for candidate_id in ids],
+            "unresolved_candidates": [{"candidate_id": candidate_id, "reason": reason}
+                                      for candidate_id, reason in zip(ids, reasons)], **overrides}
+
+
+async def review_with_policy(configured, monkeypatch, policy, generator):
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", AsyncMock(return_value=triage()))
+    monkeypatch.setattr("omargate.analyze.orchestrator.review_inventory", policy)
+    configured._run_llm_analysis = AsyncMock(return_value=generator)
+    return await run_review(configured)
+
+
+@pytest.mark.parametrize("severities", [["P1"], []], ids=["deep-p1", "deep-clean"])
+async def test_uncertain_only_policy_lets_successful_deep_review_decide(configured, monkeypatch, severities):
+    # Pilot shape (run 39922752277): two spans the intent model could not call either way.
+    findings = [{"severity": severity, "file_path": "x.py", "line_start": 1, "category": "auth",
+                 "message": "defect", "source": "llm"} for severity in severities]
+    policy = AsyncMock(return_value=TypedReview([], {}, incomplete_policy(AMBIGUOUS, AMBIGUOUS)))
+    result = await review_with_policy(configured, monkeypatch, policy, generator_result(DEEP, findings))
+    assert configured._run_llm_analysis.call_args.kwargs["review_route"] == DEEP
+    assert result.success and result.output_valid and result.failure_class is None
+    assert [(f["severity"], f["review_tier"]) for f in result.findings] == [(s, "deep") for s in severities]
+    guarded = configured._apply_llm_guardrails(llm_findings=result.findings, non_llm_findings=[], ingest={"files": [{"path": "x.py"}]})
+    assert [f["severity"] for f in guarded] == severities  # the deep P1 reaches the gate unchanged
+    assessment = result.usage["policy_assessment"]
+    assert assessment["complete"] is False and assessment["status"] == "incomplete"
+    assert assessment["resolution"] == "deep_review_decided"
+    assert assessment["uncertain_candidate_count"] == 2
+
+
+@pytest.mark.parametrize("assessment", [
+    incomplete_policy(AMBIGUOUS, "policy_risk_answer_malformed"),
+    incomplete_policy("policy_category_answer_malformed", AMBIGUOUS),
+    incomplete_policy("policy_answers_inconsistent"),
+    incomplete_policy("policy_answer_coverage_incomplete"),
+    incomplete_policy("policy_future_reason"),
+    incomplete_policy(),
+    incomplete_policy(AMBIGUOUS, decision_reason="policy_candidate_contract_invalid"),
+    incomplete_policy(AMBIGUOUS, unresolved_candidates=[AMBIGUOUS]),
+    {"complete": False},
+    incomplete_policy(AMBIGUOUS, candidates=[{"candidate_id": ""}],
+                      unresolved_candidates=[{"candidate_id": "", "reason": AMBIGUOUS}]),
+    incomplete_policy(AMBIGUOUS, AMBIGUOUS,
+                      unresolved_candidates=[{"candidate_id": "candidate-0", "reason": AMBIGUOUS}] * 2),
+    incomplete_policy(AMBIGUOUS, candidates=[{"candidate_id": "candidate-other"}]),
+    incomplete_policy(AMBIGUOUS, candidates=None),
+], ids=["mixed-malformed", "malformed-first", "inconsistent", "coverage", "unknown-reason",
+        "empty-unresolved", "contract-reason", "malformed-rows", "no-evidence",
+        "empty-id", "duplicate-id", "id-outside-candidates", "no-candidate-set"])
+async def test_invalid_policy_evidence_still_fails_closed_after_successful_deep_review(configured, monkeypatch, assessment):
+    defect = {"severity": "P1", "file_path": "x.py", "line_start": 1, "category": "auth", "message": "defect", "source": "llm"}
+    policy = AsyncMock(return_value=TypedReview([], {}, assessment))
+    result = await review_with_policy(configured, monkeypatch, policy, generator_result(DEEP, [defect]))
+    assert not result.success and result.failure_class == "cascade_policy_incomplete"
+    assert "resolution" not in result.usage["policy_assessment"]
+
+
+async def test_failed_policy_call_still_fails_closed_after_successful_deep_review(configured, monkeypatch):
+    from omargate.analyze.typesafe_review import TypeSafeReviewIncomplete
+    policy = AsyncMock(side_effect=TypeSafeReviewIncomplete("typed_review_incomplete"))
+    result = await review_with_policy(configured, monkeypatch, policy, generator_result(DEEP))
+    assessment = result.usage["policy_assessment"]
+    assert not result.success and result.failure_class == "cascade_policy_incomplete"
+    assert assessment["status"] == "unknown" and assessment["reason_code"] == "typed_review_incomplete"
+    assert "resolution" not in assessment
+
+
+@pytest.mark.parametrize("outcome", ["deep-failed", "model-mismatch"])
+async def test_uncertain_only_policy_cannot_pass_without_a_verified_deep_review(configured, monkeypatch, outcome):
+    generator = generator_result(DEEP, success=outcome != "deep-failed")
+    if outcome == "model-mismatch":
+        generator.usage["model"] = MID.model
+    policy = AsyncMock(return_value=TypedReview([], {}, incomplete_policy(AMBIGUOUS, AMBIGUOUS)))
+    result = await review_with_policy(configured, monkeypatch, policy, generator)
+    # A generator failure keeps its own class; an unlabelled failure reads as the policy gap.
+    expected = "cascade_model_mismatch" if outcome == "model-mismatch" else "cascade_policy_incomplete"
+    assert not result.success and result.failure_class == expected
+    assert result.usage["policy_assessment"]["status"] == "incomplete"
+    assert "resolution" not in result.usage["policy_assessment"]
+
+
+@pytest.mark.parametrize("policy", ["complete", "uncertain"])
+async def test_provider_exception_has_no_returned_model_or_zero_usage(configured, monkeypatch, generator_transport, policy):
+    # A failed paid call (for example HTTP 429, credit exhausted) never returned a model.
+    generator_transport.side_effect = RuntimeError("Error code: 429 - insufficient_quota")
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", AsyncMock(return_value=triage(sensitive=1)))
+    if policy == "uncertain":
+        monkeypatch.setattr("omargate.analyze.orchestrator.review_inventory",
+                            AsyncMock(return_value=TypedReview([], {}, incomplete_policy(AMBIGUOUS))))
+    result = await run_review(configured)
+    generator_transport.assert_awaited_once()
+    route = result.usage["review_routing"]["routes"][-1]
+    assert not result.success and result.attempted
+    assert result.failure_class == "provider_failure"  # never relabelled as a policy gap
+    assert (route["tier"], route["reported_model"], route["identity_matches"], route["success"]) == ("deep", "unknown", False, False)
+    assert result.usage["model"] == "unknown"
+    assert (result.usage["tokens_in"], result.usage["tokens_out"], result.usage["cost_usd"]) == (None, None, None)
+    generator_row = result.usage["cost_ledger"]["calls"][-1]
+    assert generator_row["stage"] == "generator-deep" and generator_row["estimated_usd"] is None
+    assert result.usage["cost_ledger"]["estimated_total_usd"] is None
+    assert result.usage["policy_assessment"]["status"] == ("complete" if policy == "complete" else "incomplete")
+    assert "resolution" not in result.usage["policy_assessment"]
+
+
 async def test_private_policy_p4_is_preserved_without_forcing_expensive_review(configured, monkeypatch):
     from pydantic import SecretStr
     data = json.loads(FAKE_POLICY_JSON)

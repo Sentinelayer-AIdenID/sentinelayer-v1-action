@@ -56,7 +56,7 @@ from .typesafe_review import (
     verify_sources,
 )
 from .typesafe_state import build_typed_context
-from .source_scope import build_source_scope, verify_scope_partition, verify_source_scope
+from .source_scope import SourceScope, build_source_scope, verify_scope_partition, verify_source_scope
 from .scope_context import plan_scope_requests, validate_scope_coverage
 from .typesafe_writer import explain_review, WRITER_MODEL
 
@@ -172,6 +172,34 @@ _TYPED_CATEGORIES_REQUIRING_GENERATOR = frozenset({
     "race-condition",
     "other-security",
 })
+
+# Valid but unconfident intent answers; only these may defer to a verified deep review.
+_POLICY_UNCERTAINTY_REASONS = frozenset({
+    "policy_clean_answer_uncertain",
+    "policy_clean_severity_tail_too_high",
+    "policy_risk_answer_ambiguous",
+    "policy_severity_answer_uncertain",
+    "policy_category_answer_uncertain",
+    "policy_support_probability_too_low",
+})
+
+
+def _policy_only_uncertain(assessment: Mapping) -> bool:
+    """True only for a completed policy call whose every unresolved span is uncertain."""
+    unresolved, candidates = assessment.get("unresolved_candidates"), assessment.get("candidates")
+    if type(unresolved) is not list or not unresolved or type(candidates) is not list:
+        return False
+    # Unresolved ids must be distinct, non-empty members of the reviewed candidate set.
+    known = {row["candidate_id"] for row in candidates
+             if type(row) is dict and isinstance(row.get("candidate_id"), str) and row["candidate_id"]}
+    ids = [row.get("candidate_id") if type(row) is dict else None for row in unresolved]
+    return (assessment.get("status") == "incomplete"
+            and assessment.get("decision_reason") == "policy_review_incomplete"
+            and "failure_class" not in assessment and "reason_code" not in assessment
+            and all(isinstance(candidate_id, str) and candidate_id in known for candidate_id in ids)
+            and len(set(ids)) == len(ids)
+            and all(isinstance(row.get("reason"), str)
+                    and row["reason"] in _POLICY_UNCERTAINTY_REASONS for row in unresolved))
 
 
 def _canonical_typed_category(value: object) -> str | None:
@@ -481,6 +509,8 @@ class LLMAnalysisResult:
     reported_finding_count: int = 0
     parse_error_count: int = 0
     failure_class: Optional[str] = None
+    # Set only by the full-source runner; generator output can never supply it.
+    source_scope: SourceScope | None = None
 
 
 class AnalysisOrchestrator:
@@ -757,6 +787,7 @@ class AnalysisOrchestrator:
                     )
 
         typed_result: Optional[LLMAnalysisResult] = None
+        verified_scope: SourceScope | None = None
         cascade = self.config.review_routing == "intent-cascade-v1"
         if cascade and self.allow_llm:
             generator_result_recorded = True
@@ -766,6 +797,7 @@ class AnalysisOrchestrator:
                 quick_learn=quick_learn, spec_context=spec_context,
                 diff_content=diff_content, run_dir=run_dir,
             )
+            verified_scope = result.source_scope
             record_llm_result(result)
             if result.warning:
                 warnings.append(result.warning)
@@ -907,11 +939,21 @@ class AnalysisOrchestrator:
 
         # Step 6: Merge findings
         if not llm_findings_guarded:
+            unbound: list[object] = []
             llm_findings = self._apply_llm_guardrails(
                 llm_findings=llm_findings,
                 non_llm_findings=base_findings,
                 ingest=ingest,
+                source_scope=verified_scope,
+                discarded=unbound,
             )
+            if cascade and unbound:
+                # A finding outside the reviewed boundary is a broken contract, never a silent drop.
+                if llm_success or not llm_failure_class:
+                    llm_failure_class = "cascade_unbound_finding"
+                llm_success = llm_output_valid = False
+                llm_usage = {**(llm_usage or {}), "unbound_finding_count": len(unbound)}
+                warnings.append("Review reported findings outside its verified source boundary; review remains unknown")
         all_findings = self._merge_findings(base_findings, llm_findings)
         add_fingerprints_to_findings(
             all_findings,
@@ -939,6 +981,17 @@ class AnalysisOrchestrator:
         hotspots_with_findings = self._identify_hotspots_with_findings(
             all_findings, ingest.get("hotspots", {})
         )
+
+        if verified_scope is not None:
+            try:
+                verify_source_scope(self.repo_root, verified_scope)
+            except (ValueError, OSError):  # TypeSafeReviewIncomplete is a ValueError
+                # Source changed after review: keep every observed finding, but
+                # the review can no longer claim the bytes being packaged.
+                if llm_success or not llm_failure_class:
+                    llm_failure_class = "source_changed_before_packaging"
+                llm_success = llm_output_valid = False
+                warnings.append("Source changed after review; review remains unknown")
 
         stats = ingest.get("stats", {})
 
@@ -1135,7 +1188,10 @@ class AnalysisOrchestrator:
             if result.attempted:
                 records.append({**estimate_usage("openai", actual_model, raw_usage),
                                 "stage": "generator-" + route.tier, "effort": route.effort})
-            unexpected_model = result.attempted and not response_model_matches(actual_model, route.model)
+            identity_matches = result.attempted and response_model_matches(actual_model, route.model)
+            # Only a returned answer can carry a wrong identity; a failed call
+            # (for example HTTP 429) returned no model and keeps its own class.
+            unexpected_model = result.success and result.attempted and not identity_matches
             if unexpected_model:
                 result = self._llm_failure_result(
                     deterministic_findings=deterministic_findings, attempted=True,
@@ -1143,8 +1199,8 @@ class AnalysisOrchestrator:
                     public_error="Review response did not match the selected model",
                     usage=result.usage,
                 )
-            routes[-1].update(reported_model=(actual_model if response_model_matches(actual_model, route.model) else "unknown"),
-                              identity_matches=result.attempted and not unexpected_model, success=result.success)
+            routes[-1].update(reported_model=(actual_model if identity_matches else "unknown"),
+                              identity_matches=identity_matches, success=result.success)
             if result.success and result.attempted:
                 for finding in result.findings:
                     finding["model_source"] = actual_model
@@ -1167,11 +1223,20 @@ class AnalysisOrchestrator:
                 result.findings = self._merge_findings(previous_findings, result.findings)
                 result.no_findings_reported = False
                 result.reported_finding_count = len(result.findings)
-            if not policy_assessment["complete"] and source_verified:
+            if (not policy_assessment["complete"] and source_verified and route.tier == "deep"
+                    and result.success and result.output_valid and result.attempted and not unexpected_model
+                    and _policy_only_uncertain(policy_assessment)):
+                # Owner decision: uncertain intent answers escalate; the verified
+                # deep review's findings decide (P0/P1 block downstream, clean passes).
+                policy_assessment["resolution"] = "deep_review_decided"
+                policy_assessment["uncertain_candidate_count"] = len(policy_assessment["unresolved_candidates"])
+            elif not policy_assessment["complete"] and source_verified:
+                if result.success or not result.failure_class:
+                    # A failed generator keeps its own class; the policy gap stays in policy_assessment.
+                    result.failure_class = "cascade_policy_incomplete"
+                    result.warning = "Source-bound policy review is incomplete; review remains unknown"
                 result.success = False
                 result.output_valid = False
-                result.failure_class = "cascade_policy_incomplete"
-                result.warning = "Source-bound policy review is incomplete; review remains unknown"
             usage = dict(result.usage or {})
             usage["cost_ledger"] = cost_ledger(records)
             usage["review_routing"] = {"routes": routes, "triage_status": triage_status,
@@ -1196,6 +1261,7 @@ class AnalysisOrchestrator:
                     result.success = False
                     result.output_valid = False
                     result.failure_class = "cascade_evidence_write_failed"
+            result.source_scope = None  # only the full-source runner owns a verified scope
             return result
 
     async def _run_full_scope_analysis(
@@ -1285,6 +1351,7 @@ class AnalysisOrchestrator:
             result = self._llm_failure_result(deterministic_findings=deterministic_findings,
                 attempted=False, failure_class="full_source_scope_incomplete",
                 public_error="Whole-source review could not verify its complete bounded scope")
+        result.source_scope = scope  # the runner-built boundary for final finding filtering
         result.findings = findings
         result.attempted = bool(records)
         result.success = complete
@@ -2160,18 +2227,27 @@ class AnalysisOrchestrator:
         llm_findings: List[dict],
         non_llm_findings: List[dict],
         ingest: dict,
+        source_scope: SourceScope | None = None,
+        discarded: list[object] | None = None,
     ) -> List[dict]:
         """
         Normalize and guardrail LLM/Codex findings before merge.
 
         Rules:
-        - Ignore findings pointing to unknown files.
-        - Clamp line numbers to file bounds when ingest line counts are available.
+        - Ignore findings pointing to unknown files, appending each to ``discarded``.
+        - Bound files and lines by the runner-verified full-source scope when one
+          exists (it reviews tests/, dist/ and other paths ingest excludes);
+          otherwise clamp line numbers to ingest file bounds.
         - For LLM/Codex P0/P1 findings, require deterministic/harness corroboration.
           If not corroborated, downgrade to P2 advisory to avoid blocking on LLM-only claims.
         """
-        files = ingest.get("files", []) if isinstance(ingest, dict) else []
         line_limits: dict[str, int] = {}
+        if source_scope is not None:
+            # Verified spans run contiguously from line 1, so the last span end
+            # bounds every reviewed line; unreviewed files have no entry.
+            for candidate in source_scope.inventory.candidates:
+                line_limits[candidate.file_path] = max(line_limits.get(candidate.file_path, 0), candidate.line_end)
+        files = ingest.get("files", []) if isinstance(ingest, dict) and source_scope is None else []
         for file_info in files:
             if not isinstance(file_info, dict):
                 continue
@@ -2187,6 +2263,8 @@ class AnalysisOrchestrator:
         normalized: List[dict] = []
         for finding in llm_findings:
             if not isinstance(finding, dict):
+                if discarded is not None:
+                    discarded.append(finding)
                 continue
             source = str(finding.get("source") or "llm").lower()
             path_raw = finding.get("file_path")
@@ -2194,6 +2272,8 @@ class AnalysisOrchestrator:
                 if source == "system":
                     path_raw = "<system>"
                 else:
+                    if discarded is not None:
+                        discarded.append(finding)
                     continue
 
             # Preserve synthetic/system findings generated by fail-closed paths.
@@ -2222,6 +2302,8 @@ class AnalysisOrchestrator:
             path = path_raw.replace("\\", "/")
             max_line = line_limits.get(path)
             if max_line is None:
+                if discarded is not None:
+                    discarded.append(finding)
                 continue
 
             try:
