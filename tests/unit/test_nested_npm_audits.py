@@ -68,6 +68,10 @@ async def test_incomplete_leaf_cannot_hide_behind_clean_parent_or_sibling(projec
         (leaf / "package.json").write_text("not JSON")
     else:
         payload = json.loads((leaf / "package.json").read_text())
+        if change == "peer_metadata":
+            lock = json.loads((leaf / "package-lock.json").read_text())
+            lock["lockfileVersion"] = 2
+            (leaf / "package-lock.json").write_text(json.dumps(lock))
         payload["workspaces" if change == "workspaces" else "peerDependenciesMeta"] = ["../other"] if change == "workspaces" else {"unknown": {"optional": True}}
         (leaf / "package.json").write_text(json.dumps(payload))
     result = await run(projects)

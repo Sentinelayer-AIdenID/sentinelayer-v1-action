@@ -877,10 +877,18 @@ def _load_npm_audit_input(
     if (
         package_peers is None
         or lock_peers is None
-        or package_peers
-        or lock_peers
         or not isinstance(package_peer_metadata, dict)
         or not isinstance(lock_peer_metadata, dict)
+    ):
+        return None
+    # lockfileVersion 2: root must not declare peerDependencies or
+    # peerDependenciesMeta.  npm 10+ (lockfileVersion 3) routinely
+    # emits peerDependenciesMeta on the root record (e.g. for workspace
+    # catalogs or install-time peer resolution hints) and may carry
+    # root peerDependencies; neither signals an unsafe lockfile.
+    if lock_version == 2 and (
+        package_peers
+        or lock_peers
         or package_peer_metadata
         or lock_peer_metadata
     ):
@@ -948,10 +956,12 @@ def _load_npm_audit_input(
         if origin is None:
             return None
         # lockfileVersion 3 marks peer dependency entries with peer:true.
-        # These are not independently resolved; validate provenance above
-        # (resolved URL must be registry-origin), then track them in
-        # package_paths but exclude from the dependency count because
-        # npm audit does not report vulnerabilities on peer deps.
+        # These are tracked in package_paths but counted as peer (or
+        # peerOptional) rather than regular dependencies because
+        # npm audit --json separates peer and peerOptional counters
+        # in metadata.dependencies alongside prod, dev, and optional.
+        # The audit parser validates total - peer - peerOptional
+        # equals the non-peer dependency count.
         # Gate on version: peer:true is a v3+ feature; reject in v2.
         if record.get("peer") is True or record.get("peerOptional") is True:
             if lock_version < 3:

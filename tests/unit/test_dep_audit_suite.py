@@ -943,9 +943,11 @@ async def test_npm_rejects_unsupported_lock_coverage_or_provenance_before_spawn(
     elif unsafe_case == "link":
         example["link"] = True
     elif unsafe_case == "peer-dependency":
+        lock["lockfileVersion"] = 2
         package["peerDependencies"] = {"example": "1.0.0"}
         lock["packages"][""]["peerDependencies"] = {"example": "1.0.0"}
     elif unsafe_case == "peer-metadata":
+        lock["lockfileVersion"] = 2
         package["peerDependenciesMeta"] = {"example": {"optional": True}}
     elif unsafe_case == "peer-record-invalid-provenance":
         example["peer"] = True
@@ -995,17 +997,7 @@ async def test_npm_accepts_lockfilev3_peer_features(
     """lockfileVersion 3 peer:true entries, transitive peerDependencies
     outside root declared deps, and non-empty peerDependenciesMeta are
     standard npm 10+ output (seen in sentinelayer-web) and must not
-    trigger unsafe_lockfile.
-
-    P0 triage for Jev Omar run 39941404364 (2026-10-23):
-    The two P0 findings were critical-severity advisories in the
-    lockfile at that time.  The current sentinelayer-web lockfile has
-    0 critical vulnerabilities:
-    1. braces <=3.0.3 (GHSA-vfj7-8cjw-p6xm, CVSS 7.5) —
-       downgraded from critical to high, resolved transitively.
-    2. A second critical advisory — resolved by transitive update
-       between the run snapshot and current lockfile.
-    Neither requires a manual suppression override."""
+    trigger unsafe_lockfile."""
     _prepare_project(tmp_path, "npm")
     lock_path = tmp_path / "package-lock.json"
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
@@ -1596,31 +1588,16 @@ async def test_npm_audit_passes_sentinelayer_web_lockfile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """P0 triage for Jev Omar run 39941404364 (2026-10-23).
-
-    Reproduces the exact pattern that tripped unsafe_lockfile: a v3
+    """Reproduces the exact pattern that tripped unsafe_lockfile: a v3
     lockfile with peer:true entries that are not directly referenced
     by any package's peerDependencies.  In npm 10+ lockfileVersion 3
     output, transitive peer chains produce unreferenced peer:true
-    records (e.g. @testing-library/dom's peer dependencies such as
-    @types/aria-query, dom-accessibility-api, etc.).  The gate must
-    accept these as valid.
+    records.  The gate must accept these as valid.
 
-    P0 triage (Jev Omar run 39941404364, 2026-10-23):
-    Both P0 findings resolved by transitive dependency updates:
-    P0#1: GHSA-vfj7-8cjw-p6xm — braces <=3.0.3, CWE-674 Uncontrolled
-      Recursion, CVSS 7.5. Resolved transitively to 3.0.4+.
-    P0#2: Critical advisory on a transitive dependency, resolved by
-      dependency update between the snapshot and the current lockfile.
-    Verified: npm audit --audit-level=critical exits 0 on the current
-    sentinelayer-web lockfile (0 critical, 0 high, 6 moderate, 10
-    advisory via entries).  The captured audit output above is real.
-
-    Current sentinelayer-web lockfile (lockfileVersion 3, 531 entries):
-    0 critical, 0 high, 6 moderate (2026-10-23).
-    This test validates the structural lockfile-acceptance rules: it
-    uses a minimal fixture that captures the exact peer:true pattern
-    from the real lockfile and proves the gate produces a clean outcome."""
+    Uses a faithful fixture extracted from sentinelayer-web
+    package-lock.json capturing the @testing-library/dom peer chain
+    pattern (peer:true entries with unreferenced peer:true children
+    such as @types/aria-query and dom-accessibility-api)."""
 
     # Faithful fixture extracted from sentinelayer-web package-lock.json:
     # - root devDependencies -> @testing-library/react
