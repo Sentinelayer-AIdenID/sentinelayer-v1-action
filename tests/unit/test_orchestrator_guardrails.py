@@ -814,3 +814,37 @@ async def test_codex_and_api_fallback_failures_leave_blocking_evidence(
     assert result.llm_output_valid is False
     assert result.llm_failure_class == "provider_failure"
     assert result.counts["P0"] == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("effort", "expected_max_tokens"), [("max", 16384), ("", 4096)])
+async def test_non_routed_reasoning_effort_reaches_llm_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, effort: str, expected_max_tokens: int
+) -> None:
+    monkeypatch.setenv("INPUT_OPENAI_API_KEY", "sk_test_dummy")
+    monkeypatch.setenv("INPUT_USE_CODEX", "false")
+    monkeypatch.setenv("INPUT_RUN_HARNESS", "false")
+    monkeypatch.setenv("INPUT_MODEL", "gpt-6-sol")
+    monkeypatch.setenv("INPUT_REASONING_EFFORT", effort)
+    orchestrator = AnalysisOrchestrator(
+        config=OmarGateConfig(),
+        logger=OmarLogger("test-run"),
+        repo_root=tmp_path,
+        allow_llm=True,
+    )
+    _stub_llm_context(orchestrator, monkeypatch)
+    seen: dict[str, object] = {}
+
+    async def _fake_analyze(self, *_args, **kwargs):
+        seen.update(model=self.primary_model, effort=self.reasoning_effort, max_tokens=kwargs.get("max_tokens"))
+        return LLMResponse(content='{"no_findings": true}', usage=_successful_usage(), success=True, error=None)
+
+    monkeypatch.setattr(LLMClient, "analyze", _fake_analyze)
+
+    await orchestrator._run_llm_analysis(
+        ingest={}, deterministic_findings=[], quick_learn=None, spec_context=None,
+        scan_mode="deep", diff_content=None, changed_files=None,
+    )
+
+    # reasoning tokens count against max_tokens, so an explicit effort gets the larger budget
+    assert seen == {"model": "gpt-6-sol", "effort": effort or None, "max_tokens": expected_max_tokens}

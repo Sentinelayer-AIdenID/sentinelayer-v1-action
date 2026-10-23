@@ -108,3 +108,19 @@ def test_config_sanitizes_comment_tag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("INPUT_COMMENT_TAG", "  Gemini !@# Provider  ")
     cfg = OmarGateConfig()
     assert cfg.comment_tag == "gemini-provider"
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("", ""), ("max", "max"), (" XHigh ", "xhigh"), ("low", "low")])
+def test_reasoning_effort_accepts_known_values(monkeypatch: pytest.MonkeyPatch, raw: str, expected: str) -> None:
+    monkeypatch.setenv("INPUT_OPENAI_API_KEY", "sk_test_dummy")
+    monkeypatch.setenv("INPUT_REASONING_EFFORT", raw)
+
+    assert OmarGateConfig().reasoning_effort == expected
+
+
+def test_reasoning_effort_rejects_unknown_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INPUT_OPENAI_API_KEY", "sk_test_dummy")
+    monkeypatch.setenv("INPUT_REASONING_EFFORT", "ultra")
+
+    with pytest.raises(ValidationError):
+        OmarGateConfig()
