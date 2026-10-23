@@ -72,9 +72,9 @@ def _lockfile_coverage_receipt(
     if name in ("package-lock.json", "npm-shrinkwrap.json"):
         return _npm_lockfile_receipt(relative, dep_audit_evidence, absolute_path)
     if name == "Cargo.lock":
-        return _cargo_lockfile_receipt(dep_audit_evidence)
+        return _cargo_lockfile_receipt(relative, dep_audit_evidence, absolute_path)
     if name.startswith("pylock.") and len(name) > len("pylock.") and not name.endswith((".py", ".pyi")):
-        return _pip_lockfile_receipt(dep_audit_evidence)
+        return _pip_lockfile_receipt(relative, dep_audit_evidence, absolute_path)
     return None
 
 
@@ -107,8 +107,18 @@ def _npm_lockfile_receipt(relative: str, evidence: dict, absolute_path: Path | N
     return None
 
 
-def _cargo_lockfile_receipt(evidence: dict) -> str | None:
-    """Cargo.lock coverage requires a clean/vulnerable cargo outcome."""
+def _cargo_lockfile_receipt(relative: str, evidence: dict, absolute_path: Path | None = None) -> str | None:
+    """Cargo.lock coverage requires a path-verified clean/vulnerable cargo outcome."""
+    if absolute_path is not None:
+        try:
+            absolute_path.read_bytes()
+        except (OSError, PermissionError):
+            return None
+    else:
+        try:
+            Path(relative).read_bytes()
+        except (OSError, PermissionError):
+            return None
     outcomes = evidence.get("outcomes") or ()
     if not isinstance(outcomes, (list, tuple)):
         return None
@@ -124,8 +134,18 @@ def _cargo_lockfile_receipt(evidence: dict) -> str | None:
     return None
 
 
-def _pip_lockfile_receipt(evidence: dict) -> str | None:
-    """Pylock coverage requires a clean/vulnerable pip outcome."""
+def _pip_lockfile_receipt(relative: str, evidence: dict, absolute_path: Path | None = None) -> str | None:
+    """Pylock coverage requires a path-verified clean/vulnerable pip outcome."""
+    if absolute_path is not None:
+        try:
+            absolute_path.read_bytes()
+        except (OSError, PermissionError):
+            return None
+    else:
+        try:
+            Path(relative).read_bytes()
+        except (OSError, PermissionError):
+            return None
     outcomes = evidence.get("outcomes") or ()
     if not isinstance(outcomes, (list, tuple)):
         return None
