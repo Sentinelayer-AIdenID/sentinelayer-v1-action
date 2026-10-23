@@ -2502,6 +2502,7 @@ class AnalysisOrchestrator:
             ),
             "confidence": finding.confidence,
             "source": finding.source,
+            "pattern_id": finding.pattern_id,
             "rule_id": finding.pattern_id,
         }
 

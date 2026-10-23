@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from omargate.analyze.orchestrator import AnalysisOrchestrator
 from omargate.gate import evaluate_gate
+from omargate.harness.suites.dep_audit import DependencyAuditOutcome, _outcome_finding
 from omargate.models import (
     DEPENDENCY_AUDIT_COVERAGE_SCOPE,
     DEPENDENCY_AUDIT_INDETERMINATE_REASONS,
@@ -13,6 +15,7 @@ from omargate.models import (
     GateConfig,
     GateStatus,
 )
+from omargate.packaging import write_findings_jsonl, write_pack_summary
 from omargate.utils import sha256_hex
 
 
@@ -646,6 +649,32 @@ def test_gate_dependency_vulnerability_uses_normal_severity_threshold(
 
     assert result.status == expected_status
     assert result.block_merge is expected_block_merge
+
+
+def test_real_pip_finding_survives_jsonl_and_blocks_at_p1(tmp_path: Path) -> None:
+    evidence = _valid_dependency_audit_evidence()
+    _dependency_outcome(evidence, "pip").update(
+        applicable=True, state="vulnerable", vulnerability_count=3,
+    )
+    finding = _outcome_finding(DependencyAuditOutcome.vulnerable("pip", 3))
+    assert finding is not None
+    serialized = AnalysisOrchestrator._finding_to_dict(None, finding)
+    assert serialized["id"] == serialized["pattern_id"] == serialized["rule_id"] == "HARNESS-PIP-AUDIT"
+
+    findings_path = tmp_path / "FINDINGS.jsonl"
+    write_findings_jsonl(findings_path, [serialized])
+    assert json.loads(findings_path.read_text(encoding="utf-8"))["pattern_id"] == "HARNESS-PIP-AUDIT"
+    write_pack_summary(
+        tmp_path, "pip-vulnerability", True, findings_path,
+        {"P0": 0, "P1": 1, "P2": 0, "P3": 0, "P4": 0},
+        {}, ["dependency_audit"], dependency_audit_evidence=evidence,
+    )
+
+    result = evaluate_gate(
+        tmp_path, GateConfig(severity_gate="P1", require_dependency_audit_success=True),
+    )
+    assert result.status == GateStatus.BLOCKED
+    assert result.block_merge is True
 
 
 def test_gate_unrelated_p1_cannot_mask_missing_dependency_audit_finding(
