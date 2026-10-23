@@ -837,10 +837,35 @@ class _NpmAuditInput:
 
 
 
-def _is_optional_peer(packages: dict[str, object], package_name: str) -> bool:
-    """Return True if any package declares *package_name* as an optional peer
-    via peerDependenciesMeta."""
-    for _pkg_path, record in packages.items():
+
+def _peer_consumer_path(package_path: str, pkg_name: str) -> str:
+    """Return the consumer path for a peer dependency at *package_path*.
+
+    For a top-level peer ``node_modules/<name>`` the consumer is the
+    root (``""``).  For a nested peer
+    ``node_modules/<parent>/node_modules/<name>`` the consumer is
+    ``node_modules/<parent>``.
+    """
+    suffix = "node_modules/" + pkg_name
+    if package_path == suffix:
+        return ""
+    if package_path.endswith("/" + suffix):
+        return package_path[:-len("/" + suffix)]
+    return ""
+
+
+def _is_optional_peer(
+    packages: dict[str, object],
+    consumer_path: str,
+    package_name: str,
+) -> bool:
+    """Return True if the consumer at *consumer_path* declares
+    *package_name* as an optional peer via peerDependenciesMeta."""
+    # Walk up ancestor paths to find the nearest consumer with metadata.
+    parts = consumer_path.rstrip("/").split("/")
+    for i in range(len(parts), -1, -1):
+        ancestor = "/".join(parts[:i])
+        record = packages.get(ancestor)
         if not isinstance(record, dict):
             continue
         meta = record.get("peerDependenciesMeta")
@@ -893,6 +918,20 @@ def _load_npm_audit_input(
         or lock_peer_metadata
     ):
         return None
+    # lockfileVersion 3: root peer declarations and metadata in the
+    # lockfile must match what package.json declares.  npm 10+ may
+    # emit peerDependenciesMeta on the root record for legitimate
+    # reasons (workspace catalogs, install-time resolution hints),
+    # but entries that appear only in the lockfile root and not in
+    # package.json signal a tampered or regenerated lockfile.
+    if lock_version == 3:
+        if package_peers != lock_peers:
+            return None
+        # package_peer_metadata keys must be a superset of lock_peer_metadata
+        # keys: package.json is the authority for declared optional peers.
+        extra_lock_meta = set(lock_peer_metadata) - set(package_peer_metadata)
+        if extra_lock_meta:
+            return None
     dependency_sections = (
         "dependencies",
         "devDependencies",
@@ -970,10 +1009,11 @@ def _load_npm_audit_input(
             # package record carries peer:true (not peerOptional:true).
             # npm audit reports these as peerOptional, so we must
             # derive the count from the actual consumer metadata.
-            pkg_name = package_path.split("node_modules/", 1)[-1]
+            pkg_name = package_path.rsplit("node_modules/", 1)[-1]
+            consumer_path = _peer_consumer_path(package_path, pkg_name)
             is_optional = record.get("peerOptional") is True or (
                 lock_version >= 3
-                and _is_optional_peer(packages, pkg_name)
+                and _is_optional_peer(packages, consumer_path, pkg_name)
             )
             if is_optional:
                 peer_optional_count += 1

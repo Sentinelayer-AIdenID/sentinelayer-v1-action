@@ -1736,12 +1736,17 @@ async def test_npm_accepts_root_peer_metadata_in_lockfilev3(
     that trips the unsafe_lockfile on sentinelayer-web (lockfileVersion 3,
     root record carries peerDependenciesMeta)."""
     _prepare_project(tmp_path, "npm")
+    pkg_path = tmp_path / "package.json"
+    pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
     lock_path = tmp_path / "package-lock.json"
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    # Add peerDependenciesMeta to the root record — standard in npm 10+ v3 output
+    # Add peerDependenciesMeta to both package.json and lockfile root —
+    # standard in npm 10+ v3 output (workspace catalogs, resolution hints).
+    pkg["peerDependenciesMeta"] = {"example": {"optional": True}}
     lock["packages"][""]["peerDependenciesMeta"] = {
         "example": {"optional": True}
     }
+    pkg_path.write_text(json.dumps(pkg), encoding="utf-8")
     lock_path.write_text(json.dumps(lock), encoding="utf-8")
 
     called = False
@@ -1986,3 +1991,196 @@ async def test_all_incomplete_ecosystems_preserve_distinct_p0_findings(
     assert {finding.id for finding in result.findings} == set(_INCOMPLETE_IDS.values())
     assert len({finding.file_path for finding in result.findings}) == 3
     assert all(finding.severity == "P0" for finding in result.findings)
+
+
+@pytest.mark.anyio
+async def test_v3_rejects_root_peer_deps_not_in_package_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """lockfileVersion 3 root record with peerDependencies not declared
+    in package.json must trigger unsafe_lockfile.  The v3 path must
+    compare root peer declarations against package.json, not merely
+    accept any dict-typed peer maps."""
+    package = {
+        "name": "test-project",
+        "version": "1.0.0",
+        "dependencies": {"react": "^18.0.0"},
+    }
+    pkg_path = tmp_path / "package.json"
+    pkg_path.write_text(json.dumps(package), encoding="utf-8")
+
+    lock = {
+        "name": "test-project",
+        "version": "1.0.0",
+        "lockfileVersion": 3,
+        "packages": {
+            "": {
+                "name": "test-project",
+                "version": "1.0.0",
+                "dependencies": {"react": "^18.0.0"},
+                "peerDependencies": {"typescript": ">=5.0.0"},
+                "peerDependenciesMeta": {"typescript": {"optional": True}},
+            },
+            "node_modules/react": {
+                "version": "18.3.1",
+                "resolved": (
+                    "https://registry.npmjs.org/react/-/react-18.3.1.tgz"
+                ),
+            },
+        },
+    }
+    lock_path = tmp_path / "package-lock.json"
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    called = False
+
+    async def _should_not_run(*_args: object, **_kwargs: object) -> CommandResult:
+        nonlocal called
+        called = True
+        raise AssertionError("unsafe lockfile must not spawn audit")
+
+    monkeypatch.setattr(dep_audit, "run_command", _should_not_run)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is False
+    assert finding is not None
+    assert outcome.reason_code == "unsafe_lockfile"
+
+
+@pytest.mark.anyio
+async def test_v3_rejects_root_peer_metadata_not_in_package_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """lockfileVersion 3 root record with peerDependenciesMeta not declared
+    in package.json must trigger unsafe_lockfile."""
+    package = {
+        "name": "test-project",
+        "version": "1.0.0",
+        "dependencies": {"react": "^18.0.0"},
+    }
+    pkg_path = tmp_path / "package.json"
+    pkg_path.write_text(json.dumps(package), encoding="utf-8")
+
+    lock = {
+        "name": "test-project",
+        "version": "1.0.0",
+        "lockfileVersion": 3,
+        "packages": {
+            "": {
+                "name": "test-project",
+                "version": "1.0.0",
+                "dependencies": {"react": "^18.0.0"},
+                "peerDependenciesMeta": {"@types/react": {"optional": True}},
+            },
+            "node_modules/react": {
+                "version": "18.3.1",
+                "resolved": (
+                    "https://registry.npmjs.org/react/-/react-18.3.1.tgz"
+                ),
+            },
+        },
+    }
+    lock_path = tmp_path / "package-lock.json"
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    called = False
+
+    async def _should_not_run(*_args: object, **_kwargs: object) -> CommandResult:
+        nonlocal called
+        called = True
+        raise AssertionError("unsafe lockfile must not spawn audit")
+
+    monkeypatch.setattr(dep_audit, "run_command", _should_not_run)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is False
+    assert finding is not None
+    assert outcome.reason_code == "unsafe_lockfile"
+
+
+@pytest.mark.anyio
+async def test_nested_optional_peer_is_counted_as_peerOptional(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nested optional peer dependencies (e.g.
+    node_modules/parent/node_modules/@types/react) must be counted as
+    peerOptional when the consumer declares the peer optional via
+    peerDependenciesMeta."""
+    package = {
+        "name": "test-nested-peers",
+        "version": "1.0.0",
+        "dependencies": {"parent": "^1.0.0"},
+    }
+    pkg_path = tmp_path / "package.json"
+    pkg_path.write_text(json.dumps(package), encoding="utf-8")
+
+    lock = {
+        "name": "test-nested-peers",
+        "version": "1.0.0",
+        "lockfileVersion": 3,
+        "packages": {
+            "": package,
+            "node_modules/parent": {
+                "version": "1.0.0",
+                "resolved": (
+                    "https://registry.npmjs.org/parent/-/parent-1.0.0.tgz"
+                ),
+                "peerDependencies": {"@types/react": "*"},
+                "peerDependenciesMeta": {
+                    "@types/react": {"optional": True}
+                },
+            },
+            "node_modules/parent/node_modules/@types/react": {
+                "version": "18.3.12",
+                "resolved": (
+                    "https://registry.npmjs.org/@types/"
+                    "react/-/react-18.3.12.tgz"
+                ),
+                "peer": True,
+            },
+        },
+    }
+    lock_path = tmp_path / "package-lock.json"
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    non_peer_count = 1  # parent
+    peer_optional_count = 1  # @types/react (nested, optional)
+    total = non_peer_count + peer_optional_count
+
+    called = False
+
+    async def _fake_run_command(
+        *_args: object, **_kwargs: object
+    ) -> CommandResult:
+        nonlocal called
+        called = True
+        stdout = json.dumps({
+            "auditReportVersion": 2,
+            "vulnerabilities": {},
+            "metadata": {
+                "vulnerabilities": _npm_metadata(critical=0, total=0),
+                "dependencies": {
+                    "prod": non_peer_count,
+                    "dev": 0,
+                    "optional": 0,
+                    "peer": 0,
+                    "peerOptional": peer_optional_count,
+                    "total": total,
+                },
+            },
+        })
+        return _result(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(dep_audit, "run_command", _fake_run_command)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is True
+    assert outcome.state == "clean", (
+        f"Expected clean but got {outcome.state}: {outcome.reason_code}"
+    )
+    assert peer_optional_count == 1, (
+        f"Expected 1 peerOptional entry, got {peer_optional_count}"
+    )
