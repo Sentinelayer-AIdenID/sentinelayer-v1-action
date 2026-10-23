@@ -124,8 +124,8 @@ def test_inventory_covers_complete_files_in_stable_forty_line_spans(tmp_path: Pa
     )
 
 
-@pytest.mark.parametrize("kind", ["deleted", "binary", "invalid-utf8", "oversize", "unknown"])
-def test_inventory_refuses_unreadable_or_unrepresented_source(tmp_path: Path, kind: str):
+@pytest.mark.parametrize("kind", ["deleted", "binary", "invalid-utf8", "oversize"])
+def test_inventory_refuses_unreadable_or_unsupported_source(tmp_path: Path, kind: str):
     path = tmp_path / "source.py"
     if kind == "binary":
         path.write_bytes(b"first\x00second")
@@ -133,22 +133,10 @@ def test_inventory_refuses_unreadable_or_unrepresented_source(tmp_path: Path, ki
         path.write_bytes(b"\xff\xfe")
     elif kind == "oversize":
         path.write_bytes(b"x" * 1_000_001)
-    elif kind == "unknown":
-        # 'unknown' is no longer a refusal reason: a changed file present on
-        # disk that passes size/encoding/path checks is in the inventory even
-        # when absent from bulk ingest (the ingest excludes tests/**, which
-        # every real PR changes). The old source_outside_inventory gate is
-        # removed so the Jev Omar check can run on ordinary PRs.
-        path.write_bytes(b"present but absent from ingest\n")
-    known = [] if kind == "unknown" else [{"path": "source.py"}]
-    if kind == "unknown":
-        inventory = build_inventory(repo_root=tmp_path, ingest={"files": known}, changed_files=["source.py"],
-                                    scan_mode="pr-diff", max_candidates=50)
-        assert len(inventory.candidates) == 1
-    else:
-        with pytest.raises(TypeSafeReviewIncomplete):
-            build_inventory(repo_root=tmp_path, ingest={"files": known}, changed_files=["source.py"],
-                            scan_mode="pr-diff", max_candidates=50)
+    ingest_files = [{"path": "source.py"}]
+    with pytest.raises(TypeSafeReviewIncomplete):
+        build_inventory(repo_root=tmp_path, ingest={"files": ingest_files}, changed_files=["source.py"],
+                        scan_mode="pr-diff", max_candidates=50)
 
 
 @pytest.mark.parametrize("path", ["../outside.py", "nested/../source.py", "/absolute.py", "a\\b.py", "C:outside.py"])
@@ -690,164 +678,93 @@ async def test_policy_prose_reuses_existing_redactor_with_bound_source_and_verdi
     assert result.assessment["source_hashes"] == dict(inventory.source_hashes)
 
 
-def test_diff_inventory_includes_changed_files_outside_bulk_ingest(tmp_path: Path):
-    """A PR diff of src + tests + lockfile: all changed text files are in the
-    review inventory regardless of bulk ingest membership. Lockfiles are
-    recorded as policy-excluded, tests are reviewed."""
+
+# --- Tests added for fix: remove lockfile pre-exclusion (ticket 78efd938) ---
+
+def test_lockfile_is_ordinary_review_candidate(tmp_path: Path):
+    """Lockfiles are now ordinary review candidates — they pass through the
+    same size/encoding/path checks as any other changed text file. The
+    dep_audit suite does not provide equivalent coverage, so build_inventory
+    must not pre-exclude them."""
     (tmp_path / "src").mkdir()
-    (tmp_path / "tests").mkdir()
     (tmp_path / "src" / "main.py").write_text("answer = 42\n", encoding="utf-8")
-    (tmp_path / "tests" / "test_main.py").write_text("def test_answer(): assert True\n", encoding="utf-8")
-    (tmp_path / "poetry.lock").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
-
-    # Bulk ingest excludes tests/** and **/*.lock (matching real ingest_runner.py)
-    ingest = {"files": [{"path": "src/main.py"}]}
-    changed = ["src/main.py", "tests/test_main.py", "poetry.lock"]
-
-    inventory = build_inventory(
-        repo_root=tmp_path, ingest=ingest, changed_files=changed,
-        scan_mode="pr-diff", max_candidates=50,
-    )
-
-    # All three files are accounted for
-    reviewed_paths = {c.file_path for c in inventory.candidates}
-    excluded_paths = {e[0] for e in inventory.policy_excluded}
-    assert reviewed_paths == {"src/main.py", "tests/test_main.py"}
-    assert excluded_paths == {"poetry.lock"}
-    assert any("dependency" in reason.lower() for _, reason in inventory.policy_excluded)
-
-
-def test_diff_inventory_includes_test_files_without_ingest_membership(tmp_path: Path):
-    """Test files outside bulk ingest are included in pr-diff inventory
-    regardless of ingest membership. This verifies the fix for the
-    source_outside_inventory gate that blocked every PR with test changes."""
-    (tmp_path / "src").mkdir()
-    (tmp_path / "tests").mkdir()
-    (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
-    (tmp_path / "tests" / "test_main.py").write_text("def test(): pass\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
 
     ingest = {"files": [{"path": "src/main.py"}]}
-    changed = ["src/main.py", "tests/test_main.py"]
-
-    # This test validates that the fix removed the source_outside_inventory
-    # exception for test files — after the fix, this should succeed.
-    inventory = build_inventory(
-        repo_root=tmp_path, ingest=ingest, changed_files=changed,
-        scan_mode="pr-diff", max_candidates=50,
-    )
-    paths = {c.file_path for c in inventory.candidates}
-    assert paths == {"src/main.py", "tests/test_main.py"}
-
-
-def test_is_lockfile_recognises_dep_audit_lockfiles():
-    """_is_lockfile must match exactly the lockfiles that dep_audit.py audits,
-    not every *.lock file. package-lock.json is the most common — the original
-    *.lock suffix check missed it."""
-    from omargate.analyze.typesafe_review import _is_lockfile
-
-    # npm lockfiles audited by dep_audit.py
-    assert _is_lockfile("package-lock.json") is True
-    assert _is_lockfile("npm-shrinkwrap.json") is True
-    assert _is_lockfile("subdir/package-lock.json") is True
-    assert _is_lockfile("subdir/npm-shrinkwrap.json") is True
-
-    # pip lockfiles audited by dep_audit.py
-    assert _is_lockfile("Pipfile.lock") is True
-    assert _is_lockfile("poetry.lock") is True
-    assert _is_lockfile("uv.lock") is True
-    assert _is_lockfile("pdm.lock") is True
-    assert _is_lockfile("subdir/Pipfile.lock") is True
-
-    # pip lock inputs that dep_audit.py covers
-    assert _is_lockfile("pylock.toml") is True
-    assert _is_lockfile("subdir/pylock.json") is True
-    assert _is_lockfile("pylock.") is False  # too short
-
-    # cargo
-    assert _is_lockfile("Cargo.lock") is True
-    assert _is_lockfile("subdir/Cargo.lock") is True
-
-    # NOT lockfiles the dep_audit covers — must stay in review scope
-    assert _is_lockfile("random.lock") is False
-    assert _is_lockfile("Gemfile.lock") is False
-    assert _is_lockfile("yarn.lock") is False
-    assert _is_lockfile("composer.lock") is False
-    assert _is_lockfile("mix.lock") is False
-
-
-def test_unknown_lockfile_stays_in_review_scope(tmp_path: Path):
-    """A *.lock file that is NOT a dep_audit lockfile must stay in the review
-    inventory. The exclusion must not hide ordinary code behind a filename match."""
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
-    (tmp_path / "Gemfile.lock").write_text("GEM\n  remote: https://rubygems.org/\n", encoding="utf-8")
-
-    ingest = {"files": [{"path": "src/main.py"}]}
-    changed = ["src/main.py", "Gemfile.lock"]
+    changed = ["src/main.py", "package-lock.json"]
 
     inventory = build_inventory(
         repo_root=tmp_path, ingest=ingest, changed_files=changed,
         scan_mode="pr-diff", max_candidates=50,
     )
     paths = {c.file_path for c in inventory.candidates}
-    assert paths == {"src/main.py", "Gemfile.lock"}
+    assert "package-lock.json" in paths
+    assert "src/main.py" in paths
+    assert inventory.policy_excluded == ()
+
+
+def test_all_lockfile_types_are_candidates(tmp_path: Path):
+    """Every lockfile type that dep_audit.py names is now an ordinary review
+    candidate. pylock.* files were wrongly excluded because they were matched
+    by a prefix that also matches ordinary source (src/pylock.py)."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+
+    lockfiles = [
+        "package-lock.json", "npm-shrinkwrap.json",
+        "Pipfile.lock", "poetry.lock", "uv.lock", "pdm.lock",
+        "Cargo.lock", "pylock.toml",
+    ]
+    for name in lockfiles:
+        (tmp_path / name).write_text('{"key": "value"}\n', encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py"] + lockfiles
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=200,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    for name in lockfiles:
+        assert name in paths, f"{name} should be a review candidate"
+    assert inventory.policy_excluded == ()
+
+
+def test_pylock_py_not_excluded(tmp_path: Path):
+    """src/pylock.py is ordinary source, not a lockfile. The old _is_lockfile
+    matched pylock.* which caught src/pylock.py and dropped it from review.
+    Now that check is removed, src/pylock.py must be a normal candidate."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "pylock.py").write_text("LOCK_VERSION = 1\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/pylock.py"}]}
+    changed = ["src/pylock.py"]
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "src/pylock.py" in paths
     assert inventory.policy_excluded == ()
 
 
 @pytest.mark.anyio
-async def test_assessment_includes_policy_excluded(tmp_path: Path):
-    """policy_excluded must be emitted in the assessment output so it appears
-    in REVIEW_ROUTING.json, not only stored on the ReviewInventory object."""
+async def test_assessment_always_includes_policy_excluded_key(tmp_path: Path):
+    """The assessment output must always include the policy_excluded key so
+    REVIEW_ROUTING.json and the orchestrator's _assess_cascade_policy can
+    emit it. Even when empty it must be present."""
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main.py").write_text("answer = 42\n", encoding="utf-8")
-    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 2}\n', encoding="utf-8")
 
     ingest = {"files": [{"path": "src/main.py"}]}
-    changed = ["src/main.py", "package-lock.json"]
+    changed = ["src/main.py"]
 
     inventory = build_inventory(
         repo_root=tmp_path, ingest=ingest, changed_files=changed,
         scan_mode="pr-diff", max_candidates=50,
     )
-    assert len(inventory.policy_excluded) == 1
-    assert inventory.policy_excluded[0][0] == "package-lock.json"
-
     result = await review(tmp_path, inventory)
     assert "policy_excluded" in result.assessment
-    excluded = result.assessment["policy_excluded"]
-    assert len(excluded) == 1
-    assert excluded[0]["path"] == "package-lock.json"
-    assert "dependency" in excluded[0]["reason"]
-
-
-def test_lockfile_path_validation_runs_before_exclusion(tmp_path: Path):
-    """Path containment and symlink checks must run before a lockfile is
-    excluded. A lockfile outside the repo root must refuse, not silently skip."""
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
-
-    ingest = {"files": [{"path": "src/main.py"}]}
-    changed = ["src/main.py", "../package-lock.json"]
-
-    with pytest.raises(TypeSafeReviewIncomplete, match="unsupported_source_path"):
-        build_inventory(
-            repo_root=tmp_path, ingest=ingest, changed_files=changed,
-            scan_mode="pr-diff", max_candidates=50,
-        )
-
-
-def test_non_utf8_lockfile_refuses_before_exclusion(tmp_path: Path):
-    """A lockfile containing invalid UTF-8 (but no NUL byte) must raise
-    unsupported_source_encoding, not silently record it as policy-excluded."""
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
-    (tmp_path / "package-lock.json").write_bytes(b'{"valid": "json", "bad": "\xff"}')
-
-    ingest = {"files": [{"path": "src/main.py"}]}
-    changed = ["src/main.py", "package-lock.json"]
-
-    with pytest.raises(TypeSafeReviewIncomplete, match="unsupported_source_encoding"):
-        build_inventory(
-            repo_root=tmp_path, ingest=ingest, changed_files=changed,
-            scan_mode="pr-diff", max_candidates=50,
-        )
+    assert result.assessment["policy_excluded"] == []

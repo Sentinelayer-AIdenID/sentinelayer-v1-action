@@ -1413,7 +1413,7 @@ class AnalysisOrchestrator:
             # Retain decisions and source bindings without prompt/rubric text or
             # copied source context, so operators can explain incomplete reviews.
             for name in ("source_hashes", "candidates", "question_candidates", "answers",
-                         "decision_reason", "unresolved_candidates"):
+                         "decision_reason", "unresolved_candidates", "policy_excluded"):
                 if name in review.assessment:
                     assessment[name] = review.assessment[name]
             assessment.update(complete=review.assessment.get("complete") is True,

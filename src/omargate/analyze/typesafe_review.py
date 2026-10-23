@@ -142,22 +142,6 @@ def _source_path(repo_root: Path, relative: str) -> Path:
     return target
 
 
-def _is_lockfile(relative: str) -> bool:
-    """Recognise generated lockfiles that the dependency audit covers.
-
-    The dependency audit (dep_audit.py) audits these exact lockfiles:
-    npm: package-lock.json, npm-shrinkwrap.json
-    pip: Pipfile.lock, poetry.lock, uv.lock, pdm.lock
-    cargo: Cargo.lock
-    Also recognises pylock.* (pip lock inputs that the audit covers)."""
-    name = PurePosixPath(relative).name
-    return name in {
-        "package-lock.json", "npm-shrinkwrap.json",
-        "Pipfile.lock", "poetry.lock", "uv.lock", "pdm.lock",
-        "Cargo.lock",
-    } or (name.startswith("pylock.") and len(name) > len("pylock."))
-
-
 def build_inventory(
     *, repo_root: Path, ingest: dict, changed_files: list[str] | None,
     scan_mode: str, max_candidates: int,
@@ -176,7 +160,6 @@ def build_inventory(
         raise TypeSafeReviewIncomplete("invalid_candidate_budget")
     candidates: list[ReviewCandidate] = []
     hashes: list[tuple[str, str]] = []
-    policy_excluded: list[tuple[str, str]] = []
     for relative in sorted(set(changed_files)):
         path = _source_path(repo_root, relative)
         if path.stat().st_size > MAX_FILE_BYTES:
@@ -188,9 +171,6 @@ def build_inventory(
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             raise TypeSafeReviewIncomplete("unsupported_source_encoding") from None
-        if _is_lockfile(relative):
-            policy_excluded.append((relative, "policy-excluded: covered by dependency audit"))
-            continue
         lines = text.splitlines(keepends=True)
         if not lines:
             raise TypeSafeReviewIncomplete("empty_source_scope")
@@ -209,7 +189,7 @@ def build_inventory(
             ))
             if len(candidates) > max_candidates:
                 raise TypeSafeReviewIncomplete("candidate_budget_exceeded")
-    return ReviewInventory(tuple(candidates), tuple(hashes), scan_mode, tuple(policy_excluded))
+    return ReviewInventory(tuple(candidates), tuple(hashes), scan_mode)
 
 
 def verify_sources(repo_root: Path, inventory: ReviewInventory) -> None:
