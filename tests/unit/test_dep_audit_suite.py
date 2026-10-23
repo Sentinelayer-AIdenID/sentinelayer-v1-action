@@ -1599,9 +1599,9 @@ async def test_npm_audit_passes_unreferenced_peer_true_chain(
     observed in sentinelayer-web.  The original unsafe_lockfile was
     triggered by a second, independent issue: root peerDependenciesMeta
     keys in the lockfile absent from package.json (covered by
-    test_v3_rejects_root_peer_metadata_not_in_package_json).  A full
-    end-to-end regression with the actual web lockfile requires the
-    sentinelayer-web repo workspace (not available in this box)."""
+    test_v3_rejects_root_peer_metadata_not_in_package_json).  A
+    full end-to-end smoke test with the actual web lockfile is at
+    test_real_sentinelayer_web_lockfile_passes_audit."""
 
     # Faithful fixture extracted from sentinelayer-web package-lock.json:
     # - root devDependencies -> @testing-library/react
@@ -2553,13 +2553,18 @@ async def test_v3_accepts_optional_root_peer_without_entry(
 
 @pytest.mark.anyio
 async def test_real_sentinelayer_web_lockfile_passes_audit() -> None:
-    """Regression: the real sentinelayer-web package.json + package-lock.json
-    from commit 34cd5aa must pass _load_npm_audit_input without tripping
-    unsafe_lockfile.
+    """Smoke test: the real sentinelayer-web lockfile (commit 34cd5aa,
+    lockfileVersion 3, 521 deps, 9 peer:true entries including 6
+    unreferenced transitive peer chains) must pass _load_npm_audit_input
+    without tripping unsafe_lockfile.
 
-    The gate at ebfcb813 rejected this lockfile (lock_version == 3 root
-    peer declarations mismatch).  After fixes in 804e456, 0b2a8c0,
-    ca73179, and 24715f4 the same lockfile must be accepted."""
+    This lockfile exercises the v3 peer:true acceptance path
+    (unreferenced @types/aria-query, dom-accessibility-api, lz-string,
+    pretty-format, ansi-regex, ansi-styles).  It has no root
+    peerDependencies or peerDependenciesMeta, so it does not exercise
+    the root peer validation added in 804e456 / 0b2a8c0 / 24715f4;
+    those paths are covered by the dedicated root-peer rejection /
+    acceptance tests below."""
     fixtures = Path(__file__).resolve().parent.parent / "fixtures"
     pkg_path = fixtures / (
         "package-sentinelayer-web-34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json"
@@ -2573,3 +2578,12 @@ async def test_real_sentinelayer_web_lockfile_passes_audit() -> None:
         "_load_npm_audit_input returned None — would trigger unsafe_lockfile"
     )
     assert audit_input.registry_origin == "https://registry.npmjs.org"
+    assert audit_input.dependency_count == 521, (
+        f"Expected 521 deps, got {audit_input.dependency_count}"
+    )
+    assert audit_input.peer_count == 9, (
+        f"Expected 9 peer deps, got {audit_input.peer_count}"
+    )
+    assert audit_input.peer_optional_count == 0, (
+        f"Expected 0 peerOptional deps, got {audit_input.peer_optional_count}"
+    )
