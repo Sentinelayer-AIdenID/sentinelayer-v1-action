@@ -78,7 +78,7 @@ def test_review_chain_not_attempted_sanitized_660() -> None:
     body = render_pr_comment(**kwargs)
 
     assert "`NOT_ATTEMPTED` (`candidate_budget_exceeded`)" in body
-    assert "**Cost (usage):** unknown (subtotal)" in body
+    assert "**Cost (usage):** none (no inference call)" in body
     assert "### Review chain" in body
     assert "- **Triage:** `source scope incomplete`" in body
     assert "  - Reason: `candidate_budget_exceeded`" in body

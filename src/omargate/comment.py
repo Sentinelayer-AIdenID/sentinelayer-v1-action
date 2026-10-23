@@ -305,6 +305,28 @@ def _codebase_snapshot_section(codebase_snapshot: Optional[dict]) -> str:
     lines.extend([snapshot_md, "", "</details>"])
     return "\n".join(lines)
 
+def _cost_header(estimated_cost_value: str, actual_cost_usd: float | None,
+                 cost_ledger_complete: bool, llm_engine: str) -> str:
+    """Build the cost portion of the report header line.
+
+    Separates preflight estimate from usage-based cost so a reader can
+    tell the difference at a glance.  When the review was refused
+    (NOT_ATTEMPTED) actual spend is zero — no inference call was made.
+    Otherwise, if no usage receipt exists the cost is unknown.
+    """
+    parts: list[str] = [f" • **Cost (est.):** `{estimated_cost_value}`"]
+    if actual_cost_usd is not None:
+        parts.append(f" • **Cost (usage):** `{format_usd(actual_cost_usd)}`")
+        if not cost_ledger_complete:
+            parts[-1] += " (subtotal)"
+    elif llm_engine == "NOT_ATTEMPTED":
+        parts.append(" • **Cost (usage):** none (no inference call)")
+    else:
+        parts.append(" • **Cost (usage):** unknown")
+        if not cost_ledger_complete:
+            parts[-1] += " (subtotal)"
+    return "".join(parts)
+
 
 def render_pr_comment(
     result: GateResult,
@@ -353,7 +375,6 @@ def render_pr_comment(
 
     duration_value = humanize_duration_ms(duration_ms)
     estimated_cost_value = format_usd(estimated_cost_usd)
-    actual_cost_value = format_usd(actual_cost_usd)
     from .analyze.review_costs import render_cost_ledger
     model_cost_section = "\n".join(render_cost_ledger(review_cost_ledger))
 
@@ -432,13 +453,7 @@ def render_pr_comment(
         f"**Duration:** `{duration_value}`"
         + (f" • **Files:** `{format_int(int(files_scanned))}`" if files_scanned is not None else "")
         + f" • **LLM:** `{llm_engine}` (`{llm_model}`)"
-        + f" • **Cost (est.):** `{estimated_cost_value}`"
-        + (
-            f" • **Cost (usage):** `{actual_cost_value}`"
-            if actual_cost_usd is not None
-            else " • **Cost (usage):** unknown"
-        )
-        + ("" if cost_ledger_complete else " (subtotal)"),
+        + _cost_header(estimated_cost_value, actual_cost_usd, cost_ledger_complete, llm_engine),
         model_cost_section,
         review_chain_section,
         "",
