@@ -184,13 +184,13 @@ def build_inventory(
         raw = path.read_bytes()
         if len(raw) > MAX_FILE_BYTES or b"\0" in raw:
             raise TypeSafeReviewIncomplete("unsupported_source_bytes")
-        if _is_lockfile(relative):
-            policy_excluded.append((relative, "policy-excluded: covered by dependency audit"))
-            continue
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             raise TypeSafeReviewIncomplete("unsupported_source_encoding") from None
+        if _is_lockfile(relative):
+            policy_excluded.append((relative, "policy-excluded: covered by dependency audit"))
+            continue
         lines = text.splitlines(keepends=True)
         if not lines:
             raise TypeSafeReviewIncomplete("empty_source_scope")

@@ -834,3 +834,20 @@ def test_lockfile_path_validation_runs_before_exclusion(tmp_path: Path):
             repo_root=tmp_path, ingest=ingest, changed_files=changed,
             scan_mode="pr-diff", max_candidates=50,
         )
+
+
+def test_non_utf8_lockfile_refuses_before_exclusion(tmp_path: Path):
+    """A lockfile containing invalid UTF-8 (but no NUL byte) must raise
+    unsupported_source_encoding, not silently record it as policy-excluded."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_bytes(b'{"valid": "json", "bad": "\xff"}')
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "package-lock.json"]
+
+    with pytest.raises(TypeSafeReviewIncomplete, match="unsupported_source_encoding"):
+        build_inventory(
+            repo_root=tmp_path, ingest=ingest, changed_files=changed,
+            scan_mode="pr-diff", max_candidates=50,
+        )
