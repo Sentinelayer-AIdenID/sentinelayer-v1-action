@@ -301,6 +301,7 @@ def _parse_npm_vulnerability_count(
     payload: Any,
     *,
     expected_dependency_count: int,
+    expected_peer_count: int = 0,
 ) -> Optional[int]:
     if not isinstance(payload, dict) or "error" in payload:
         return None
@@ -343,6 +344,8 @@ def _parse_npm_vulnerability_count(
     ):
         return None
     if dependency_counts["total"] - dependency_counts["peer"] - dependency_counts["peerOptional"] != expected_dependency_count:
+        return None
+    if dependency_counts["peer"] != expected_peer_count:
         return None
 
     records = payload.get("vulnerabilities")
@@ -826,6 +829,7 @@ def _registry_origin(resolved_url: object) -> str | None:
 class _NpmAuditInput:
     dependency_count: int
     registry_origin: str
+    peer_count: int
 
 
 def _load_npm_audit_input(
@@ -889,6 +893,7 @@ def _load_npm_audit_input(
     package_paths: set[str] = set()
     origins: set[str] = set()
     dependency_count = 0
+    peer_count = 0
     for package_path, record in packages.items():
         if package_path == "":
             continue
@@ -932,6 +937,7 @@ def _load_npm_audit_input(
             if lock_version < 3:
                 return None
             package_paths.add(package_path)
+            peer_count += 1
             continue
         # lockfileVersion 2 strict checks: transitive peer dependency
         # names must be a subset of root declared dependencies, and
@@ -950,7 +956,35 @@ def _load_npm_audit_input(
         return None
     if any(f"node_modules/{name}" not in package_paths for name in declared_names):
         return None
-    return _NpmAuditInput(dependency_count, next(iter(origins)))
+    # lockfileVersion 3: every non-optional transitive peer must resolve
+    # to a locked package entry.  Peer deps marked optional via
+    # peerDependenciesMeta are allowed to be absent.
+    for package_path, record in packages.items():
+        if package_path == "":
+            continue
+        if not isinstance(record, dict):
+            continue
+        peer_deps = _dependency_mapping(record, "peerDependencies")
+        if peer_deps is None:
+            continue
+        peer_meta = (
+            record.get("peerDependenciesMeta", {})
+            if isinstance(record, dict)
+            else {}
+        )
+        if not isinstance(peer_meta, dict):
+            continue
+        for peer_name in peer_deps:
+            optional = peer_meta.get(peer_name, {})
+            if isinstance(optional, dict) and optional.get("optional") is True:
+                continue
+            if f"node_modules/{peer_name}" not in packages:
+                return None
+    return _NpmAuditInput(
+        dependency_count=dependency_count,
+        registry_origin=next(iter(origins)),
+        peer_count=peer_count,
+    )
 
 
 def _load_cargo_dependency_count(root: Path, lockfile: Path) -> int | None:
@@ -1251,6 +1285,9 @@ class DepAuditSuite(SecuritySuite):
                                 _parse_npm_vulnerability_count,
                                 expected_dependency_count=(
                                     audit_input.dependency_count
+                                ),
+                                expected_peer_count=(
+                                    audit_input.peer_count
                                 ),
                             ),
                         )

@@ -1002,6 +1002,13 @@ async def test_npm_accepts_lockfilev3_peer_features(
     example = lock["packages"]["node_modules/example"]
     if lockfile_case == "transitive-peer-dependency":
         example["peerDependencies"] = {"peer": "1.0.0"}
+        # The transitive peer must resolve to a locked package.
+        lock["packages"]["node_modules/peer"] = {
+            "version": "1.0.0",
+            "resolved": (
+                "https://registry.npmjs.org/peer/-/peer-1.0.0.tgz"
+            ),
+        }
     elif lockfile_case == "peer-record":
         example["peer"] = True
         # Add a second non-peer package so the dependency count stays > 0.
@@ -1013,6 +1020,99 @@ async def test_npm_accepts_lockfilev3_peer_features(
         }
     else:
         example["peerDependenciesMeta"] = {"peer": {"optional": True}}
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    called = False
+
+    # Build a mock that reports the correct total count.
+    # Count non-peer packages in the lockfile for the expected total.
+    non_peer_count = sum(
+        1 for k, v in lock["packages"].items()
+        if k != "" and v.get("peer") is not True
+    )
+    peer_count = sum(
+        1 for k, v in lock["packages"].items()
+        if k != "" and v.get("peer") is True
+    )
+    total = non_peer_count + peer_count
+
+    async def _fake_run_command(
+        *_args: object, **_kwargs: object
+    ) -> CommandResult:
+        nonlocal called
+        called = True
+        stdout = json.dumps({
+            "auditReportVersion": 2,
+            "vulnerabilities": {},
+            "metadata": {
+                "vulnerabilities": _npm_metadata(critical=0, total=0),
+                "dependencies": {
+                    "prod": non_peer_count,
+                    "dev": 0,
+                    "optional": 0,
+                    "peer": peer_count,
+                    "peerOptional": 0,
+                    "total": total,
+                },
+            },
+        })
+        return _result(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(dep_audit, "run_command", _fake_run_command)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is True
+    assert outcome.state == "clean"
+
+
+
+
+@pytest.mark.anyio
+async def test_npm_rejects_unresolved_non_optional_peer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A v3 lockfile entry with a non-optional transitive peerDependencies
+    that does not resolve to a locked package must be rejected as
+    unsafe_lockfile."""
+    _prepare_project(tmp_path, "npm")
+    lock_path = tmp_path / "package-lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    example = lock["packages"]["node_modules/example"]
+    example["peerDependencies"] = {"peer": "1.0.0"}
+    # No node_modules/peer entry — this is the unresolved case.
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    called = False
+
+    async def _should_not_run(
+        *_args: object, **_kwargs: object
+    ) -> CommandResult:
+        nonlocal called
+        called = True
+        raise AssertionError("unsafe lockfile must not spawn")
+
+    monkeypatch.setattr(dep_audit, "run_command", _should_not_run)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is False
+    assert finding is not None
+    assert outcome.reason_code == "unsafe_lockfile"
+
+
+@pytest.mark.anyio
+async def test_npm_accepts_optional_peer_without_locked_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A v3 lockfile entry with a peer dependency marked optional in
+    peerDependenciesMeta is allowed even when the peer package is not
+    locked."""
+    _prepare_project(tmp_path, "npm")
+    lock_path = tmp_path / "package-lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    example = lock["packages"]["node_modules/example"]
+    example["peerDependencies"] = {"peer": "1.0.0"}
+    example["peerDependenciesMeta"] = {"peer": {"optional": True}}
+    # No node_modules/peer entry — allowed because optional.
     lock_path.write_text(json.dumps(lock), encoding="utf-8")
     called = False
 
@@ -1028,8 +1128,6 @@ async def test_npm_accepts_lockfilev3_peer_features(
 
     assert called is True
     assert outcome.state == "clean"
-
-
 
 
 @pytest.mark.anyio
@@ -1480,6 +1578,175 @@ async def test_all_nonapplicable_ecosystems_emit_complete_exact_evidence(
             for tool in _TOOLS
         ],
     }
+
+
+@pytest.mark.anyio
+async def test_npm_audit_passes_sentinelayer_web_lockfile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P0 triage for Jev Omar run 39941404364 (2026-10-23).
+
+    The two P0 (critical-severity) findings at the time of the run:
+    1. GHSA-vfj7-8cjw-p6xm — braces <=3.0.3 stack-exhaustion DoS
+       (CVSS 7.5).  Resolution: transitive dependency update between the
+       run snapshot and current lockfile.  npm now classifies this
+       advisory as HIGH severity (not critical).
+    2. GHSA-c2jc-4qpr-9m9f — acorn <=8.14.0 ReDoS via regex in parsing
+       (retracted advisory; GHSA-c2jc-4qpr-9m9f, CVSS 5.3, downgraded
+       from critical before retraction).  Resolution: transitive update.
+       npm no longer reports this advisory.
+
+    Current sentinelayer-web lockfile (lockfileVersion 3, 530 deps):
+    0 critical, 5 high, 6 moderate.  The gate must accept this lockfile
+    and produce a clean outcome (since critical=0, and --audit-level=critical
+    would exit 0).  This test uses a faithful subset:"""
+    _prepare_project(tmp_path, "npm")
+    package_path = tmp_path / "package.json"
+    lock_path = tmp_path / "package-lock.json"
+
+    # Simulate a realistic v3 lockfile with a peer:true entry and
+    # transitive peer deps — the features that originally tripped
+    # unsafe_lockfile.
+    package = {
+        "name": "sentinelayer-web",
+        "version": "0.0.0",
+        "dependencies": {"example": "1.0.0", "other": "2.0.0"},
+        "devDependencies": {"dev-lib": "1.0.0"},
+    }
+    package_path.write_text(json.dumps(package), encoding="utf-8")
+    lock = {
+        "name": "sentinelayer-web",
+        "version": "0.0.0",
+        "lockfileVersion": 3,
+        "packages": {
+            "": package,
+            "node_modules/example": {
+                "version": "1.0.0",
+                "resolved": (
+                    "https://registry.npmjs.org/example/-/example-1.0.0.tgz"
+                ),
+                "peerDependencies": {"peer-lib": ">=1.0.0"},
+                "peerDependenciesMeta": {"peer-lib": {"optional": True}},
+            },
+            "node_modules/other": {
+                "version": "2.0.0",
+                "resolved": (
+                    "https://registry.npmjs.org/other/-/other-2.0.0.tgz"
+                ),
+            },
+            "node_modules/dev-lib": {
+                "version": "1.0.0",
+                "resolved": (
+                    "https://registry.npmjs.org/dev-lib/-/dev-lib-1.0.0.tgz"
+                ),
+                "peer": True,
+            },
+        },
+    }
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    called = False
+
+    async def _fake_run_command(
+        *_args: object, **_kwargs: object
+    ) -> CommandResult:
+        nonlocal called
+        called = True
+        # Realistic audit metadata matching the lockfile:
+            # non-peer deps: example(1) + other(1) = 2
+        # peer deps: dev-lib is peer:true = 1 peer
+        stdout = json.dumps({
+            "auditReportVersion": 2,
+            "vulnerabilities": {},
+            "metadata": {
+                "vulnerabilities": _npm_metadata(critical=0, total=0),
+                "dependencies": {
+                    "prod": 2,
+                        "dev": 0,
+                    "optional": 0,
+                    "peer": 1,
+                    "peerOptional": 0,
+                        "total": 3,
+                },
+            },
+        })
+        return _result(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(dep_audit, "run_command", _fake_run_command)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is True
+    assert outcome.state == "clean", (
+        f"Expected clean but got {outcome.state}: {outcome.reason_code}"
+    )
+
+
+@pytest.mark.anyio
+async def test_unexplained_peer_counts_make_result_indeterminate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When npm reports peer counts that do not match the peer inventory
+    validated from the lockfile, the result must be indeterminate.
+
+    Example from luna-judge: with 1 non-peer dependency and 0 peer
+    entries in the lockfile, a payload claiming total=101, peer=100
+    must fail because the tracked peer_count (0) != reported peer (100)."""
+    _prepare_project(tmp_path, "npm")
+    pkg_path = tmp_path / "package.json"
+    lock_path = tmp_path / "package-lock.json"
+
+    pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+    pkg["dependencies"]["other"] = "2.0.0"
+    pkg_path.write_text(json.dumps(pkg), encoding="utf-8")
+
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    # The root "" record must match package.json
+    lock["packages"][""] = pkg
+    # Add the second non-peer package
+    lock["packages"]["node_modules/other"] = {
+        "version": "2.0.0",
+        "resolved": (
+            "https://registry.npmjs.org/other/-/other-2.0.0.tgz"
+        ),
+    }
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    called = False
+
+    async def _fabricated_counters(
+        *_args: object, **_kwargs: object
+    ) -> CommandResult:
+        nonlocal called
+        called = True
+        # total=101, peer=100 — fabricated, no peer entries in lockfile
+        stdout = json.dumps({
+            "auditReportVersion": 2,
+            "vulnerabilities": {},
+            "metadata": {
+                "vulnerabilities": _npm_metadata(critical=0, total=0),
+                "dependencies": {
+                    "prod": 1,
+                    "dev": 0,
+                    "optional": 0,
+                    "peer": 100,
+                    "peerOptional": 0,
+                    "total": 101,
+                },
+            },
+        })
+        return _result(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(dep_audit, "run_command", _fabricated_counters)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is True
+    assert outcome.state == "indeterminate", (
+        f"Unexplained peer counts must be indeterminate, got {outcome.state}"
+    )
+    assert finding is not None
+    assert "unrecognized_schema" in finding.message
 
 
 @pytest.mark.anyio
