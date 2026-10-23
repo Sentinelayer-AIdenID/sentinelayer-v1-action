@@ -794,6 +794,28 @@ def test_pylock_py_not_excluded(tmp_path: Path):
     assert inventory.policy_excluded == ()
 
 
+def test_non_utf8_lockfile_refuses_before_exclusion(tmp_path: Path):
+    """A lockfile containing invalid UTF-8 (but no NUL byte) must raise
+    unsupported_source_encoding, not silently record it as policy-excluded,
+    even when dep_audit_evidence would otherwise cover it."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_bytes(b'{"valid": "json", "bad": "\xff"}')
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "package-lock.json"]
+    dep_audit_evidence = {
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+    }
+
+    with pytest.raises(TypeSafeReviewIncomplete, match="unsupported_source_encoding"):
+        build_inventory(
+            repo_root=tmp_path, ingest=ingest, changed_files=changed,
+            scan_mode="pr-diff", max_candidates=50,
+            dep_audit_evidence=dep_audit_evidence,
+        )
+
+
 @pytest.mark.anyio
 async def test_assessment_includes_policy_excluded_with_lockfile(tmp_path: Path):
     """The assessment output includes policy_excluded entries with path and

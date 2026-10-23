@@ -239,11 +239,6 @@ def build_inventory(
     hashes: list[tuple[str, str]] = []
     excluded: list[tuple[str, str]] = []
     for relative in sorted(set(changed_files)):
-        if _is_dep_audit_lockfile(relative):
-            receipt = _lockfile_coverage_receipt(relative, dep_audit_evidence)
-            if receipt is not None:
-                excluded.append((relative, receipt))
-                continue
         path = _source_path(repo_root, relative)
         if path.stat().st_size > MAX_FILE_BYTES:
             raise TypeSafeReviewIncomplete("source_budget_exceeded")
@@ -254,6 +249,11 @@ def build_inventory(
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             raise TypeSafeReviewIncomplete("unsupported_source_encoding") from None
+        if _is_dep_audit_lockfile(relative):
+            receipt = _lockfile_coverage_receipt(relative, dep_audit_evidence)
+            if receipt is not None:
+                excluded.append((relative, receipt))
+                continue
         lines = text.splitlines(keepends=True)
         if not lines:
             raise TypeSafeReviewIncomplete("empty_source_scope")
