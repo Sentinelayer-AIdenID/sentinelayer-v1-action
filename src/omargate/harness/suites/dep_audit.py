@@ -919,13 +919,26 @@ def _load_npm_audit_input(
             or not record.get("version")
         ):
             return None
-        # lockfileVersion 3 marks peer dependency entries with peer:true.
-        # These are not independently resolved — skip them rather than
-        # rejecting the entire lockfile. Version is still validated above.
-        if record.get("peer") is True:
-            continue
         origin = _registry_origin(record.get("resolved"))
         if origin is None:
+            return None
+        # lockfileVersion 3 marks peer dependency entries with peer:true.
+        # These are not independently resolved; validate provenance above
+        # (resolved URL must be registry-origin), then track them in
+        # package_paths but exclude from the dependency count because
+        # npm audit does not report vulnerabilities on peer deps.
+        if record.get("peer") is True:
+            package_paths.add(package_path)
+            continue
+        # lockfileVersion 2 strict checks: transitive peer dependency
+        # names must be a subset of root declared dependencies, and
+        # peerDependenciesMeta must be empty. npm 10+ (lockfileVersion 3)
+        # emits peer metadata on all entries as standard behaviour, so
+        # these checks are version-gated.
+        if lock_version == 2 and (
+            not set(peer_dependencies).issubset(declared_names)
+            or bool(peer_metadata)
+        ):
             return None
         package_paths.add(package_path)
         origins.add(origin)
