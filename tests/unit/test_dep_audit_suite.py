@@ -902,8 +902,6 @@ async def test_lockfile_audit_without_lock_fails_closed_without_spawning(
         "peer-dependency",
         "peer-metadata",
         "peer-record",
-        "transitive-peer-dependency",
-        "transitive-peer-metadata",
     ),
 )
 async def test_npm_rejects_unsupported_lock_coverage_or_provenance_before_spawn(
@@ -971,6 +969,47 @@ async def test_npm_rejects_unsupported_lock_coverage_or_provenance_before_spawn(
     assert finding is not None
     assert outcome.reason_code == "unsafe_lockfile"
     assert "PRIVATE_TOKEN" not in json.dumps(asdict(finding), sort_keys=True)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "lockfile_case",
+    (
+        "transitive-peer-dependency",
+        "transitive-peer-metadata",
+    ),
+)
+async def test_npm_accepts_lockfilev3_peer_features(
+    lockfile_case: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """lockfileVersion 3 peer entries, transitive peerDependencies, and
+    peerDependenciesMeta are standard npm 10+ output and must not trigger
+    unsafe_lockfile."""
+    _prepare_project(tmp_path, "npm")
+    lock_path = tmp_path / "package-lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    example = lock["packages"]["node_modules/example"]
+    if lockfile_case == "transitive-peer-dependency":
+        example["peerDependencies"] = {"peer": "1.0.0"}
+    else:
+        example["peerDependenciesMeta"] = {"peer": {"optional": True}}
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    called = False
+
+    async def _fake_run_command(
+        *_args: object, **_kwargs: object
+    ) -> CommandResult:
+        nonlocal called
+        called = True
+        return _result(returncode=0, stdout=_clean_stdout("npm"))
+
+    monkeypatch.setattr(dep_audit, "run_command", _fake_run_command)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is True
+    assert outcome.state == "clean"
 
 
 @pytest.mark.anyio

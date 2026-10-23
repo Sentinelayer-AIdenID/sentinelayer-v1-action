@@ -342,9 +342,7 @@ def _parse_npm_vulnerability_count(
         for counter in required_dependency_counters
     ):
         return None
-    if dependency_counts["peer"] != 0 or dependency_counts["peerOptional"] != 0:
-        return None
-    if dependency_counts["total"] != expected_dependency_count:
+    if dependency_counts["total"] - dependency_counts.get("peer", 0) - dependency_counts.get("peerOptional", 0) != expected_dependency_count:
         return None
 
     records = payload.get("vulnerabilities")
@@ -911,20 +909,21 @@ def _load_npm_audit_input(
             or any(part in {"", ".", ".."} for part in package_path.split("/"))
             or not isinstance(record, dict)
             or peer_dependencies is None
-            # A declaration can refer to a package already in the regular
-            # root graph. Its concrete registry record is still required and
-            # counted below; peer-only/optional records remain unsupported.
-            # This audits locked versions, not peer semver compatibility.
-            or not set(peer_dependencies).issubset(declared_names)
             or not isinstance(peer_metadata, dict)
-            or bool(peer_metadata)
             or record.get("link") is True
-            or record.get("peer") is True
             or record.get("peerOptional") is True
-            or not isinstance(record.get("version"), str)
+        ):
+            return None
+        if (
+            not isinstance(record.get("version"), str)
             or not record.get("version")
         ):
             return None
+        # lockfileVersion 3 marks peer dependency entries with peer:true.
+        # These are not independently resolved — skip them rather than
+        # rejecting the entire lockfile. Version is still validated above.
+        if record.get("peer") is True:
+            continue
         origin = _registry_origin(record.get("resolved"))
         if origin is None:
             return None
