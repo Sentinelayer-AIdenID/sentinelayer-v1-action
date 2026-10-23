@@ -2598,9 +2598,6 @@ async def test_original_ebfcb813_rejection_reproduced() -> None:
         "34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json"
     )
 
-    package_payload = dep_audit._load_bounded_json_file(
-        pkg_path, dep_audit._MAX_NPM_INPUT_BYTES
-    )
     lock_payload = dep_audit._load_bounded_json_file(
         lock_path, dep_audit._MAX_NPM_INPUT_BYTES
     )
