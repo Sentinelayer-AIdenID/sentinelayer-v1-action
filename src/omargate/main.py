@@ -126,7 +126,7 @@ def _llm_display_identity(analysis, **kwargs) -> tuple[str, str]:
     if analysis.llm_attempted and not analysis.llm_success:
         usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
         engine = str(usage.get("engine") or usage.get("provider") or "llm").strip() or "llm"
-        return "ATTEMPTED-FAILED", "unknown"
+        return engine, "unknown"
     usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
     engine = str(usage.get("engine") or usage.get("provider") or "llm").strip() or "llm"
     model = str(usage.get("model") or "").strip() or "unknown"

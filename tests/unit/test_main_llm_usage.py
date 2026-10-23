@@ -34,11 +34,11 @@ def test_llm_display_no_attempt_is_not_attempted(usage, expected_identity) -> No
 
 @pytest.mark.parametrize(("success", "usage", "expected"), [
     (True, {"provider": "typesafe", "model": "model-under-test-1.13.0"}, ("typesafe", "model-under-test-1.13.0")),
-    (False, {"provider": "typesafe", "model": None, "requested_model": "model-under-test-1.13.0"}, ("ATTEMPTED-FAILED", "unknown")),
+    (False, {"provider": "typesafe", "model": None, "requested_model": "model-under-test-1.13.0"}, ("typesafe", "unknown")),
     (True, {"provider": "openai", "engine": "codex", "model": "reported-model"}, ("codex", "reported-model")),
-    (False, {"provider": "openai", "model": "reported-model"}, ("ATTEMPTED-FAILED", "unknown")),
+    (False, {"provider": "openai", "model": "reported-model"}, ("openai", "unknown")),
     (True, None, ("llm", "unknown")),
-    (False, None, ("ATTEMPTED-FAILED", "unknown")),
+    (False, None, ("llm", "unknown")),
     (True, {"provider": "openai", "model": "  "}, ("openai", "unknown")),
 ])
 def test_llm_display_attempt_uses_only_observed_model(success, usage, expected) -> None:
