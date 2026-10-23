@@ -242,12 +242,16 @@ def _review_chain_section(llm_evidence, review_routing, llm_engine, llm_model):
             reported = r.get("reported_model", "")
             has_reported = isinstance(reported, str) and reported != ""
             identity_matches = r.get("identity_matches")
-            # Use evidence.attempted when available, else fall back to route signal
-            ev_attempted = evidence.get("attempted")
-            if ev_attempted is not None:
-                attempted = bool(ev_attempted)
+            # Per-route attempt evidence first, then cascade-wide, then route signals
+            route_attempted = r.get("attempted")
+            if route_attempted is not None:
+                attempted = bool(route_attempted)
             else:
-                attempted = has_reported or identity_matches is True
+                ev_attempted = evidence.get("attempted")
+                if ev_attempted is not None:
+                    attempted = bool(ev_attempted)
+                else:
+                    attempted = has_reported or identity_matches is True
             lines.append("  " + str(i + 1) + ". `" + tier + "` \u2192 `" + req_model + "` / `" + effort + "`")
             if attempted:
                 status_mark = "passed" if success else "failed"
@@ -311,8 +315,9 @@ def _cost_header(estimated_cost_value: str, actual_cost_usd: float | None,
 
     Separates preflight estimate from usage-based cost so a reader can
     tell the difference at a glance.  When the review was refused
-    (NOT_ATTEMPTED) actual spend is zero — no inference call was made.
-    Otherwise, if no usage receipt exists the cost is unknown.
+    (NOT_ATTEMPTED) the cost is reported only when the cost ledger is
+    complete; otherwise it remains unknown (subtotal) because triage
+    may have incurred unrecorded cost.
     """
     parts: list[str] = [f" • **Cost (est.):** `{estimated_cost_value}`"]
     if actual_cost_usd is not None:
@@ -320,7 +325,10 @@ def _cost_header(estimated_cost_value: str, actual_cost_usd: float | None,
         if not cost_ledger_complete:
             parts[-1] += " (subtotal)"
     elif llm_engine == "NOT_ATTEMPTED":
-        parts.append(" • **Cost (usage):** none (no inference call)")
+        if cost_ledger_complete:
+            parts.append(" • **Cost (usage):** none (no inference call)")
+        else:
+            parts.append(" • **Cost (usage):** unknown (subtotal)")
     else:
         parts.append(" • **Cost (usage):** unknown")
         if not cost_ledger_complete:

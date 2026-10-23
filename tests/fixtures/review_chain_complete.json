@@ -1,0 +1,37 @@
+{
+  "_comment": "Sanitized production-shaped COMPLETE review chain fixture. Model names and counts are representative; no real keys, tokens, or findings.",
+  "llm_evidence": {
+    "attempted": true,
+    "success": true,
+    "output_valid": true,
+    "no_findings_reported": false,
+    "reported_finding_count": 3,
+    "accepted_finding_count": 2,
+    "parse_error_count": 0,
+    "failure_class": null,
+    "usage_recorded": true,
+    "engine": "openai",
+    "provider": "openai",
+    "model": "gpt-5.3-codex",
+    "cost_ledger": {
+      "complete": true,
+      "estimated_total_usd": 0.125,
+      "known_estimated_usd": 0.125
+    }
+  },
+  "review_routing": {
+    "triage_status": "ok",
+    "source_failure_reason": "",
+    "routes": [
+      {
+        "tier": "primary",
+        "model": "gpt-5.3-codex",
+        "effort": "medium",
+        "attempted": true,
+        "success": true,
+        "reported_model": "gpt-5.3-codex",
+        "identity_matches": true
+      }
+    ]
+  }
+}
