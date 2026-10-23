@@ -2550,3 +2550,26 @@ async def test_v3_accepts_optional_root_peer_without_entry(
     assert outcome.state == "clean", (
         f"Expected clean but got {outcome.state}: {outcome.reason_code}"
     )
+
+@pytest.mark.anyio
+async def test_real_sentinelayer_web_lockfile_passes_audit() -> None:
+    """Regression: the real sentinelayer-web package.json + package-lock.json
+    from commit 34cd5aa must pass _load_npm_audit_input without tripping
+    unsafe_lockfile.
+
+    The gate at ebfcb813 rejected this lockfile (lock_version == 3 root
+    peer declarations mismatch).  After fixes in 804e456, 0b2a8c0,
+    ca73179, and 24715f4 the same lockfile must be accepted."""
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    pkg_path = fixtures / (
+        "package-sentinelayer-web-34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json"
+    )
+    lock_path = fixtures / (
+        "package-lock-sentinelayer-web-"
+        "34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json"
+    )
+    audit_input = dep_audit._load_npm_audit_input(pkg_path, lock_path)
+    assert audit_input is not None, (
+        "_load_npm_audit_input returned None — would trigger unsafe_lockfile"
+    )
+    assert audit_input.registry_origin == "https://registry.npmjs.org"
