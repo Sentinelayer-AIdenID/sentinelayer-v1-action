@@ -242,32 +242,46 @@ def _review_chain_section(llm_evidence, review_routing, llm_engine, llm_model):
             reported = r.get("reported_model", "")
             has_reported = isinstance(reported, str) and reported != ""
             identity_matches = r.get("identity_matches")
-            attempted = has_reported or identity_matches is True
+            # Use evidence.attempted when available, else fall back to route signal
+            ev_attempted = evidence.get("attempted")
+            if ev_attempted is not None:
+                attempted = bool(ev_attempted)
+            else:
+                attempted = has_reported or identity_matches is True
             lines.append("  " + str(i + 1) + ". `" + tier + "` \u2192 `" + req_model + "` / `" + effort + "`")
             if attempted:
                 status_mark = "passed" if success else "failed"
                 returned_display = reported if has_reported else "unknown"
                 lines.append("     - Attempted: yes, returned `" + returned_display + "` \u2014 **" + status_mark + "**")
+                # Show identity verification
+                if identity_matches is True:
+                    lines.append("     - Identity: verified")
+                elif identity_matches is False:
+                    lines.append("     - Identity: mismatched")
+                else:
+                    lines.append("     - Identity: unknown")
             else:
                 lines.append("     - Attempted: no")
     else:
-        if llm_engine == "refused":
-            lines.append("- **Route:** refused (`" + llm_model + "`)")
+        if llm_engine == "NOT_ATTEMPTED":
+            lines.append("- **Route:** not attempted (`" + llm_model + "`)")
+        elif llm_engine == "ATTEMPTED-FAILED":
+            lines.append("- **Route:** attempted, failed (unknown model)")
         elif llm_engine == "disabled":
             lines.append("- **Route:** LLM not configured")
         else:
             lines.append("- **Route:** `" + llm_engine + "` / `" + llm_model + "`")
 
     # Evidence row
-    attempted = evidence.get("attempted")
-    success = evidence.get("success")
-    failure_class = evidence.get("failure_class")
-    if attempted is not None:
-        lines.append("- **Attempted:** " + str(attempted))
-    if success is not None:
-        lines.append("- **Success:** " + str(success))
-    if failure_class:
-        lines.append("- **Failure class:** `" + str(failure_class) + "`")
+    ev_attempted = evidence.get("attempted")
+    ev_success = evidence.get("success")
+    ev_failure_class = evidence.get("failure_class")
+    if ev_attempted is not None:
+        lines.append("- **Attempted:** " + str(ev_attempted))
+    if ev_success is not None:
+        lines.append("- **Success:** " + str(ev_success))
+    if ev_failure_class:
+        lines.append("- **Failure class:** `" + str(ev_failure_class) + "`")
 
     return "\n".join(lines) + "\n"
 
@@ -313,6 +327,7 @@ def render_pr_comment(
     llm_engine: str = "disabled",
     llm_model: str = "n/a",
     actual_cost_usd: Optional[float] = None,
+    cost_ledger_complete: bool = True,
     review_cost_ledger: Optional[dict] = None,
     deterministic_count: int = 0,
     llm_count: int = 0,
@@ -418,7 +433,12 @@ def render_pr_comment(
         + (f" • **Files:** `{format_int(int(files_scanned))}`" if files_scanned is not None else "")
         + f" • **LLM:** `{llm_engine}` (`{llm_model}`)"
         + f" • **Cost (est.):** `{estimated_cost_value}`"
-        + (f" • **Cost (usage estimate):** `{actual_cost_value}`" if actual_cost_usd is not None else ""),
+        + (
+            f" • **Cost (usage):** `{actual_cost_value}`"
+            if actual_cost_usd is not None
+            else " • **Cost (usage):** unknown"
+        )
+        + ("" if cost_ledger_complete else " (subtotal)"),
         model_cost_section,
         review_chain_section,
         "",

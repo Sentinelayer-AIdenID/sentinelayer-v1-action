@@ -13,9 +13,13 @@ def test_typed_only_usage_is_not_reported_as_zero_when_generator_context_refuses
                                        {'input_tokens': 1000, 'output_tokens': 0},
                                        intent_price_profile='typesafe-input-20261020')])
     analysis = SimpleNamespace(llm_attempted=False, llm_success=False, llm_usage={'cost_ledger': ledger})
-    assert _llm_display_cost(analysis) == ledger['estimated_total_usd'] > 0
+    cost, complete = _llm_display_cost(analysis)
+    assert cost == ledger['estimated_total_usd'] > 0
+    assert complete is True
     ledger['estimated_total_usd'] = None
-    assert _llm_display_cost(analysis) is None
+    cost, complete = _llm_display_cost(analysis)
+    assert cost is None
+    assert complete is True
 
 
 @pytest.mark.parametrize('cost,expected', [(None, 'unknown'), (0.00000025, '0.00000025'), (0.0, '0.00000000')])

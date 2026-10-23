@@ -99,43 +99,66 @@ def _llm_fallback_used(llm_usage: dict, model_fallback: str) -> bool:
     )
 
 
-def _llm_display_identity(analysis) -> tuple[str, str]:
-    """Display observed execution identity, without substituting request config.
+def _llm_display_identity(analysis, **kwargs) -> tuple[str, str]:
+    """Return the display identity (engine, model) for the LLM review.
 
-    When a review was refused before inference (attempted=False, failure_class set),
-    report it as 'refused' with the failure class rather than pretending LLM was
-    disabled. Only return 'disabled' when there is genuinely no LLM configuration.
+    States: COMPLETE (returned model shown), ATTEMPTED-FAILED (unknown
+    returned model / usage stays 'unknown'), NOT_ATTEMPTED (reason code from
+    source_failure_reason / failure_class), DISABLED (only when the config
+    truly disables the LLM).
+
+    Accepts an optional `routing` kwarg (REVIEW_ROUTING data) to read the
+    triage's source_failure_reason when the review was not attempted.
     """
+    routing = kwargs.get("routing") if kwargs else None
+    if isinstance(routing, dict):
+        routing = routing.get("review_routing", routing)
+    if isinstance(routing, dict) and "review_routing" in routing:
+        routing = routing["review_routing"]
+
     if not analysis.llm_attempted and not analysis.llm_success:
-        failure_class = getattr(analysis, "llm_failure_class", None)
-        if failure_class and str(failure_class) not in ("not_attempted", "disabled"):
-            return "refused", str(failure_class)
-        return "disabled", "n/a"
+        reason = ""
+        if isinstance(routing, dict):
+            reason = str(routing.get("source_failure_reason", ""))
+        if not reason:
+            reason = str(getattr(analysis, "llm_failure_class", "") or "")
+        reason = reason.strip()
+        if reason:
+            return "NOT_ATTEMPTED", reason
+        return "NOT_ATTEMPTED", "unknown"
+    if analysis.llm_attempted and not analysis.llm_success:
+        usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
+        engine = str(usage.get("engine") or usage.get("provider") or "llm").strip() or "llm"
+        return "ATTEMPTED-FAILED", "unknown"
     usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
     engine = str(usage.get("engine") or usage.get("provider") or "llm").strip() or "llm"
     model = str(usage.get("model") or "").strip() or "unknown"
     return engine, model
 
 
-def _llm_display_cost(analysis) -> Optional[float]:
-    """Keep an attempted review's unreported cost unknown, including failures.
+def _llm_display_cost(analysis) -> tuple[Optional[float], bool]:
+    """Return (cost_usd, complete) for the LLM review.
 
     When cost_ledger is present but incomplete (estimated_total_usd is None),
-    return None rather than zero — a partial cost ledger means something was
-    attempted or estimated, and claiming $0 would be misleading. An unrefined
-    refused review with a cost ledger also returns None rather than 0.0.
+    the cost is the known subtotal and complete is False — the caller must
+    label the displayed amount as a known subtotal, not a total.
+
+    An unrefined refused review with a cost ledger also returns (known, False)
+    rather than (None, False). When there is no cost information at all,
+    returns (None, False).
     """
     usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
     if isinstance(usage.get("cost_ledger"), dict):
         ledger = usage["cost_ledger"]
         if ledger.get("complete"):
-            return ledger.get("estimated_total_usd")
+            total = ledger.get("estimated_total_usd")
+            return (float(total) if total is not None else None, True)
         known = ledger.get("known_estimated_usd")
-        return float(known) if known is not None else None
+        return (float(known) if known is not None else None, False)
     if not analysis.llm_attempted and not analysis.llm_success:
-        return None
+        return (None, False)
     cost = usage.get("cost_usd")
-    return float(cost) if cost is not None else None
+    return (float(cost) if cost is not None else None, True)
 
 
 def _build_llm_evidence(analysis, config: OmarGateConfig) -> dict:
@@ -855,7 +878,7 @@ async def async_main() -> int:
             with logger.stage("publish"):
                 publish_github = _github_publish_enabled(config)
                 # An unsuccessful attempt can still incur an unreported cost.
-                cost_usd = _llm_display_cost(analysis)
+                cost_usd, cost_complete = _llm_display_cost(analysis)
 
                 if not publish_github:
                     logger.info("GitHub PR comment publish disabled by input")
@@ -867,7 +890,10 @@ async def async_main() -> int:
                     analysis.warnings.append(message)
                 elif ctx.pr_number:
                     try:
-                        llm_engine_used, llm_model_used = _llm_display_identity(analysis)
+                        llm_engine_used, llm_model_used = _llm_display_identity(
+                            analysis,
+                            routing=(analysis.llm_usage or {}).get("review_routing"),
+                        )
 
                         review_brief_md = None
                         try:
@@ -905,6 +931,7 @@ async def async_main() -> int:
                             dedupe_key=gate_result.dedupe_key or idem_key,
                             llm_model=llm_model_used,
                             actual_cost_usd=cost_usd,
+                            cost_ledger_complete=cost_complete,
                             review_cost_ledger=(analysis.llm_usage or {}).get("cost_ledger"),
                             head_sha=ctx.head_sha,
                             server_url=server_url,
@@ -999,7 +1026,7 @@ async def async_main() -> int:
 
         # === OUTPUTS ===
         try:
-            estimated_cost_usd = _llm_display_cost(analysis)
+            estimated_cost_usd, _ = _llm_display_cost(analysis)
             audit_report_path = run_dir / "AUDIT_REPORT.md"
             _write_github_outputs(
                 run_id=run_id,
