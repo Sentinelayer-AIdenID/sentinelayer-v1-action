@@ -1872,8 +1872,17 @@ async def test_pr_with_tests_and_lockfile_reaches_client_and_routes_exclusion(tm
     monkeypatch.setattr(module, "TypeSafeClient", lambda *args, **kwargs: client)
     monkeypatch.setattr(module, "load_policy", lambda *_args: FixturePolicy())
 
+    import hashlib
+    real_hash = hashlib.sha256((tmp_path / "package-lock.json").read_bytes()).hexdigest()
     dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
         "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": real_hash,
+            "outcome": {"state": "clean"},
+        }]},
     }
 
     result = await instance._run_typesafe_analysis(

@@ -16,7 +16,6 @@ from typing import Any, Protocol
 
 from ..intent_identity import intent_model_reference, redact_intent_pin
 from ..redaction import redact_secret_source, sanitize_public_error
-from ..ingest.file_classifier import classify_file
 from .typesafe_client import (
     ChoiceAnswer,
     TypeSafeClient,
@@ -32,17 +31,12 @@ LINES_PER_CANDIDATE = 40
 
 # Lockfile names covered by the dependency audit suite (dep_audit.py).
 # Each entry is either a literal filename or a (prefix, min_length) tuple.
-# Only files matching these and confirmed by an actual audit receipt from
-# the same run may be recorded as policy_excluded; never a blanket ignore.
+# Only lockfile formats dep_audit.py actually audits are listed here.
+# A file matching these is only excluded when a verified receipt from the
+# same run confirms the exact file was audited; never a blanket ignore.
 _DEP_AUDIT_LOCKFILES: tuple[str | tuple[str, int], ...] = (
     "package-lock.json",
     "npm-shrinkwrap.json",
-    "pnpm-lock.yaml",
-    "yarn.lock",
-    "Pipfile.lock",
-    "poetry.lock",
-    "uv.lock",
-    "pdm.lock",
     "Cargo.lock",
     ("pylock.", 7),
 )
@@ -50,12 +44,6 @@ _DEP_AUDIT_LOCKFILES: tuple[str | tuple[str, int], ...] = (
 _DEP_AUDIT_ECOSYSTEM_FOR_PATH: dict[str, str] = {
     "package-lock.json": "npm",
     "npm-shrinkwrap.json": "npm",
-    "pnpm-lock.yaml": "npm",
-    "yarn.lock": "npm",
-    "Pipfile.lock": "pip",
-    "poetry.lock": "pip",
-    "uv.lock": "pip",
-    "pdm.lock": "pip",
     "Cargo.lock": "cargo",
 }
 
@@ -75,34 +63,88 @@ def _is_dep_audit_lockfile(path: str) -> bool:
 
 
 def _lockfile_coverage_receipt(
-    path: str, dep_audit_evidence: dict | None,
+    relative: str, dep_audit_evidence: dict | None,
+    absolute_path: Path | None = None,
 ) -> str | None:
-    """Return a coverage reason if this lockfile has verified dep-audit
-    coverage from the same run.  None means no verified receipt: the file
-    must stay in the review inventory (fail safe)."""
+    """Return 'dep_audit_coverage' only when the audit was enabled, complete,
+    and contains a verified receipt for this exact lockfile.
+    None means the file stays in the review inventory (fail safe)."""
     if dep_audit_evidence is None:
         return None
-    name = path.rsplit("/", 1)[-1]
-    ecosystem = _DEP_AUDIT_ECOSYSTEM_FOR_PATH.get(name)
-    if ecosystem is None:
-        if name.startswith("pylock.") and len(name) > len("pylock.") and not name.endswith(".py") and not name.endswith(".pyi"):
-            ecosystem = "pip"
-        else:
+    if not dep_audit_evidence.get("enabled", False):
+        return None
+    if not dep_audit_evidence.get("complete", False):
+        return None
+    name = relative.rsplit("/", 1)[-1]
+    if name in ("package-lock.json", "npm-shrinkwrap.json"):
+        return _npm_lockfile_receipt(relative, dep_audit_evidence, absolute_path)
+    if name == "Cargo.lock":
+        return _cargo_lockfile_receipt(dep_audit_evidence)
+    if name.startswith("pylock.") and len(name) > len("pylock.") and not name.endswith((".py", ".pyi")):
+        return _pip_lockfile_receipt(dep_audit_evidence)
+    return None
+
+
+def _npm_lockfile_receipt(relative: str, evidence: dict, absolute_path: Path | None = None) -> str | None:
+    """Verify the exact lockfile path and sha256 appear in npm_projects audits."""
+    import hashlib
+    if absolute_path is not None:
+        try:
+            raw = absolute_path.read_bytes()
+        except (OSError, PermissionError):
             return None
-    outcomes = dep_audit_evidence.get("outcomes") or ()
+    else:
+        try:
+            raw = Path(relative).read_bytes()
+        except (OSError, PermissionError):
+            return None
+    file_hash = hashlib.sha256(raw).hexdigest()
+    npm_projects = evidence.get("npm_projects", {})
+    audits = npm_projects.get("audits", ()) if isinstance(npm_projects, dict) else ()
+    for entry in audits:
+        if not isinstance(entry, dict):
+            continue
+        entry_path = entry.get("lockfile_path")
+        entry_hash = entry.get("lockfile_sha256")
+        if entry_path == relative and entry_hash == file_hash:
+            outcome = entry.get("outcome", {})
+            if isinstance(outcome, dict) and outcome.get("state") in ("clean", "vulnerable"):
+                return "dep_audit_coverage"
+            return None
+    return None
+
+
+def _cargo_lockfile_receipt(evidence: dict) -> str | None:
+    """Cargo.lock coverage requires a clean/vulnerable cargo outcome."""
+    outcomes = evidence.get("outcomes") or ()
     if not isinstance(outcomes, (list, tuple)):
         return None
     for outcome in outcomes:
         if not isinstance(outcome, dict):
             continue
-        if outcome.get("ecosystem") != ecosystem:
+        if outcome.get("ecosystem") != "cargo":
             continue
         if not outcome.get("applicable", True):
             return None
-        state = outcome.get("state")
-        if state not in ("clean", "vulnerable"):
+        if outcome.get("state") in ("clean", "vulnerable"):
+            return "dep_audit_coverage"
+    return None
+
+
+def _pip_lockfile_receipt(evidence: dict) -> str | None:
+    """Pylock coverage requires a clean/vulnerable pip outcome."""
+    outcomes = evidence.get("outcomes") or ()
+    if not isinstance(outcomes, (list, tuple)):
+        return None
+    for outcome in outcomes:
+        if not isinstance(outcome, dict):
+            continue
+        if outcome.get("ecosystem") != "pip":
+            continue
+        if not outcome.get("applicable", True):
             return None
-        return "dep_audit_coverage"
+        if outcome.get("state") in ("clean", "vulnerable"):
+            return "dep_audit_coverage"
     return None
 
 class TypeSafeReviewIncomplete(ValueError):
@@ -250,11 +292,8 @@ def build_inventory(
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             raise TypeSafeReviewIncomplete("unsupported_source_encoding") from None
-        classification = classify_file(relative)
-        if classification.category == "generated":
-            raise TypeSafeReviewIncomplete("unsupported_source_type")
         if _is_dep_audit_lockfile(relative):
-            receipt = _lockfile_coverage_receipt(relative, dep_audit_evidence)
+            receipt = _lockfile_coverage_receipt(relative, dep_audit_evidence, absolute_path=path)
             if receipt is not None:
                 excluded.append((relative, receipt))
                 continue
