@@ -1724,6 +1724,89 @@ async def test_npm_audit_passes_sentinelayer_web_lockfile(
     )
 
 
+@pytest.mark.anyio
+async def test_npm_accepts_root_peer_metadata_in_lockfilev3(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """lockfileVersion 3 root record with peerDependenciesMeta must not
+    trigger unsafe_lockfile.  npm 10+ routinely emits
+    peerDependenciesMeta on the root record for workspace catalogs and
+    install-time peer resolution hints.  This is the exact pattern
+    that trips the unsafe_lockfile on sentinelayer-web (lockfileVersion 3,
+    root record carries peerDependenciesMeta)."""
+    _prepare_project(tmp_path, "npm")
+    lock_path = tmp_path / "package-lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    # Add peerDependenciesMeta to the root record — standard in npm 10+ v3 output
+    lock["packages"][""]["peerDependenciesMeta"] = {
+        "example": {"optional": True}
+    }
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    called = False
+
+    async def _fake_run_command(
+        *_args: object, **_kwargs: object
+    ) -> CommandResult:
+        nonlocal called
+        called = True
+        stdout = json.dumps({
+            "auditReportVersion": 2,
+            "vulnerabilities": {},
+            "metadata": {
+                "vulnerabilities": _npm_metadata(critical=0, total=0),
+                "dependencies": {
+                    "prod": 1,
+                    "dev": 0,
+                    "optional": 0,
+                    "peer": 0,
+                    "peerOptional": 0,
+                    "total": 1,
+                },
+            },
+        })
+        return _result(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(dep_audit, "run_command", _fake_run_command)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is True
+    assert outcome.state == "clean", (
+        f"Expected clean but got {outcome.state}: {outcome.reason_code}"
+    )
+
+
+@pytest.mark.anyio
+async def test_npm_rejects_root_peer_metadata_in_lockfilev2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """lockfileVersion 2 root record with peerDependenciesMeta must still
+    trigger unsafe_lockfile.  v2 lockfiles do not carry root peer metadata
+    in legitimate npm output."""
+    _prepare_project(tmp_path, "npm")
+    lock_path = tmp_path / "package-lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock["lockfileVersion"] = 2
+    lock["packages"][""]["peerDependenciesMeta"] = {
+        "example": {"optional": True}
+    }
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    called = False
+
+    async def _should_not_run(*_args: object, **_kwargs: object) -> CommandResult:
+        nonlocal called
+        called = True
+        raise AssertionError("unsafe lockfile must not spawn audit")
+
+    monkeypatch.setattr(dep_audit, "run_command", _should_not_run)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is False
+    assert finding is not None
+    assert outcome.reason_code == "unsafe_lockfile"
 
 
 @pytest.mark.anyio
