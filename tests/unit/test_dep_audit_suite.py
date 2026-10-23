@@ -2184,3 +2184,230 @@ async def test_nested_optional_peer_is_counted_as_peerOptional(
     assert peer_optional_count == 1, (
         f"Expected 1 peerOptional entry, got {peer_optional_count}"
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.anyio
+
+@pytest.mark.anyio
+async def test_peer_origins_are_collected_in_registry_check(
+    tmp_path: Path,
+) -> None:
+    """Peer:true entries must contribute their origins to the
+    origins set via _load_npm_audit_input.
+
+    Before the fix, the peer-record branch continued before
+    origins.add(origin), so peer origins were excluded from the
+    collected set.  This test calls _load_npm_audit_input directly
+    and asserts the returned registry_origin matches the npm
+    registry, proving that peer origins are tracked alongside
+    non-peer origins.  The fix is defense-in-depth: _registry_origin
+    currently only accepts registry.npmjs.org, but if that were
+    ever relaxed, the origins consistency check would catch
+    mixed-registry lockfiles."""
+    from omargate.harness.suites.dep_audit import _load_npm_audit_input
+
+    package = {
+        "name": "test-peer-origins",
+        "version": "1.0.0",
+        "dependencies": {"normal-dep": "^1.0.0"},
+    }
+    pkg_path = tmp_path / "package.json"
+    pkg_path.write_text(json.dumps(package), encoding="utf-8")
+
+    lock = {
+        "name": "test-peer-origins",
+        "version": "1.0.0",
+        "lockfileVersion": 3,
+        "packages": {
+            "": package,
+            "node_modules/normal-dep": {
+                "version": "1.0.0",
+                "resolved": (
+                    "https://registry.npmjs.org/normal-dep/"
+                    "-/normal-dep-1.0.0.tgz"
+                ),
+            },
+            "node_modules/peer-dep": {
+                "version": "2.0.0",
+                "resolved": (
+                    "https://registry.npmjs.org/peer-dep/"
+                    "-/peer-dep-2.0.0.tgz"
+                ),
+                "peer": True,
+                "peerDependencies": {},
+                "peerDependenciesMeta": {},
+            },
+        },
+    }
+    lock_path = tmp_path / "package-lock.json"
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    result = _load_npm_audit_input(pkg_path, lock_path)
+    assert result is not None, (
+        "Expected _NpmAuditInput but got None — "
+        "peer origins must be tracked"
+    )
+    assert result.registry_origin == "https://registry.npmjs.org", (
+        f"Expected registry.npmjs.org, got {result.registry_origin}"
+    )
+    assert result.dependency_count == 1  # only normal-dep
+    assert result.peer_count == 1  # peer-dep is not optional
+
+async def test_required_nested_peer_is_resolved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A required (non-optional) nested peer at
+    node_modules/parent/node_modules/somepeer must be found by the
+    peer resolution walk.
+
+    Before the fix: the walk started from consumer_dir (stripping
+    the last path component) and missed nested entries.  The
+    existing nested-peer test marked its peer optional, so it
+    skipped this resolution check entirely."""
+    package = {
+        "name": "test-nested-required-peer",
+        "version": "1.0.0",
+        "dependencies": {"parent": "^1.0.0"},
+    }
+    pkg_path = tmp_path / "package.json"
+    pkg_path.write_text(json.dumps(package), encoding="utf-8")
+
+    lock = {
+        "name": "test-nested-required-peer",
+        "version": "1.0.0",
+        "lockfileVersion": 3,
+        "packages": {
+            "": package,
+            "node_modules/parent": {
+                "version": "1.0.0",
+                "resolved": (
+                    "https://registry.npmjs.org/parent/"
+                    "-/parent-1.0.0.tgz"
+                ),
+                "peerDependencies": {"somepeer": "*"},
+                "peerDependenciesMeta": {},
+            },
+            "node_modules/parent/node_modules/somepeer": {
+                "version": "2.0.0",
+                "resolved": (
+                    "https://registry.npmjs.org/somepeer/"
+                    "-/somepeer-2.0.0.tgz"
+                ),
+                "peer": True,
+                "peerDependencies": {},
+                "peerDependenciesMeta": {},
+            },
+        },
+    }
+    lock_path = tmp_path / "package-lock.json"
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    non_peer_count = 1  # parent
+    peer_count = 1  # somepeer (required, not optional)
+    total = non_peer_count + peer_count
+
+    called = False
+
+    async def _fake_run_command(
+        *_args: object, **_kwargs: object
+    ) -> CommandResult:
+        nonlocal called
+        called = True
+        stdout = json.dumps({
+            "auditReportVersion": 2,
+            "vulnerabilities": {},
+            "metadata": {
+                "vulnerabilities": _npm_metadata(critical=0, total=0),
+                "dependencies": {
+                    "prod": non_peer_count,
+                    "dev": 0,
+                    "optional": 0,
+                    "peer": peer_count,
+                    "peerOptional": 0,
+                    "total": total,
+                },
+            },
+        })
+        return _result(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(dep_audit, "run_command", _fake_run_command)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is True
+    assert outcome.state == "clean", (
+        f"Expected clean but got {outcome.state}: {outcome.reason_code}"
+    )
+    assert peer_count == 1, (
+        f"Expected 1 required peer entry, got {peer_count}"
+    )
+
+
+@pytest.mark.anyio
+async def test_conflicting_root_peer_metadata_value_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If package.json declares a peer as optional via
+    peerDependenciesMeta but the lockfile root record sets the same
+    key to a different value, the mismatch must be rejected.
+
+    Before the fix: only keys were compared (set difference).
+    Conflicting values for shared keys were silently accepted."""
+    package = {
+        "name": "test-peer-meta-conflict",
+        "version": "1.0.0",
+        "dependencies": {"dep": "^1.0.0"},
+        "peerDependenciesMeta": {
+            "somepeer": {"optional": True},
+        },
+    }
+    pkg_path = tmp_path / "package.json"
+    pkg_path.write_text(json.dumps(package), encoding="utf-8")
+
+    lock = {
+        "name": "test-peer-meta-conflict",
+        "version": "1.0.0",
+        "lockfileVersion": 3,
+        "packages": {
+            "": {
+                "name": "test-peer-meta-conflict",
+                "version": "1.0.0",
+                "dependencies": {"dep": "^1.0.0"},
+                "peerDependenciesMeta": {
+                    "somepeer": {"optional": False},
+                },
+            },
+            "node_modules/dep": {
+                "version": "1.0.0",
+                "resolved": (
+                    "https://registry.npmjs.org/dep/"
+                    "-/dep-1.0.0.tgz"
+                ),
+            },
+        },
+    }
+    lock_path = tmp_path / "package-lock.json"
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    called = False
+
+    async def _should_not_run(
+        *_args: object, **_kwargs: object
+    ) -> CommandResult:
+        nonlocal called
+        called = True
+        return _result(returncode=0, stdout="{}")
+
+    monkeypatch.setattr(dep_audit, "run_command", _should_not_run)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    # npm audit must NOT be called — the lockfile is rejected before spawn
+    assert called is False, (
+        "npm audit must not be spawned for a lockfile with "
+        "conflicting peerDependenciesMeta values"
+    )
+    assert outcome.state == "indeterminate", (
+        f"Expected indeterminate but got {outcome.state}: {outcome.reason_code}"
+    )

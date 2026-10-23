@@ -927,6 +927,18 @@ def _load_npm_audit_input(
         extra_lock_meta = set(lock_peer_metadata) - set(package_peer_metadata)
         if extra_lock_meta:
             return None
+        # For keys present in both, package.json values must match
+        # the lockfile root record.  A conflicting optional flag
+        # (e.g. package.json says optional but the lockfile does not)
+        # signals a tampered or regenerated lockfile.
+        for key in set(package_peer_metadata) & set(lock_peer_metadata):
+            pkg_meta = package_peer_metadata.get(key)
+            lock_meta = lock_peer_metadata.get(key)
+            if isinstance(pkg_meta, dict) and isinstance(lock_meta, dict):
+                if pkg_meta.get("optional") != lock_meta.get("optional"):
+                    return None
+            elif pkg_meta != lock_meta:
+                return None
     dependency_sections = (
         "dependencies",
         "devDependencies",
@@ -1014,6 +1026,7 @@ def _load_npm_audit_input(
                 peer_optional_count += 1
             else:
                 peer_count += 1
+            origins.add(origin)
             continue
 
         # lockfileVersion 2 strict checks: transitive peer dependency
@@ -1059,6 +1072,9 @@ def _load_npm_audit_input(
             # Standard flat layout: node_modules/{peer_name}
             # Nested layout: node_modules/<consumer>/node_modules/{peer_name}
             if f"node_modules/{peer_name}" in packages:
+                continue
+            nested_path = f"{package_path}/node_modules/{peer_name}"
+            if nested_path in packages:
                 continue
             consumer_dir = "/".join(package_path.split("/")[:-1])
             resolved = False
