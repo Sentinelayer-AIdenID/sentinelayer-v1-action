@@ -962,18 +962,10 @@ def _load_npm_audit_input(
     for package_path, record in packages.items():
         if package_path == "":
             continue
-        if not isinstance(record, dict):
-            continue
         peer_deps = _dependency_mapping(record, "peerDependencies")
-        if peer_deps is None:
+        if not peer_deps:
             continue
-        peer_meta = (
-            record.get("peerDependenciesMeta", {})
-            if isinstance(record, dict)
-            else {}
-        )
-        if not isinstance(peer_meta, dict):
-            continue
+        peer_meta = record.get("peerDependenciesMeta", {})
         for peer_name in peer_deps:
             optional = peer_meta.get(peer_name, {})
             if isinstance(optional, dict) and optional.get("optional") is True:
