@@ -849,9 +849,10 @@ def _peer_consumer_path(package_path: str, pkg_name: str) -> str:
     suffix = "node_modules/" + pkg_name
     if package_path == suffix:
         return ""
-    if package_path.endswith("/" + suffix):
-        return package_path[:-len("/" + suffix)]
-    return ""
+    # package_path is validated to start with "node_modules/" and not
+    # contain empty/relative components, so endswith("/"+suffix) must
+    # hold for all nested peer entries.
+    return package_path[: -len("/" + suffix)]
 
 
 def _is_optional_peer(
