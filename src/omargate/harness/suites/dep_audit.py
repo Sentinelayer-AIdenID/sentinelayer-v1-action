@@ -871,6 +871,28 @@ def _is_optional_peer(
                 return True
     return False
 
+def _any_consumer_marks_optional(
+    packages: dict[str, object],
+    package_name: str,
+) -> bool:
+    """Return True if any package in *packages* declares *package_name*
+    as an optional peer via peerDependenciesMeta.  This handles hoisted
+    peers whose physical path is ``node_modules/<name>`` but whose
+    consumer is a non-root package."""
+    for path, record in packages.items():
+        if not path:
+            continue
+        if not isinstance(record, dict):
+            continue
+        meta = record.get("peerDependenciesMeta")
+        if not isinstance(meta, dict):
+            continue
+        entry = meta.get(package_name)
+        if isinstance(entry, dict) and entry.get("optional") is True:
+            return True
+    return False
+
+
 
 def _load_npm_audit_input(
     package_json: Path, lockfile: Path
@@ -1015,7 +1037,10 @@ def _load_npm_audit_input(
             consumer_path = _peer_consumer_path(package_path, pkg_name)
             is_optional = record.get("peerOptional") is True or (
                 lock_version >= 3
-                and _is_optional_peer(packages, consumer_path, pkg_name)
+                and (
+                    _is_optional_peer(packages, consumer_path, pkg_name)
+                    or _any_consumer_marks_optional(packages, pkg_name)
+                )
             )
             if is_optional:
                 peer_optional_count += 1

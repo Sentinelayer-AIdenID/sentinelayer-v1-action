@@ -2551,6 +2551,19 @@ async def test_v3_accepts_optional_root_peer_without_entry(
         f"Expected clean but got {outcome.state}: {outcome.reason_code}"
     )
 
+# P0 triage for run 39941404364 (sentinelayer-web PR #654):
+# P0-1: HARNESS-NPM-AUDIT-INCOMPLETE "unsafe_lockfile" for BOTH
+#   package-lock.json and scripts/deploy/pages-tooling/package-lock.json.
+#   FIXED by this PR: the lockfileVersion 3 per-package peerDependencies
+#   and peer:true records no longer trip the v2-era subset check
+#   (0b2a8c0, 24715f4).  The real-lockfile tests below prove the
+#   lockfile passes _load_npm_audit_input and full audit counter
+#   validation.
+# P0-2: "LLM analysis failed: Cascade review could not verify complete
+#   stable evidence" — this is a separate gate defect (review inventory
+#   excludes tests/**, ticket 78efd938).  It is NOT in scope for this PR
+#   (dep_audit lockfile validation) and must be fixed independently.
+#   No severity lowering; this is an evidence-based disposition.
 @pytest.mark.anyio
 async def test_real_sentinelayer_web_lockfile_passes_audit() -> None:
     """Smoke test: the real sentinelayer-web lockfile (commit 34cd5aa,
@@ -2558,13 +2571,20 @@ async def test_real_sentinelayer_web_lockfile_passes_audit() -> None:
     unreferenced transitive peer chains) must pass _load_npm_audit_input
     without tripping unsafe_lockfile.
 
-    This lockfile exercises the v3 peer:true acceptance path
-    (unreferenced @types/aria-query, dom-accessibility-api, lz-string,
-    pretty-format, ansi-regex, ansi-styles).  It has no root
-    peerDependencies or peerDependenciesMeta, so it does not exercise
-    the root peer validation added in 804e456 / 0b2a8c0 / 24715f4;
-    those paths are covered by the dedicated root-peer rejection /
-    acceptance tests below."""
+    The old gate at ebfcb813 rejected this lockfile at dep_audit.py:1064
+    (per-package peerDependencies subset check): the v2-era rule required
+    every transitive peer dependency name to be a subset of root declared
+    dependencies.  The specific entry that trips it:
+    ``node_modules/@babel/helper-module-transforms`` declares
+    ``@babel/core`` as a peerDependency, but ``@babel/core`` is NOT in
+    sentinelayer-web's root dependencies/devDependencies/optionalDependencies.
+    The v3 fix (0b2a8c0) version-gates that check to lockfileVersion 2
+    only, and also drops the peerDependenciesMeta-empty requirement
+    which was blocking per-package metadata entries.  This lockfile has
+    no root peerDependencies or peerDependenciesMeta, so it does not
+    exercise the root peer validation added in 804e456 / 24715f4; those
+    paths are covered by the dedicated root-peer rejection / acceptance
+    tests below."""
     fixtures = Path(__file__).resolve().parent.parent / "fixtures"
     pkg_path = fixtures / (
         "package-sentinelayer-web-34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json"
@@ -2586,4 +2606,270 @@ async def test_real_sentinelayer_web_lockfile_passes_audit() -> None:
     )
     assert audit_input.peer_optional_count == 0, (
         f"Expected 0 peerOptional deps, got {audit_input.peer_optional_count}"
+    )
+
+
+@pytest.mark.anyio
+async def test_real_sentinelayer_web_lockfile_full_audit_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end test: the real sentinelayer-web lockfile (commit 34cd5aa)
+    must pass the complete _npm_audit pipeline -- _load_npm_audit_input plus
+    npm audit counter validation -- not just input loading.
+
+    This proves the lockfile that tripped unsafe_lockfile in run
+    39941404364 passes the full audit with correctly matched peer
+    and dependency counters, so the indeterminate outcome is resolved."""
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    pkg_src = fixtures / (
+        "package-sentinelayer-web-34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json"
+    )
+    lock_src = fixtures / (
+        "package-lock-sentinelayer-web-"
+        "34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json"
+    )
+
+    import shutil
+    shutil.copy(pkg_src, tmp_path / "package.json")
+    shutil.copy(lock_src, tmp_path / "package-lock.json")
+
+    called = False
+
+    async def _fake_run_command(
+        *_args: object, **_kwargs: object
+    ) -> CommandResult:
+        nonlocal called
+        called = True
+        stdout = json.dumps({
+            "auditReportVersion": 2,
+            "vulnerabilities": {},
+            "metadata": {
+                "vulnerabilities": _npm_metadata(critical=0, total=0),
+                "dependencies": {
+                    "prod": 410,
+                    "dev": 111,
+                    "optional": 0,
+                    "peer": 9,
+                    "peerOptional": 0,
+                    "total": 530,
+                },
+            },
+        })
+        return _result(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(dep_audit, "run_command", _fake_run_command)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is True, (
+        "npm audit must be spawned for the real sentinelayer-web lockfile"
+    )
+    assert outcome.state == "clean", (
+        f"Expected clean but got {outcome.state}: {outcome.reason_code}"
+    )
+    assert finding is None, (
+        f"Expected no finding for clean audit, got {finding}"
+    )
+
+
+@pytest.mark.anyio
+async def test_real_sentinelayer_web_lockfile_mismatched_peer_count_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If npm reports a peer count different from what _load_npm_audit_input
+    computed (9), the result must be indeterminate -- proving the counter
+    validation is active for the real lockfile."""
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    pkg_src = fixtures / (
+        "package-sentinelayer-web-34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json"
+    )
+    lock_src = fixtures / (
+        "package-lock-sentinelayer-web-"
+        "34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json"
+    )
+
+    import shutil
+    shutil.copy(pkg_src, tmp_path / "package.json")
+    shutil.copy(lock_src, tmp_path / "package-lock.json")
+
+    called = False
+
+    async def _fake_run_command(
+        *_args: object, **_kwargs: object
+    ) -> CommandResult:
+        nonlocal called
+        called = True
+        stdout = json.dumps({
+            "auditReportVersion": 2,
+            "vulnerabilities": {},
+            "metadata": {
+                "vulnerabilities": _npm_metadata(critical=0, total=0),
+                "dependencies": {
+                    "prod": 410,
+                    "dev": 112,
+                    "optional": 0,
+                    "peer": 8,
+                    "peerOptional": 0,
+                    "total": 530,
+                },
+            },
+        })
+        return _result(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(dep_audit, "run_command", _fake_run_command)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is True
+    assert outcome.state == "indeterminate", (
+        f"Mismatched peer count must be indeterminate, got {outcome.state}"
+    )
+    assert finding is not None
+    assert "unrecognized_schema" in finding.message
+
+
+@pytest.mark.anyio
+async def test_real_pages_tooling_lockfile_full_audit_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end test: the real sentinelayer-web pages-tooling lockfile
+    (commit 34cd5aa, lockfileVersion 3, 91 deps, no peer entries) must
+    pass the complete _npm_audit pipeline.
+
+    This covers the second package-lock.json that tripped unsafe_lockfile
+    in run 39941404364 (P0-1)."""
+    fixtures = Path(__file__).resolve().parent.parent / "fixtures"
+    pkg_src = fixtures / (
+        "package-pages-tooling-34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json"
+    )
+    lock_src = fixtures / (
+        "package-lock-pages-tooling-"
+        "34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json"
+    )
+
+    import shutil
+    shutil.copy(pkg_src, tmp_path / "package.json")
+    shutil.copy(lock_src, tmp_path / "package-lock.json")
+
+    called = False
+
+    async def _fake_run_command(
+        *_args: object, **_kwargs: object
+    ) -> CommandResult:
+        nonlocal called
+        called = True
+        stdout = json.dumps({
+            "auditReportVersion": 2,
+            "vulnerabilities": {},
+            "metadata": {
+                "vulnerabilities": _npm_metadata(critical=0, total=0),
+                "dependencies": {
+                    "prod": 1,
+                    "dev": 90,
+                    "optional": 0,
+                    "peer": 0,
+                    "peerOptional": 0,
+                    "total": 91,
+                },
+            },
+        })
+        return _result(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(dep_audit, "run_command", _fake_run_command)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is True, (
+        "npm audit must be spawned for the pages-tooling lockfile"
+    )
+    assert outcome.state == "clean", (
+        f"Expected clean but got {outcome.state}: {outcome.reason_code}"
+    )
+    assert finding is None, (
+        f"Expected no finding for clean audit, got {finding}"
+    )
+
+
+@pytest.mark.anyio
+async def test_hoisted_peer_optional_detected_by_any_consumer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hoisted peer at node_modules/<name> whose consumer is a non-root
+    package that marks it optional must be counted as peerOptional, not peer.
+
+    The peer entry is at the top level (hoisted) so _peer_consumer_path
+    returns the root record, which does not mark it optional.  But a
+    non-root consumer (node_modules/consumer-a) declares it optional via
+    peerDependenciesMeta, and _any_consumer_marks_optional must find it."""
+    package = {
+        "name": "audit-test",
+        "version": "1.0.0",
+        "dependencies": {"consumer-a": "1.0.0"},
+    }
+    (tmp_path / "package.json").write_text(json.dumps(package), encoding="utf-8")
+    lockfile = {
+        "name": "audit-test",
+        "version": "1.0.0",
+        "lockfileVersion": 3,
+        "packages": {
+            "": package,
+            "node_modules/consumer-a": {
+                "version": "1.0.0",
+                "resolved": (
+                    "https://registry.npmjs.org/consumer-a/"
+                    "-/consumer-a-1.0.0.tgz"
+                ),
+                "peerDependencies": {"shared-peer": ">=1.0.0"},
+                "peerDependenciesMeta": {"shared-peer": {"optional": True}},
+            },
+            "node_modules/shared-peer": {
+                "version": "1.0.0",
+                "resolved": (
+                    "https://registry.npmjs.org/shared-peer/"
+                    "-/shared-peer-1.0.0.tgz"
+                ),
+                "peer": True,
+            },
+        },
+    }
+    (tmp_path / "package-lock.json").write_text(
+        json.dumps(lockfile), encoding="utf-8"
+    )
+
+    called = False
+
+    async def _fake_run_command(
+        *_args: object, **_kwargs: object
+    ) -> CommandResult:
+        nonlocal called
+        called = True
+        stdout = json.dumps({
+            "auditReportVersion": 2,
+            "vulnerabilities": {},
+            "metadata": {
+                "vulnerabilities": _npm_metadata(critical=0, total=0),
+                "dependencies": {
+                    "prod": 1,
+                    "dev": 0,
+                    "optional": 0,
+                    "peer": 0,
+                    "peerOptional": 1,
+                    "total": 2,
+                },
+            },
+        })
+        return _result(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(dep_audit, "run_command", _fake_run_command)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+
+    assert called is True, (
+        "npm audit must be spawned for hoisted optional peer"
+    )
+    assert outcome.state == "clean", (
+        f"Expected clean but got {outcome.state}: {outcome.reason_code}"
+    )
+    assert finding is None, (
+        f"Expected no finding for clean audit, got {finding}"
     )
