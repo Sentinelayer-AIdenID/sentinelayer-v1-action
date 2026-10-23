@@ -174,6 +174,43 @@ def test_inventory_requires_explicit_supported_source_scope(tmp_path: Path, mode
                         scan_mode=mode, max_candidates=50)
 
 
+def test_full_mode_preserves_ingest_boundary(tmp_path: Path):
+    """Non-pr-diff modes already refuse at source_scope_unavailable before
+    reaching the ingest check. The ingest guard exists for forward-compat
+    when non-pr-diff modes reach this code path."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text("fn main() {}\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/lib.rs"}]}
+    changed = ["src/lib.rs"]
+
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_scope_unavailable"):
+        build_inventory(
+            repo_root=tmp_path, ingest=ingest, changed_files=changed,
+            scan_mode="deep", max_candidates=50,
+        )
+
+
+def test_pr_diff_mode_allows_outside_ingest(tmp_path: Path):
+    """In pr-diff mode a file outside the ingest is still admitted to the
+    review inventory — the relaxed boundary is the whole point of the fix."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text("fn main() {}\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_lib.py").write_text("def test(): pass\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/lib.rs"}]}
+    changed = ["src/lib.rs", "tests/test_lib.py"]
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "src/lib.rs" in paths
+    assert "tests/test_lib.py" in paths, "pr-diff must allow files outside ingest"
+
+
 def test_credential_coordinates_are_refused_in_inventory_and_candidate_state(tmp_path):
     name = "sk-" + "OWNEDFAKETOKEN0123456789" + ".py"
     (tmp_path / name).write_bytes(b"safe_value = 1\n")
@@ -1066,7 +1103,7 @@ def test_audit_incomplete_keeps_lockfile_as_candidate(tmp_path: Path):
 
 
 def test_cargo_lockfile_excluded_with_dep_audit_coverage(tmp_path: Path):
-    """A Cargo.lock with a clean cargo outcome is path-verified and excluded."""
+    """A Cargo.lock with a clean cargo outcome and matching per-file receipt is excluded."""
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "lib.rs").write_text("fn main() {}\n", encoding="utf-8")
     (tmp_path / "Cargo.lock").write_text("# Cargo.lock\n", encoding="utf-8")
@@ -1076,7 +1113,8 @@ def test_cargo_lockfile_excluded_with_dep_audit_coverage(tmp_path: Path):
     dep_audit_evidence = {
         "enabled": True,
         "complete": True,
-        "outcomes": [{"ecosystem": "cargo", "applicable": True, "state": "clean"}],
+        "outcomes": [{"ecosystem": "cargo", "applicable": True, "state": "clean",
+                        "lockfile_path": "Cargo.lock", "lockfile_sha256": "e9392bb0825492b9c6e11258f5b70e7eaa7a0d2fadb48b22d9b91dbed9e1986d"}],
     }
 
     inventory = build_inventory(
@@ -1091,15 +1129,9 @@ def test_cargo_lockfile_excluded_with_dep_audit_coverage(tmp_path: Path):
 
 
 def test_nested_cargo_lockfile_stays_candidate(tmp_path: Path):
-    """A nested Cargo.lock not at repo root: the cargo audit only audits
-    the root lockfile. The nested one must stay as a candidate because the
-    receipt only covers the root path that was actually audited.
-    Note: _cargo_lockfile_receipt verifies file existence but does not check
-    path against audit evidence (which lacks per-file receipts for cargo).
-    A nested Cargo.lock with a clean cargo outcome is currently excluded;
-    this test documents the expected behavior — once per-file receipts are
-    added to the cargo audit evidence, this test must be updated to assert
-    the nested lockfile stays as a candidate."""
+    """A nested Cargo.lock not at repo root with a per-file receipt only
+    for the root lockfile: the root is excluded but the nested one stays
+    as a review candidate because its path and hash do not match any receipt."""
     (tmp_path / "src").mkdir()
     (tmp_path / "subproject").mkdir()
     (tmp_path / "src" / "lib.rs").write_text("fn main() {}\n", encoding="utf-8")
@@ -1111,7 +1143,8 @@ def test_nested_cargo_lockfile_stays_candidate(tmp_path: Path):
     dep_audit_evidence = {
         "enabled": True,
         "complete": True,
-        "outcomes": [{"ecosystem": "cargo", "applicable": True, "state": "clean"}],
+        "outcomes": [{"ecosystem": "cargo", "applicable": True, "state": "clean",
+                        "lockfile_path": "Cargo.lock", "lockfile_sha256": "d5427be59ca9950306466b9ca5e01811ae2b699829334749380a250ebff357af"}],
     }
 
     inventory = build_inventory(
@@ -1121,18 +1154,17 @@ def test_nested_cargo_lockfile_stays_candidate(tmp_path: Path):
     )
     paths = {c.file_path for c in inventory.candidates}
     assert "src/lib.rs" in paths
-    assert "Cargo.lock" not in paths, "root Cargo.lock with audit coverage must be excluded"
-    # Per-file receipts not yet available for cargo; both lockfiles excluded
-    # by ecosystem-level outcome. When per-file receipts are added, update to:
-    #   assert "subproject/Cargo.lock" in paths
+    assert "Cargo.lock" not in paths, "root Cargo.lock with matching receipt must be excluded"
+    assert "subproject/Cargo.lock" in paths, (
+        "nested Cargo.lock without matching receipt must stay as candidate"
+    )
     assert inventory.policy_excluded == (
         ("Cargo.lock", "dep_audit_coverage"),
-        ("subproject/Cargo.lock", "dep_audit_coverage"),
     )
 
 
 def test_pylock_excluded_with_dep_audit_coverage(tmp_path: Path):
-    """A pylock.toml with a clean pip outcome is path-verified and excluded."""
+    """A pylock.toml with a clean pip outcome and matching per-file receipt is excluded."""
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
     (tmp_path / "pylock.toml").write_text("[lock]\n", encoding="utf-8")
@@ -1142,7 +1174,8 @@ def test_pylock_excluded_with_dep_audit_coverage(tmp_path: Path):
     dep_audit_evidence = {
         "enabled": True,
         "complete": True,
-        "outcomes": [{"ecosystem": "pip", "applicable": True, "state": "clean"}],
+        "outcomes": [{"ecosystem": "pip", "applicable": True, "state": "clean",
+                        "lockfile_path": "pylock.toml", "lockfile_sha256": "17c38e4e15022d93eb24ae2ce687a1c1776799f1f2d2ce1effbf24b0c0602d3c"}],
     }
 
     inventory = build_inventory(

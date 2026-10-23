@@ -8,10 +8,11 @@ import os
 import re
 import shutil
 import tomllib
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, Optional, TypeGuard
+from typing import Any, Literal, TypeGuard
 from urllib.parse import urlsplit
 
 from packaging.version import InvalidVersion, Version
@@ -25,12 +26,11 @@ from ...models import (
 from ..runner import (
     CommandResult,
     SecuritySuite,
-    _PrivateScratch,
     _is_within,
+    _PrivateScratch,
     _sanitize_proxy_origin,
     run_command,
 )
-
 
 AuditState = Literal["clean", "vulnerable", "indeterminate"]
 AuditEcosystem = Literal["npm", "pip", "cargo"]
@@ -122,40 +122,59 @@ class DependencyAuditOutcome:
     state: AuditState | None
     vulnerability_count: int | None
     reason_code: str | None
+    lockfile_path: str | None = None
+    lockfile_sha256: str | None = None
 
     @classmethod
-    def not_applicable(cls, ecosystem: AuditEcosystem) -> DependencyAuditOutcome:
-        return cls(ecosystem, False, None, None, None)
+    def not_applicable(
+        cls, ecosystem: AuditEcosystem,
+        lockfile_path: str | None = None,
+        lockfile_sha256: str | None = None,
+    ) -> DependencyAuditOutcome:
+        return cls(ecosystem, False, None, None, None, lockfile_path, lockfile_sha256)
 
     @classmethod
-    def clean(cls, ecosystem: AuditEcosystem) -> DependencyAuditOutcome:
-        return cls(ecosystem, True, "clean", 0, None)
+    def clean(
+        cls, ecosystem: AuditEcosystem,
+        lockfile_path: str | None = None,
+        lockfile_sha256: str | None = None,
+    ) -> DependencyAuditOutcome:
+        return cls(ecosystem, True, "clean", 0, None, lockfile_path, lockfile_sha256)
 
     @classmethod
     def vulnerable(
-        cls, ecosystem: AuditEcosystem, count: int
+        cls, ecosystem: AuditEcosystem, count: int,
+        lockfile_path: str | None = None,
+        lockfile_sha256: str | None = None,
     ) -> DependencyAuditOutcome:
-        return cls(ecosystem, True, "vulnerable", count, None)
+        return cls(ecosystem, True, "vulnerable", count, None, lockfile_path, lockfile_sha256)
 
     @classmethod
     def indeterminate(
-        cls, ecosystem: AuditEcosystem, reason_code: str
+        cls, ecosystem: AuditEcosystem, reason_code: str,
+        lockfile_path: str | None = None,
+        lockfile_sha256: str | None = None,
     ) -> DependencyAuditOutcome:
         safe_reason = (
             reason_code
             if reason_code in _AUDIT_INCOMPLETE_REASONS
             else "execution_error"
         )
-        return cls(ecosystem, True, "indeterminate", None, safe_reason)
+        return cls(ecosystem, True, "indeterminate", None, safe_reason, lockfile_path, lockfile_sha256)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "ecosystem": self.ecosystem,
             "applicable": self.applicable,
             "state": self.state,
             "vulnerability_count": self.vulnerability_count,
             "reason_code": self.reason_code,
         }
+        if self.lockfile_path is not None:
+            result["lockfile_path"] = self.lockfile_path
+        if self.lockfile_sha256 is not None:
+            result["lockfile_sha256"] = self.lockfile_sha256
+        return result
 
 
 @dataclass(frozen=True)
@@ -247,7 +266,7 @@ def _parse_pip_vulnerability_count(
     payload: Any,
     *,
     expected_dependencies: frozenset[tuple[str, str]],
-) -> Optional[int]:
+) -> int | None:
     if not isinstance(payload, dict) or "error" in payload:
         return None
     dependencies = payload.get("dependencies")
@@ -301,7 +320,7 @@ def _parse_npm_vulnerability_count(
     payload: Any,
     *,
     expected_dependency_count: int,
-) -> Optional[int]:
+) -> int | None:
     if not isinstance(payload, dict) or "error" in payload:
         return None
     if payload.get("auditReportVersion") != 2:
@@ -367,7 +386,7 @@ def _parse_cargo_vulnerability_count(
     payload: Any,
     *,
     expected_dependency_count: int,
-) -> Optional[int]:
+) -> int | None:
     if not isinstance(payload, dict) or "error" in payload:
         return None
     database = payload.get("database")
@@ -417,7 +436,7 @@ def _parse_cargo_vulnerability_count(
 def _classify_audit_result(
     ecosystem: AuditEcosystem,
     result: CommandResult,
-    parser: Callable[[Any], Optional[int]],
+    parser: Callable[[Any], int | None],
 ) -> DependencyAuditOutcome:
     status_reasons = {
         "not_found": "command_not_found",
@@ -980,7 +999,7 @@ def _has_pip_routing_configuration(
     )
 
 
-def _outcome_finding(outcome: DependencyAuditOutcome) -> Optional[Finding]:
+def _outcome_finding(outcome: DependencyAuditOutcome) -> Finding | None:
     if outcome.state == "indeterminate":
         return _audit_incomplete_finding(
             outcome.ecosystem,
@@ -1058,7 +1077,7 @@ class DepAuditSuite(SecuritySuite):
         args: list[str],
         cwd: Path,
         project_root: Path,
-        parser: Callable[[Any], Optional[int]],
+        parser: Callable[[Any], int | None],
     ) -> tuple[DependencyAuditOutcome, bool]:
         try:
             result = await run_command(
@@ -1091,7 +1110,7 @@ class DepAuditSuite(SecuritySuite):
         root: Path,
         discovery: _ManifestDiscovery | None = None,
         project_records: list[dict] | None = None,
-    ) -> tuple[Optional[Finding], DependencyAuditOutcome]:
+    ) -> tuple[Finding | None, DependencyAuditOutcome]:
         """Audit every discovered independent npm project without executing it."""
         discovery = discovery or _discover_manifests(root)
         if not discovery.complete or discovery.root is None or not discovery.npm:
@@ -1158,7 +1177,7 @@ class DepAuditSuite(SecuritySuite):
         root: Path,
         discovery: _ManifestDiscovery | None = None,
         *, workspace_root: Path,
-    ) -> tuple[Optional[Finding], DependencyAuditOutcome]:
+    ) -> tuple[Finding | None, DependencyAuditOutcome]:
         discovery = discovery or _discover_manifests(root)
         outcome = _layout_outcome(discovery, "npm")
         if outcome is not None:
@@ -1251,7 +1270,7 @@ class DepAuditSuite(SecuritySuite):
         self,
         root: Path,
         discovery: _ManifestDiscovery | None = None,
-    ) -> tuple[Optional[Finding], DependencyAuditOutcome]:
+    ) -> tuple[Finding | None, DependencyAuditOutcome]:
         discovery = discovery or _discover_manifests(root)
         outcome = _layout_outcome(discovery, "pip")
         if outcome is not None:
@@ -1263,6 +1282,16 @@ class DepAuditSuite(SecuritySuite):
                 "pip", "unsupported_pip_input"
             )
             return _outcome_finding(outcome), outcome
+        pip_lockfiles = discovery.paths_for("pip")
+        pip_lock_rel: str | None = None
+        pip_lock_hash: str | None = None
+        if pip_lockfiles:
+            first_lock = pip_lockfiles[0]
+            pip_lock_rel = first_lock.relative_to(root).as_posix()
+            try:
+                pip_lock_hash = hashlib.sha256(first_lock.read_bytes()).hexdigest()
+            except (OSError, PermissionError):
+                pip_lock_hash = None
 
         try:
             with _PrivateScratch(prefix="omargate-pip-audit-") as audit_scratch:
@@ -1270,16 +1299,18 @@ class DepAuditSuite(SecuritySuite):
                 project_root = root.resolve(strict=True)
                 if _is_within(audit_cwd, project_root):
                     outcome = DependencyAuditOutcome.indeterminate(
-                        "pip", "unsafe_working_directory"
+                        "pip", "unsafe_working_directory",
+                        lockfile_path=pip_lock_rel, lockfile_sha256=pip_lock_hash,
                     )
                 else:
                     expected_dependencies, input_error = _prepare_python_pins(
-                        project_root, discovery.paths_for("pip"), audit_cwd,
+                        project_root, pip_lockfiles, audit_cwd,
                     )
                     audit_requirements = audit_cwd / "requirements.txt"
                     if expected_dependencies is None:
                         outcome = DependencyAuditOutcome.indeterminate(
-                            "pip", input_error or "unsafe_pip_input"
+                            "pip", input_error or "unsafe_pip_input",
+                            lockfile_path=pip_lock_rel, lockfile_sha256=pip_lock_hash,
                         )
                     else:
                         command = [
@@ -1312,13 +1343,20 @@ class DepAuditSuite(SecuritySuite):
             raise
         except (OSError, RuntimeError):
             outcome = DependencyAuditOutcome.indeterminate("pip", "execution_error")
+        # Attach per-file receipt to audit outcomes that don't already have one
+        if outcome is not None and outcome.lockfile_path is None and pip_lock_rel is not None:
+            outcome = outcome.__class__(
+                outcome.ecosystem, outcome.applicable, outcome.state,
+                outcome.vulnerability_count, outcome.reason_code,
+                lockfile_path=pip_lock_rel, lockfile_sha256=pip_lock_hash,
+            )
         return _outcome_finding(outcome), outcome
 
     async def _cargo_audit(
         self,
         root: Path,
         discovery: _ManifestDiscovery | None = None,
-    ) -> tuple[Optional[Finding], DependencyAuditOutcome]:
+    ) -> tuple[Finding | None, DependencyAuditOutcome]:
         discovery = discovery or _discover_manifests(root)
         outcome = _layout_outcome(discovery, "cargo")
         if outcome is not None:
@@ -1335,6 +1373,8 @@ class DepAuditSuite(SecuritySuite):
         if not _is_safe_project_file(root, lockfile):
             outcome = DependencyAuditOutcome.indeterminate("cargo", "unsafe_lockfile")
             return _outcome_finding(outcome), outcome
+        lockfile_rel = lockfile.relative_to(root).as_posix()
+        lockfile_hash = hashlib.sha256(lockfile.read_bytes()).hexdigest()
 
         try:
             project_root = root.resolve(strict=True)
@@ -1342,7 +1382,8 @@ class DepAuditSuite(SecuritySuite):
                 audit_cwd = audit_scratch.path.resolve(strict=True)
                 if _is_within(audit_cwd, project_root):
                     outcome = DependencyAuditOutcome.indeterminate(
-                        "cargo", "unsafe_working_directory"
+                        "cargo", "unsafe_working_directory",
+                        lockfile_path=lockfile_rel, lockfile_sha256=lockfile_hash,
                     )
                 elif not _copy_safe_project_file(
                     project_root,
@@ -1351,7 +1392,8 @@ class DepAuditSuite(SecuritySuite):
                     max_bytes=_MAX_CARGO_INPUT_BYTES,
                 ):
                     outcome = DependencyAuditOutcome.indeterminate(
-                        "cargo", "unsafe_lockfile"
+                        "cargo", "unsafe_lockfile",
+                        lockfile_path=lockfile_rel, lockfile_sha256=lockfile_hash,
                     )
                 else:
                     audit_lockfile = audit_cwd / "Cargo.lock"
@@ -1360,7 +1402,8 @@ class DepAuditSuite(SecuritySuite):
                     )
                     if expected_dependency_count is None:
                         outcome = DependencyAuditOutcome.indeterminate(
-                            "cargo", "unsafe_lockfile"
+                            "cargo", "unsafe_lockfile",
+                            lockfile_path=lockfile_rel, lockfile_sha256=lockfile_hash,
                         )
                     else:
                         outcome, cleanup_proven = await self._run_audit_command(
@@ -1387,6 +1430,13 @@ class DepAuditSuite(SecuritySuite):
             raise
         except (OSError, RuntimeError):
             outcome = DependencyAuditOutcome.indeterminate("cargo", "execution_error")
+        # Attach per-file receipt to successful audit outcomes
+        if outcome is not None and outcome.state in ("clean", "vulnerable") or outcome is not None and outcome.state == "indeterminate" and outcome.lockfile_path is None:
+            outcome = outcome.__class__(
+                outcome.ecosystem, outcome.applicable, outcome.state,
+                outcome.vulnerability_count, outcome.reason_code,
+                lockfile_path=lockfile_rel, lockfile_sha256=lockfile_hash,
+            )
         return _outcome_finding(outcome), outcome
 
     def failure_result(

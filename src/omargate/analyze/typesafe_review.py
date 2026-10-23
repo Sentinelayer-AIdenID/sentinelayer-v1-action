@@ -108,17 +108,19 @@ def _npm_lockfile_receipt(relative: str, evidence: dict, absolute_path: Path | N
 
 
 def _cargo_lockfile_receipt(relative: str, evidence: dict, absolute_path: Path | None = None) -> str | None:
-    """Cargo.lock coverage requires a path-verified clean/vulnerable cargo outcome."""
+    """Cargo.lock coverage requires the exact path in a cargo outcome receipt with matching hash."""
+    import hashlib
     if absolute_path is not None:
         try:
-            absolute_path.read_bytes()
+            raw = absolute_path.read_bytes()
         except (OSError, PermissionError):
             return None
     else:
         try:
-            Path(relative).read_bytes()
+            raw = Path(relative).read_bytes()
         except (OSError, PermissionError):
             return None
+    file_hash = hashlib.sha256(raw).hexdigest()
     outcomes = evidence.get("outcomes") or ()
     if not isinstance(outcomes, (list, tuple)):
         return None
@@ -129,23 +131,29 @@ def _cargo_lockfile_receipt(relative: str, evidence: dict, absolute_path: Path |
             continue
         if not outcome.get("applicable", True):
             return None
-        if outcome.get("state") in ("clean", "vulnerable"):
-            return "dep_audit_coverage"
+        entry_path = outcome.get("lockfile_path")
+        entry_hash = outcome.get("lockfile_sha256")
+        if entry_path == relative and entry_hash == file_hash:
+            if outcome.get("state") in ("clean", "vulnerable"):
+                return "dep_audit_coverage"
+            return None
     return None
 
 
 def _pip_lockfile_receipt(relative: str, evidence: dict, absolute_path: Path | None = None) -> str | None:
-    """Pylock coverage requires a path-verified clean/vulnerable pip outcome."""
+    """Pylock coverage requires the exact path in a pip outcome receipt with matching hash."""
+    import hashlib
     if absolute_path is not None:
         try:
-            absolute_path.read_bytes()
+            raw = absolute_path.read_bytes()
         except (OSError, PermissionError):
             return None
     else:
         try:
-            Path(relative).read_bytes()
+            raw = Path(relative).read_bytes()
         except (OSError, PermissionError):
             return None
+    file_hash = hashlib.sha256(raw).hexdigest()
     outcomes = evidence.get("outcomes") or ()
     if not isinstance(outcomes, (list, tuple)):
         return None
@@ -156,8 +164,12 @@ def _pip_lockfile_receipt(relative: str, evidence: dict, absolute_path: Path | N
             continue
         if not outcome.get("applicable", True):
             return None
-        if outcome.get("state") in ("clean", "vulnerable"):
-            return "dep_audit_coverage"
+        entry_path = outcome.get("lockfile_path")
+        entry_hash = outcome.get("lockfile_sha256")
+        if entry_path == relative and entry_hash == file_hash:
+            if outcome.get("state") in ("clean", "vulnerable"):
+                return "dep_audit_coverage"
+            return None
     return None
 
 class TypeSafeReviewIncomplete(ValueError):
@@ -294,7 +306,10 @@ def build_inventory(
     candidates: list[ReviewCandidate] = []
     hashes: list[tuple[str, str]] = []
     excluded: list[tuple[str, str]] = []
+    ingest_files = {entry["path"] for entry in ingest.get("files", ()) if isinstance(entry, dict) and "path" in entry}
     for relative in sorted(set(changed_files)):
+        if scan_mode != "pr-diff" and relative not in ingest_files:
+            raise TypeSafeReviewIncomplete("source_outside_inventory")
         path = _source_path(repo_root, relative)
         if path.stat().st_size > MAX_FILE_BYTES:
             raise TypeSafeReviewIncomplete("source_budget_exceeded")
