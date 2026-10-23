@@ -186,13 +186,19 @@ _POLICY_UNCERTAINTY_REASONS = frozenset({
 
 def _policy_only_uncertain(assessment: Mapping) -> bool:
     """True only for a completed policy call whose every unresolved span is uncertain."""
-    unresolved = assessment.get("unresolved_candidates")
+    unresolved, candidates = assessment.get("unresolved_candidates"), assessment.get("candidates")
+    if type(unresolved) is not list or not unresolved or type(candidates) is not list:
+        return False
+    # Unresolved ids must be distinct, non-empty members of the reviewed candidate set.
+    known = {row["candidate_id"] for row in candidates
+             if type(row) is dict and isinstance(row.get("candidate_id"), str) and row["candidate_id"]}
+    ids = [row.get("candidate_id") if type(row) is dict else None for row in unresolved]
     return (assessment.get("status") == "incomplete"
             and assessment.get("decision_reason") == "policy_review_incomplete"
             and "failure_class" not in assessment and "reason_code" not in assessment
-            and type(unresolved) is list and bool(unresolved)
-            and all(type(row) is dict and isinstance(row.get("candidate_id"), str)
-                    and isinstance(row.get("reason"), str)
+            and all(isinstance(candidate_id, str) and candidate_id in known for candidate_id in ids)
+            and len(set(ids)) == len(ids)
+            and all(isinstance(row.get("reason"), str)
                     and row["reason"] in _POLICY_UNCERTAINTY_REASONS for row in unresolved))
 
 

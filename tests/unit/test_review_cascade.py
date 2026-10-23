@@ -407,9 +407,11 @@ AMBIGUOUS = "policy_risk_answer_ambiguous"
 
 
 def incomplete_policy(*reasons, **overrides):
+    ids = [f"candidate-{index}" for index in range(len(reasons))]
     return {"complete": False, "decision_reason": "policy_review_incomplete",
-            "unresolved_candidates": [{"candidate_id": f"candidate-{index}", "reason": reason}
-                                      for index, reason in enumerate(reasons)], **overrides}
+            "candidates": [{"candidate_id": candidate_id} for candidate_id in ids],
+            "unresolved_candidates": [{"candidate_id": candidate_id, "reason": reason}
+                                      for candidate_id, reason in zip(ids, reasons)], **overrides}
 
 
 async def review_with_policy(configured, monkeypatch, policy, generator):
@@ -447,8 +449,15 @@ async def test_uncertain_only_policy_lets_successful_deep_review_decide(configur
     incomplete_policy(AMBIGUOUS, decision_reason="policy_candidate_contract_invalid"),
     incomplete_policy(AMBIGUOUS, unresolved_candidates=[AMBIGUOUS]),
     {"complete": False},
+    incomplete_policy(AMBIGUOUS, candidates=[{"candidate_id": ""}],
+                      unresolved_candidates=[{"candidate_id": "", "reason": AMBIGUOUS}]),
+    incomplete_policy(AMBIGUOUS, AMBIGUOUS,
+                      unresolved_candidates=[{"candidate_id": "candidate-0", "reason": AMBIGUOUS}] * 2),
+    incomplete_policy(AMBIGUOUS, candidates=[{"candidate_id": "candidate-other"}]),
+    incomplete_policy(AMBIGUOUS, candidates=None),
 ], ids=["mixed-malformed", "malformed-first", "inconsistent", "coverage", "unknown-reason",
-        "empty-unresolved", "contract-reason", "malformed-rows", "no-evidence"])
+        "empty-unresolved", "contract-reason", "malformed-rows", "no-evidence",
+        "empty-id", "duplicate-id", "id-outside-candidates", "no-candidate-set"])
 async def test_invalid_policy_evidence_still_fails_closed_after_successful_deep_review(configured, monkeypatch, assessment):
     defect = {"severity": "P1", "file_path": "x.py", "line_start": 1, "category": "auth", "message": "defect", "source": "llm"}
     policy = AsyncMock(return_value=TypedReview([], {}, assessment))
