@@ -111,10 +111,6 @@ def _llm_display_identity(analysis, **kwargs) -> tuple[str, str]:
     triage's source_failure_reason when the review was not attempted.
     """
     routing = kwargs.get("routing") if kwargs else None
-    if isinstance(routing, dict):
-        routing = routing.get("review_routing", routing)
-    if isinstance(routing, dict) and "review_routing" in routing:
-        routing = routing["review_routing"]
 
     if not analysis.llm_attempted and not analysis.llm_success:
         reason = ""
