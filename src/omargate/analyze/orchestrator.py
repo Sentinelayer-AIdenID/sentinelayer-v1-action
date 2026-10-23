@@ -1841,13 +1841,16 @@ class AnalysisOrchestrator:
                 "SENTINELAYER_API_URL", "https://api.sentinelayer.com"
             ),
             **({"reasoning_effort": review_route.effort, "allow_fallback": False,
-                "max_retries": 1, "timeout_seconds": 300} if review_route else {}),
+                "max_retries": 1, "timeout_seconds": 300} if review_route
+               # a non-routed run may set its own effort; reasoning tokens count against max_tokens, so it gets the cascade budget
+               else {"reasoning_effort": self.config.reasoning_effort, "timeout_seconds": 300}
+               if self.config.reasoning_effort else {}),
         )
 
         response = await client.analyze(
             system_prompt=system_prompt,
             user_content=context.content,
-            max_tokens=CASCADE_MAX_OUTPUT_TOKENS if review_route else 4096,
+            max_tokens=CASCADE_MAX_OUTPUT_TOKENS if review_route or self.config.reasoning_effort else 4096,
         )
 
         if not response.success:
@@ -1941,7 +1944,7 @@ class AnalysisOrchestrator:
         )
 
         active_model = codex_model_override or self.config.codex_model
-        runner = CodexRunner(api_key=api_key, model=active_model)
+        runner = CodexRunner(api_key=api_key, model=active_model, reasoning_effort=self.config.reasoning_effort)
         result = await runner.run_audit(
             prompt=built.prompt,
             working_dir=str(self.repo_root),

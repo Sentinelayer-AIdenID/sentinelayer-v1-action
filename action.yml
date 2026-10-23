@@ -172,6 +172,11 @@ inputs:
     required: false
     default: 'gpt-5.3-codex'
 
+  reasoning_effort:
+    description: 'Reasoning effort for the non-routed OpenAI API call and Codex CLI (none|minimal|low|medium|high|xhigh|max). Empty keeps the provider default. Codex CLI accepts at most xhigh, so max reaches it as xhigh. The managed proxy cannot carry an effort and refuses such requests. A configured model_fallback on another provider runs at its own default and is reported under its own model name. intent-cascade-v1 routes set their own effort.'
+    required: false
+    default: ''
+
   codex_timeout:
     description: 'Timeout in seconds for Codex execution'
     required: false
@@ -438,6 +443,7 @@ runs:
         INPUT_USE_CODEX: ${{ inputs.use_codex }}
         INPUT_CODEX_ONLY: ${{ inputs.codex_only }}
         INPUT_CODEX_MODEL: ${{ inputs.codex_model }}
+        INPUT_REASONING_EFFORT: ${{ inputs.reasoning_effort }}
         INPUT_CODEX_TIMEOUT: ${{ inputs.codex_timeout }}
         INPUT_RUN_HARNESS: ${{ inputs.run_harness }}
         INPUT_PIP_AUDIT_IGNORE_IDS: ${{ inputs.pip_audit_ignore_ids }}

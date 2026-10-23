@@ -246,3 +246,34 @@ async def test_missing_codex_cli_is_graceful(tmp_path: Path, monkeypatch) -> Non
     res = await runner.run_audit(prompt="x", working_dir=str(tmp_path))
     assert res.success is False
     assert res.error and "not found" in res.error.lower()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("requested", "sent"), [("max", "xhigh"), ("high", "high"), ("", None)])
+async def test_reasoning_effort_reaches_codex_cli(tmp_path: Path, monkeypatch, requested: str, sent: str | None) -> None:
+    seen: list[tuple] = []
+
+    class FakeProc:
+        returncode = 1
+
+        async def communicate(self, input: bytes | None = None):  # noqa: A002
+            return b'{"type":"turn.failed","error":{"message":"stop"}}', b""
+
+    async def fake_create(*args, **kwargs):  # noqa: ANN001
+        seen.append(args)
+        return FakeProc()
+
+    monkeypatch.setattr("shutil.which", lambda _: "codex")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+
+    await CodexRunner(api_key="sk_test_dummy", model="gpt-6-sol", reasoning_effort=requested).run_audit(
+        prompt="p", working_dir=str(tmp_path)
+    )
+
+    args = seen[0]
+    assert args[args.index("--model") + 1] == "gpt-6-sol"
+    if sent is None:
+        assert not any(str(a).startswith("model_reasoning_effort=") for a in args)
+    else:
+        # the CLI rejects `max`; its highest accepted effort is sent instead
+        assert args[args.index("-c") + 1] == f"model_reasoning_effort={sent}"

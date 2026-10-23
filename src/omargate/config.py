@@ -20,6 +20,7 @@ from .models import (
 
 
 TYPESAFE_GENERATOR_MODEL = "gpt-5.3-codex"
+REASONING_EFFORTS = frozenset({"", "none", "minimal", "low", "medium", "high", "xhigh", "max"})
 
 
 class OmarGateConfig(BaseSettings):
@@ -81,6 +82,10 @@ class OmarGateConfig(BaseSettings):
         description="When true, disable API fallback and use Codex CLI as the only LLM path",
     )
     codex_model: str = Field(default="gpt-5.3-codex", description="Model for Codex CLI")
+    reasoning_effort: str = Field(
+        default="",
+        description="Reasoning effort for the non-routed LLM call and Codex CLI; empty keeps the provider default",
+    )
     codex_timeout: conint(ge=60) = Field(
         default=300, description="Codex timeout in seconds for Codex execution"
     )
@@ -205,6 +210,14 @@ class OmarGateConfig(BaseSettings):
             return trimmed.upper()
         return value
 
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def _validate_reasoning_effort(cls, value: str) -> str:
+        effort = value.strip().lower() if isinstance(value, str) else value
+        if effort not in REASONING_EFFORTS:
+            raise ValueError(f"reasoning_effort must be one of {sorted(REASONING_EFFORTS - {''})} or empty")
+        return effort
+
     @field_validator("sentinelayer_spec_id", mode="before")
     @classmethod
     def _normalize_spec_hash(cls, value: str) -> str:
@@ -268,6 +281,9 @@ class OmarGateConfig(BaseSettings):
         # CodexRunner fails gracefully and the orchestrator falls back to LLM API.
 
         provider = self.llm_provider
+        if self.reasoning_effort and provider == "openai" and not self.openai_api_key.get_secret_value().strip():
+            # without a BYO key the managed proxy would serve every call, and its contract carries no effort
+            raise ValueError("reasoning_effort requires a BYO openai_api_key; the managed LLM proxy cannot apply it")
         if provider == "anthropic" and not self.anthropic_api_key.get_secret_value().strip():
             raise ValueError("anthropic_api_key is required when llm_provider=anthropic")
         if provider == "google" and not self.google_api_key.get_secret_value().strip():
