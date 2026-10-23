@@ -124,3 +124,13 @@ def test_reasoning_effort_rejects_unknown_value(monkeypatch: pytest.MonkeyPatch)
 
     with pytest.raises(ValidationError):
         OmarGateConfig()
+
+
+def test_reasoning_effort_requires_byo_openai_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("INPUT_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("INPUT_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("INPUT_SENTINELAYER_MANAGED_LLM", "true")
+    monkeypatch.setenv("INPUT_REASONING_EFFORT", "max")
+
+    with pytest.raises(ValidationError, match="requires a BYO openai_api_key"):
+        OmarGateConfig()

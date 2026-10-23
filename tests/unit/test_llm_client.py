@@ -509,3 +509,40 @@ async def test_managed_oidc_request_overrides_existing_audience(monkeypatch) -> 
     assert len(requested_urls) == 1
     assert "audience=sentinelayer" in requested_urls[0]
     assert "audience=sts.amazonaws.com" not in requested_urls[0]
+
+
+@pytest.mark.anyio
+async def test_managed_proxy_refuses_a_requested_reasoning_effort(monkeypatch) -> None:
+    # The managed proxy contract carries no effort: a request that asked for one is refused before any HTTP call,
+    # not silently served at the provider default (codex-warden review of #129).
+    posts: list[dict] = []
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc) -> None:
+            return None
+
+        async def post(self, url, json=None, headers=None):  # noqa: A002
+            posts.append(json)
+            raise AssertionError("no managed HTTP call may be made when an effort was requested")
+
+    monkeypatch.setattr("omargate.analyze.llm.llm_client.httpx.AsyncClient", _FakeAsyncClient)
+    client = LLMClient(
+        api_key="",
+        llm_provider="openai",
+        primary_model="gpt-6-sol",
+        managed_llm=True,
+        sentinelayer_token="sl_test_token",
+        reasoning_effort="max",
+    )
+
+    result = await client._call_with_retry("gpt-6-sol", "system", "user", 16384)
+
+    assert result.success is False
+    assert "cannot apply reasoning_effort=max" in (result.error or "")
+    assert posts == []

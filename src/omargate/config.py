@@ -281,6 +281,9 @@ class OmarGateConfig(BaseSettings):
         # CodexRunner fails gracefully and the orchestrator falls back to LLM API.
 
         provider = self.llm_provider
+        if self.reasoning_effort and provider == "openai" and not self.openai_api_key.get_secret_value().strip():
+            # without a BYO key the managed proxy would serve every call, and its contract carries no effort
+            raise ValueError("reasoning_effort requires a BYO openai_api_key; the managed LLM proxy cannot apply it")
         if provider == "anthropic" and not self.anthropic_api_key.get_secret_value().strip():
             raise ValueError("anthropic_api_key is required when llm_provider=anthropic")
         if provider == "google" and not self.google_api_key.get_secret_value().strip():

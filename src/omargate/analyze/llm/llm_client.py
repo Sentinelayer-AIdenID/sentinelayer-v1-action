@@ -172,6 +172,15 @@ class LLMClient:
         route: str = "managed",
         fallback_chain: Optional[str] = None,
     ) -> LLMResponse:
+        if self.reasoning_effort:
+            # The managed proxy contract (POST /api/v1/proxy/llm) carries no reasoning effort. A request that asked for one
+            # is refused here, explicitly, instead of being served silently at the provider default.
+            return LLMResponse(
+                content="",
+                usage=_unreturned_usage("openai", 0, route=route, fallback_chain=fallback_chain),
+                success=False,
+                error=f"Managed LLM proxy cannot apply reasoning_effort={self.reasoning_effort}; not sent",
+            )
         endpoint = f"{self.managed_api_url.rstrip('/')}/api/v1/proxy/llm"
 
         headers = {
