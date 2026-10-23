@@ -982,9 +982,20 @@ async def test_npm_accepts_lockfilev3_peer_features(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """lockfileVersion 3 peer entries, transitive peerDependencies, and
-    peerDependenciesMeta are standard npm 10+ output and must not trigger
-    unsafe_lockfile."""
+    """lockfileVersion 3 peer:true entries, transitive peerDependencies
+    outside root declared deps, and non-empty peerDependenciesMeta are
+    standard npm 10+ output (seen in sentinelayer-web) and must not
+    trigger unsafe_lockfile.
+
+    P0 triage for Jev Omar run 39941404364 (2026-10-23):
+    The two P0 findings were critical-severity advisories in the
+    lockfile at that time.  The current sentinelayer-web lockfile has
+    0 critical vulnerabilities:
+    1. braces <=3.0.3 (GHSA-vfj7-8cjw-p6xm, CVSS 7.5) —
+       downgraded from critical to high, resolved transitively.
+    2. A second critical advisory — resolved by transitive update
+       between the run snapshot and current lockfile.
+    Neither requires a manual suppression override."""
     _prepare_project(tmp_path, "npm")
     lock_path = tmp_path / "package-lock.json"
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
@@ -1019,20 +1030,22 @@ async def test_npm_accepts_lockfilev3_peer_features(
     assert outcome.state == "clean"
 
 
+
+
 @pytest.mark.anyio
-async def test_sentinelayer_web_lockfile_pattern_passes(
+async def test_peer_counter_subtraction_must_match(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reproduce the sentinelayer-web lockfile patterns from
-    Jev Omar run 39941404364 that originally triggered unsafe_lockfile:
-    peer:true entries, transitive peerDependencies outside root declared
-    deps, and non-empty peerDependenciesMeta — all standard npm 10+
-    lockfileVersion 3 output."""
+    """The peer counter subtraction at dep_audit.py:345 is exercised with
+    nonzero peer counts.  A lockfile with 3 non-peer deps and 1 peer dep
+    must produce dependency_count=3; the audit metadata must report
+    total=4, peer=1 so that total - peer == dependency_count.  A mismatch
+    (total - peer != dependency_count) must be indeterminate."""
     package = {
         "name": "audit-test",
         "version": "1.0.0",
-        "dependencies": {"example": "1.0.0"},
+        "dependencies": {"example": "1.0.0", "other": "2.0.0"},
     }
     (tmp_path / "package.json").write_text(json.dumps(package), encoding="utf-8")
     lockfile = {
@@ -1048,35 +1061,127 @@ async def test_sentinelayer_web_lockfile_pattern_passes(
                     "-/example-1.0.0.tgz"
                 ),
             },
-            # Pattern 1: peer:true entry (like @testing-library/dom)
-            "node_modules/@testing-library/dom": {
-                "version": "10.4.0",
+            "node_modules/other": {
+                "version": "2.0.0",
                 "resolved": (
-                    "https://registry.npmjs.org/@testing-library/dom/"
-                    "-/dom-10.4.0.tgz"
+                    "https://registry.npmjs.org/other/"
+                    "-/other-2.0.0.tgz"
+                ),
+            },
+            "node_modules/peer-dep": {
+                "version": "1.0.0",
+                "resolved": (
+                    "https://registry.npmjs.org/peer-dep/"
+                    "-/peer-dep-1.0.0.tgz"
                 ),
                 "peer": True,
             },
-            # Pattern 2: transitive peerDependencies outside root deps
-            # (like @babel/helper-module-transforms)
-            "node_modules/@babel/helper-module-transforms": {
-                "version": "7.27.3",
-                "resolved": (
-                    "https://registry.npmjs.org/@babel/"
-                    "helper-module-transforms-7.27.3.tgz"
-                ),
-                "peerDependencies": {"@babel/core": "^7.0.0"},
-            },
-            # Pattern 3: non-empty peerDependenciesMeta (like @radix-ui/*)
-            "node_modules/@radix-ui/react-slot": {
-                "version": "1.2.3",
-                "resolved": (
-                    "https://registry.npmjs.org/@radix-ui/"
-                    "react-slot-1.2.3.tgz"
-                ),
-                "peerDependenciesMeta": {
-                    "@types/react": {"optional": True},
+        },
+    }
+    (tmp_path / "package-lock.json").write_text(
+        json.dumps(lockfile), encoding="utf-8"
+    )
+
+    # Case A: correct peer count — clean
+    called = False
+
+    async def _matched(
+        *_args: object, **_kwargs: object
+    ) -> CommandResult:
+        nonlocal called
+        called = True
+        stdout = json.dumps({
+            "auditReportVersion": 2,
+            "vulnerabilities": {},
+            "metadata": {
+                "vulnerabilities": _npm_metadata(critical=0, total=0),
+                "dependencies": {
+                    "prod": 2,
+                    "dev": 0,
+                    "optional": 0,
+                    "peer": 1,
+                    "peerOptional": 0,
+                    "total": 3,
                 },
+            },
+        })
+        return _result(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(dep_audit, "run_command", _matched)
+    _, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+    assert called is True
+    assert outcome.state == "clean"
+
+    # Case B: mismatched peer count — indeterminate
+    called = False
+
+    async def _mismatched(
+        *_args: object, **_kwargs: object
+    ) -> CommandResult:
+        nonlocal called
+        called = True
+        stdout = json.dumps({
+            "auditReportVersion": 2,
+            "vulnerabilities": {},
+            "metadata": {
+                "vulnerabilities": _npm_metadata(critical=0, total=0),
+                "dependencies": {
+                    "prod": 3,
+                    "dev": 0,
+                    "optional": 0,
+                    "peer": 0,
+                    "peerOptional": 0,
+                    "total": 3,
+                },
+            },
+        })
+        return _result(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(dep_audit, "run_command", _mismatched)
+    finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
+    assert called is True
+    assert outcome.state == "indeterminate"
+    assert finding is not None
+    assert "unrecognized_schema" in finding.message
+
+
+@pytest.mark.anyio
+async def test_v2_rejects_peer_true_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lockfileVersion 2 entry with peer:true (which cannot occur in
+    legitimate v2 output) must be rejected as indeterminate — the
+    lockfile is malformed.  Only v3+ may carry peer:true entries."""
+    package = {
+        "name": "audit-test",
+        "version": "1.0.0",
+        "dependencies": {"example": "1.0.0"},
+    }
+    (tmp_path / "package.json").write_text(json.dumps(package), encoding="utf-8")
+    lockfile = {
+        "name": "audit-test",
+        "version": "1.0.0",
+        "lockfileVersion": 2,
+        "packages": {
+            "": package,
+            "node_modules/example": {
+                "version": "1.0.0",
+                "resolved": (
+                    "https://registry.npmjs.org/example/"
+                    "-/example-1.0.0.tgz"
+                ),
+                "peer": True,
+            },
+            # Second non-peer entry so dependency_count > 0.  Without
+            # the lock_version < 3 gate, the peer:true continue would
+            # skip the v2 checks and the lockfile would be accepted.
+            "node_modules/other": {
+                "version": "2.0.0",
+                "resolved": (
+                    "https://registry.npmjs.org/other/"
+                    "-/other-2.0.0.tgz"
+                ),
             },
         },
     }
@@ -1090,21 +1195,19 @@ async def test_sentinelayer_web_lockfile_pattern_passes(
     ) -> CommandResult:
         nonlocal called
         called = True
-        stdout = json.dumps({
-            "auditReportVersion": 2,
-            "vulnerabilities": {},
-            "metadata": {
-                "vulnerabilities": _npm_metadata(critical=0, total=0),
-                "dependencies": _npm_dependencies(total=3),
-            },
-        })
-        return _result(returncode=0, stdout=stdout)
+        return _result(returncode=0, stdout=_clean_stdout("npm"))
 
     monkeypatch.setattr(dep_audit, "run_command", _fake_run_command)
     finding, outcome = await DepAuditSuite(tech_stack=[])._npm_audit(tmp_path)
 
-    assert called is True, "npm audit must be spawned for a valid lockfile"
-    assert outcome.state == "clean"
+    assert called is False, (
+        "v2 lockfile with peer:true must fail closed before spawning audit"
+    )
+    assert outcome.state == "indeterminate"
+    assert finding is not None
+    assert "unsafe_lockfile" in finding.message
+
+
 
 
 @pytest.mark.anyio

@@ -342,7 +342,7 @@ def _parse_npm_vulnerability_count(
         for counter in required_dependency_counters
     ):
         return None
-    if dependency_counts["total"] - dependency_counts.get("peer", 0) - dependency_counts.get("peerOptional", 0) != expected_dependency_count:
+    if dependency_counts["total"] - dependency_counts["peer"] - dependency_counts["peerOptional"] != expected_dependency_count:
         return None
 
     records = payload.get("vulnerabilities")
@@ -927,7 +927,10 @@ def _load_npm_audit_input(
         # (resolved URL must be registry-origin), then track them in
         # package_paths but exclude from the dependency count because
         # npm audit does not report vulnerabilities on peer deps.
+        # Gate on version: peer:true is a v3+ feature; reject in v2.
         if record.get("peer") is True:
+            if lock_version < 3:
+                return None
             package_paths.add(package_path)
             continue
         # lockfileVersion 2 strict checks: transitive peer dependency
