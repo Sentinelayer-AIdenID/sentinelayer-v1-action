@@ -144,8 +144,18 @@ def _source_path(repo_root: Path, relative: str) -> Path:
 
 def _is_lockfile(relative: str) -> bool:
     """Recognise generated lockfiles that the dependency audit covers.
-    Matches the same pattern as the ingest runner: **/*.lock (basename ends in .lock)."""
-    return PurePosixPath(relative).name.endswith(".lock")
+
+    The dependency audit (dep_audit.py) audits these exact lockfiles:
+    npm: package-lock.json, npm-shrinkwrap.json
+    pip: Pipfile.lock, poetry.lock, uv.lock, pdm.lock
+    cargo: Cargo.lock
+    Also recognises pylock.* (pip lock inputs that the audit covers)."""
+    name = PurePosixPath(relative).name
+    return name in {
+        "package-lock.json", "npm-shrinkwrap.json",
+        "Pipfile.lock", "poetry.lock", "uv.lock", "pdm.lock",
+        "Cargo.lock",
+    } or (name.startswith("pylock.") and len(name) > len("pylock."))
 
 
 def build_inventory(
@@ -168,15 +178,15 @@ def build_inventory(
     hashes: list[tuple[str, str]] = []
     policy_excluded: list[tuple[str, str]] = []
     for relative in sorted(set(changed_files)):
-        if _is_lockfile(relative):
-            policy_excluded.append((relative, "policy-excluded: covered by dependency audit"))
-            continue
         path = _source_path(repo_root, relative)
         if path.stat().st_size > MAX_FILE_BYTES:
             raise TypeSafeReviewIncomplete("source_budget_exceeded")
         raw = path.read_bytes()
         if len(raw) > MAX_FILE_BYTES or b"\0" in raw:
             raise TypeSafeReviewIncomplete("unsupported_source_bytes")
+        if _is_lockfile(relative):
+            policy_excluded.append((relative, "policy-excluded: covered by dependency audit"))
+            continue
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
@@ -396,6 +406,10 @@ async def review_inventory(
         "provider": "typesafe", "model": intent_model_reference(response.model),
         "policy_id": policy.policy_id, "calibration_id": policy.calibration_id,
         "source_hashes": dict(inventory.source_hashes),
+        "policy_excluded": [
+            {"path": path, "reason": reason}
+            for path, reason in inventory.policy_excluded
+        ],
         "candidates": [{
             "candidate_id": candidate.candidate_id,
             "file_path": candidate.file_path,

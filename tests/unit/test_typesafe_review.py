@@ -737,3 +737,100 @@ def test_diff_inventory_includes_test_files_without_ingest_membership(tmp_path: 
     )
     paths = {c.file_path for c in inventory.candidates}
     assert paths == {"src/main.py", "tests/test_main.py"}
+
+
+def test_is_lockfile_recognises_dep_audit_lockfiles():
+    """_is_lockfile must match exactly the lockfiles that dep_audit.py audits,
+    not every *.lock file. package-lock.json is the most common — the original
+    *.lock suffix check missed it."""
+    from omargate.analyze.typesafe_review import _is_lockfile
+
+    # npm lockfiles audited by dep_audit.py
+    assert _is_lockfile("package-lock.json") is True
+    assert _is_lockfile("npm-shrinkwrap.json") is True
+    assert _is_lockfile("subdir/package-lock.json") is True
+    assert _is_lockfile("subdir/npm-shrinkwrap.json") is True
+
+    # pip lockfiles audited by dep_audit.py
+    assert _is_lockfile("Pipfile.lock") is True
+    assert _is_lockfile("poetry.lock") is True
+    assert _is_lockfile("uv.lock") is True
+    assert _is_lockfile("pdm.lock") is True
+    assert _is_lockfile("subdir/Pipfile.lock") is True
+
+    # pip lock inputs that dep_audit.py covers
+    assert _is_lockfile("pylock.toml") is True
+    assert _is_lockfile("subdir/pylock.json") is True
+    assert _is_lockfile("pylock.") is False  # too short
+
+    # cargo
+    assert _is_lockfile("Cargo.lock") is True
+    assert _is_lockfile("subdir/Cargo.lock") is True
+
+    # NOT lockfiles the dep_audit covers — must stay in review scope
+    assert _is_lockfile("random.lock") is False
+    assert _is_lockfile("Gemfile.lock") is False
+    assert _is_lockfile("yarn.lock") is False
+    assert _is_lockfile("composer.lock") is False
+    assert _is_lockfile("mix.lock") is False
+
+
+def test_unknown_lockfile_stays_in_review_scope(tmp_path: Path):
+    """A *.lock file that is NOT a dep_audit lockfile must stay in the review
+    inventory. The exclusion must not hide ordinary code behind a filename match."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "Gemfile.lock").write_text("GEM\n  remote: https://rubygems.org/\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "Gemfile.lock"]
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert paths == {"src/main.py", "Gemfile.lock"}
+    assert inventory.policy_excluded == ()
+
+
+@pytest.mark.anyio
+async def test_assessment_includes_policy_excluded(tmp_path: Path):
+    """policy_excluded must be emitted in the assessment output so it appears
+    in REVIEW_ROUTING.json, not only stored on the ReviewInventory object."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("answer = 42\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 2}\n', encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "package-lock.json"]
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+    )
+    assert len(inventory.policy_excluded) == 1
+    assert inventory.policy_excluded[0][0] == "package-lock.json"
+
+    result = await review(tmp_path, inventory)
+    assert "policy_excluded" in result.assessment
+    excluded = result.assessment["policy_excluded"]
+    assert len(excluded) == 1
+    assert excluded[0]["path"] == "package-lock.json"
+    assert "dependency" in excluded[0]["reason"]
+
+
+def test_lockfile_path_validation_runs_before_exclusion(tmp_path: Path):
+    """Path containment and symlink checks must run before a lockfile is
+    excluded. A lockfile outside the repo root must refuse, not silently skip."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "../package-lock.json"]
+
+    with pytest.raises(TypeSafeReviewIncomplete, match="unsupported_source_path"):
+        build_inventory(
+            repo_root=tmp_path, ingest=ingest, changed_files=changed,
+            scan_mode="pr-diff", max_candidates=50,
+        )
