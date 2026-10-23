@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-from omargate.intent_identity import intent_model_reference
-
-from dataclasses import replace
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from omargate.analyze.typesafe_client import ChoiceAnswer, TypeSafeResult
-from omargate.analyze.typesafe_state import build_typed_context
 from omargate.analyze.typesafe_review import (
     RatedFinding,
     ReviewDecision,
@@ -21,8 +18,9 @@ from omargate.analyze.typesafe_review import (
     review_inventory,
     verify_sources,
 )
+from omargate.analyze.typesafe_state import build_typed_context
+from omargate.intent_identity import intent_model_reference
 from omargate.redaction import sanitize_public_error
-
 
 MODEL = "model-under-test-1.13.0"
 
@@ -136,11 +134,21 @@ def test_inventory_refuses_unreadable_or_unrepresented_source(tmp_path: Path, ki
     elif kind == "oversize":
         path.write_bytes(b"x" * 1_000_001)
     elif kind == "unknown":
+        # 'unknown' is no longer a refusal reason: a changed file present on
+        # disk that passes size/encoding/path checks is in the inventory even
+        # when absent from bulk ingest (the ingest excludes tests/**, which
+        # every real PR changes). The old source_outside_inventory gate is
+        # removed so the Jev Omar check can run on ordinary PRs.
         path.write_bytes(b"present but absent from ingest\n")
     known = [] if kind == "unknown" else [{"path": "source.py"}]
-    with pytest.raises(TypeSafeReviewIncomplete):
-        build_inventory(repo_root=tmp_path, ingest={"files": known}, changed_files=["source.py"],
-                        scan_mode="pr-diff", max_candidates=50)
+    if kind == "unknown":
+        inventory = build_inventory(repo_root=tmp_path, ingest={"files": known}, changed_files=["source.py"],
+                                    scan_mode="pr-diff", max_candidates=50)
+        assert len(inventory.candidates) == 1
+    else:
+        with pytest.raises(TypeSafeReviewIncomplete):
+            build_inventory(repo_root=tmp_path, ingest={"files": known}, changed_files=["source.py"],
+                            scan_mode="pr-diff", max_candidates=50)
 
 
 @pytest.mark.parametrize("path", ["../outside.py", "nested/../source.py", "/absolute.py", "a\\b.py", "C:outside.py"])
@@ -680,3 +688,52 @@ async def test_policy_prose_reuses_existing_redactor_with_bound_source_and_verdi
     assert finding["snippet"] == candidate.evidence
     assert finding["model_source"] == intent_model_reference(MODEL)
     assert result.assessment["source_hashes"] == dict(inventory.source_hashes)
+
+
+def test_diff_inventory_includes_changed_files_outside_bulk_ingest(tmp_path: Path):
+    """A PR diff of src + tests + lockfile: all changed text files are in the
+    review inventory regardless of bulk ingest membership. Lockfiles are
+    recorded as policy-excluded, tests are reviewed."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "main.py").write_text("answer = 42\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_main.py").write_text("def test_answer(): assert True\n", encoding="utf-8")
+    (tmp_path / "poetry.lock").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+
+    # Bulk ingest excludes tests/** and **/*.lock (matching real ingest_runner.py)
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "tests/test_main.py", "poetry.lock"]
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+    )
+
+    # All three files are accounted for
+    reviewed_paths = {c.file_path for c in inventory.candidates}
+    excluded_paths = {e[0] for e in inventory.policy_excluded}
+    assert reviewed_paths == {"src/main.py", "tests/test_main.py"}
+    assert excluded_paths == {"poetry.lock"}
+    assert any("dependency" in reason.lower() for _, reason in inventory.policy_excluded)
+
+
+def test_diff_inventory_includes_test_files_without_ingest_membership(tmp_path: Path):
+    """Test files outside bulk ingest are included in pr-diff inventory
+    regardless of ingest membership. This verifies the fix for the
+    source_outside_inventory gate that blocked every PR with test changes."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_main.py").write_text("def test(): pass\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "tests/test_main.py"]
+
+    # This test validates that the fix removed the source_outside_inventory
+    # exception for test files — after the fix, this should succeed.
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert paths == {"src/main.py", "tests/test_main.py"}

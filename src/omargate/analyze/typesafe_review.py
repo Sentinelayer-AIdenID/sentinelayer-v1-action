@@ -6,19 +6,22 @@ missing policy and uncertain decisions are explicit generator-fallback reasons.
 """
 from __future__ import annotations
 
-from ..intent_identity import intent_model_reference, redact_intent_pin
-
-from dataclasses import dataclass
 import hashlib
 import json
 import math
-from pathlib import Path, PurePosixPath
 import re
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
+from ..intent_identity import intent_model_reference, redact_intent_pin
 from ..redaction import redact_secret_source, sanitize_public_error
-from .typesafe_client import TypeSafeClient, TypeSafeError, ChoiceAnswer, validate_answers
-
+from .typesafe_client import (
+    ChoiceAnswer,
+    TypeSafeClient,
+    TypeSafeError,
+    validate_answers,
+)
 
 MAX_FILE_BYTES = 1_000_000
 MAX_STATE_BYTES = 24_000
@@ -75,6 +78,7 @@ class ReviewInventory:
     candidates: tuple[ReviewCandidate, ...]
     source_hashes: tuple[tuple[str, str], ...]
     scan_mode: str
+    policy_excluded: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -138,6 +142,12 @@ def _source_path(repo_root: Path, relative: str) -> Path:
     return target
 
 
+def _is_lockfile(relative: str) -> bool:
+    """Recognise generated lockfiles that the dependency audit covers.
+    Matches the same pattern as the ingest runner: **/*.lock (basename ends in .lock)."""
+    return PurePosixPath(relative).name.endswith(".lock")
+
+
 def build_inventory(
     *, repo_root: Path, ingest: dict, changed_files: list[str] | None,
     scan_mode: str, max_candidates: int,
@@ -154,12 +164,13 @@ def build_inventory(
         raise TypeSafeReviewIncomplete("unsupported_source_path")
     if type(max_candidates) is not int or not 1 <= max_candidates <= 200:
         raise TypeSafeReviewIncomplete("invalid_candidate_budget")
-    known = {row.get("path") for row in ingest.get("files", []) if isinstance(row, dict)}
     candidates: list[ReviewCandidate] = []
     hashes: list[tuple[str, str]] = []
+    policy_excluded: list[tuple[str, str]] = []
     for relative in sorted(set(changed_files)):
-        if relative not in known:
-            raise TypeSafeReviewIncomplete("source_outside_inventory")
+        if _is_lockfile(relative):
+            policy_excluded.append((relative, "policy-excluded: covered by dependency audit"))
+            continue
         path = _source_path(repo_root, relative)
         if path.stat().st_size > MAX_FILE_BYTES:
             raise TypeSafeReviewIncomplete("source_budget_exceeded")
@@ -188,7 +199,7 @@ def build_inventory(
             ))
             if len(candidates) > max_candidates:
                 raise TypeSafeReviewIncomplete("candidate_budget_exceeded")
-    return ReviewInventory(tuple(candidates), tuple(hashes), scan_mode)
+    return ReviewInventory(tuple(candidates), tuple(hashes), scan_mode, tuple(policy_excluded))
 
 
 def verify_sources(repo_root: Path, inventory: ReviewInventory) -> None:
