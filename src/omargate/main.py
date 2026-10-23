@@ -135,21 +135,20 @@ def _llm_display_identity(analysis, **kwargs) -> tuple[str, str]:
     model = str(usage.get("model") or "").strip() or "unknown"
     return engine, model
 
-
 def _provider_key_present(config) -> bool:
     """Return True when the configured LLM provider has a non-empty API key."""
     try:
         provider = config.llm_provider
         if provider == "openai":
             return bool(config.openai_api_key.get_secret_value().strip())
+        if provider == "typesafe":
+            return bool(config.typesafe_api_key.get_secret_value().strip())
         if provider == "anthropic":
             return bool(config.anthropic_api_key.get_secret_value().strip())
         if provider == "google":
             return bool(config.google_api_key.get_secret_value().strip())
         if provider == "xai":
             return bool(config.xai_api_key.get_secret_value().strip())
-        if provider == "typesafe":
-            return bool(config.typesafe_api_key.get_secret_value().strip())
         return False
     except Exception:
         return False
