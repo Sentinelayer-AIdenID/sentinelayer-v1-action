@@ -258,3 +258,63 @@ def test_pr_diff_rejects_traversal_and_absolute_changed_paths(tmp_path: Path) ->
 
     assert result.files_included == []
     assert "CANARY_TRAVERSAL" not in result.content
+
+
+def test_quick_learn_never_follows_symlinked_readme_outside_repo(tmp_path: Path) -> None:
+    from omargate.ingest.quick_learn import extract_quick_learn_summary
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    outside = tmp_path / "private.txt"
+    outside.write_text("# CANARY_QUICK_LEARN\nsecret project notes\n", encoding="utf-8")
+    (repo_root / "README.md").symlink_to(outside)
+    (repo_root / "pyproject.toml").write_text('[project]\nname = "plain"\n', encoding="utf-8")
+
+    summary = extract_quick_learn_summary(repo_root)
+    context = ContextBuilder(max_tokens=100000).build_context(
+        _make_ingest([], hotspots={}), [], repo_root, quick_learn=summary, scan_mode="deep"
+    )
+
+    assert summary.source_doc == "pyproject.toml"
+    assert "CANARY_QUICK_LEARN" not in summary.raw_excerpt
+    assert "CANARY_QUICK_LEARN" not in context.content
+
+
+def test_quick_learn_never_follows_symlinked_docs_dir_or_manifest(tmp_path: Path) -> None:
+    from omargate.ingest.quick_learn import extract_quick_learn_summary
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "README.md").write_text("# CANARY_DOCS_DIR\n", encoding="utf-8")
+    (outside_dir / "package.json").write_text('{"name": "CANARY_MANIFEST", "workspaces": ["x"]}', encoding="utf-8")
+    (repo_root / "docs").symlink_to(outside_dir, target_is_directory=True)
+    (repo_root / "package.json").symlink_to(outside_dir / "package.json")
+
+    summary = extract_quick_learn_summary(repo_root)
+
+    assert summary.source_doc == ""
+    assert "CANARY" not in summary.raw_excerpt
+    assert "CANARY" not in summary.project_name
+    assert summary.architecture != "monorepo"
+
+
+def test_quality_scan_infra_extras_never_follow_symlinks(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from omargate.analyze.orchestrator import AnalysisOrchestrator
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    outside = tmp_path / "runner.env"
+    outside.write_text("CANARY_ENV=1\n", encoding="utf-8")
+    (repo_root / ".env").symlink_to(outside)
+    (repo_root / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+
+    files = AnalysisOrchestrator._load_files_for_quality_scans(
+        SimpleNamespace(repo_root=repo_root), {"files": []}
+    )
+
+    assert ".env" not in files
+    assert files.get("Dockerfile") == "FROM scratch\n"

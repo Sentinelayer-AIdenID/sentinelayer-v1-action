@@ -6,6 +6,8 @@ from pathlib import Path
 import re
 from typing import Any, Optional
 
+from ..repo_paths import plain_repo_file
+
 
 _CHARS_PER_TOKEN = 4.0
 _MAX_TOKENS = 600
@@ -98,7 +100,7 @@ def extract_quick_learn_summary(repo_root: Path) -> QuickLearnSummary:
 
     selected: Optional[str] = None
     for rel in doc_candidates:
-        if (repo_root / rel).is_file():
+        if plain_repo_file(repo_root, rel) is not None:
             selected = rel
             break
 
@@ -107,7 +109,7 @@ def extract_quick_learn_summary(repo_root: Path) -> QuickLearnSummary:
         readme_excerpt = _read_markdown_excerpt(repo_root / selected)
         if _looks_outdated(readme_excerpt):
             for rel in ("package.json", "pyproject.toml", "Cargo.toml"):
-                if (repo_root / rel).is_file():
+                if plain_repo_file(repo_root, rel) is not None:
                     selected = rel
                     break
 
@@ -350,8 +352,8 @@ def _detect_tech_stack(repo_root: Path, excerpt: str, structured: dict[str, Any]
         if item not in stack:
             stack.append(item)
 
-    pkg_json_path = repo_root / "package.json"
-    pkg_json = _read_package_json(pkg_json_path) if pkg_json_path.is_file() else {}
+    pkg_json_path = plain_repo_file(repo_root, "package.json")
+    pkg_json = _read_package_json(pkg_json_path) if pkg_json_path is not None else {}
     pkg_deps = {}
     if isinstance(pkg_json, dict):
         deps = pkg_json.get("dependencies") or {}
@@ -362,7 +364,7 @@ def _detect_tech_stack(repo_root: Path, excerpt: str, structured: dict[str, Any]
             dev_deps = {}
         pkg_deps = {**deps, **dev_deps}
 
-    if pkg_json_path.is_file() or "node" in text or "npm" in text:
+    if pkg_json_path is not None or "node" in text or "npm" in text:
         add("Node.js")
         if "typescript" in text or "typescript" in pkg_deps:
             add("TypeScript")
@@ -435,8 +437,8 @@ def _detect_architecture(repo_root: Path, excerpt: str, structured: dict[str, An
         return "monolith"
 
     # Repo structure heuristics for monorepo.
-    pkg_json = repo_root / "package.json"
-    if pkg_json.is_file():
+    pkg_json = plain_repo_file(repo_root, "package.json")
+    if pkg_json is not None:
         data = _read_package_json(pkg_json)
         workspaces = data.get("workspaces")
         if isinstance(workspaces, list) and workspaces:

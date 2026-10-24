@@ -6,29 +6,7 @@ from typing import Dict, List, Optional
 
 from ...ingest.codebase_snapshot import build_codebase_snapshot
 from ...ingest.quick_learn import QuickLearnSummary
-
-
-def _is_plain_repo_file(repo_root: Optional[Path], rel_path: object) -> bool:
-    """True only for a relative path to a regular file inside repo_root, outside .git/,
-    with no symlink anywhere along it (a symlinked parent directory escapes too)."""
-    if repo_root is None or not isinstance(rel_path, str) or not rel_path:
-        return False
-    if "\\" in rel_path or ":" in rel_path or rel_path.startswith("/"):
-        return False
-    parts = rel_path.split("/")
-    if any(part in {"", ".", "..", ".git"} for part in parts):
-        return False
-    current = repo_root
-    for part in parts:
-        current = current / part
-        if current.is_symlink():
-            return False
-    try:
-        resolved = current.resolve(strict=True)
-        root = repo_root.resolve(strict=True)
-    except OSError:
-        return False
-    return resolved.is_relative_to(root) and resolved.is_file()
+from ...repo_paths import plain_repo_file
 
 
 TRUNCATION_MARKER = "... (truncated)"
@@ -361,7 +339,7 @@ class ContextBuilder:
                 # Ingest already vetted its own paths (it skips symlinks). A changed
                 # path ingest did not list (a test, a lockfile) is read only when it
                 # is a regular file reached without any symlink and outside .git/.
-                if rel_path not in ingest_paths and not _is_plain_repo_file(repo_root, rel_path):
+                if rel_path not in ingest_paths and plain_repo_file(repo_root, rel_path) is None:
                     continue
                 if rel_path not in priority:
                     priority.append(rel_path)
