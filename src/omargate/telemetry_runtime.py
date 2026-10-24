@@ -394,7 +394,30 @@ def _estimate_cost(
     ctx: GitHubContext,
     gh: GitHubClient,
     config: OmarGateConfig,
-) -> float:
+) -> float | None:
+    if config.review_routing == "intent-cascade-v1":
+        # The line-count heuristic below excludes the typed stages and may
+        # choose a model that is cheaper than the eventual escalation route.
+        # A whole-source scan can have multiple partitions, so its preflight
+        # cost is unknown until those partitions are built.
+        if not ctx.pr_number or config.scan_mode != "pr-diff":
+            return None
+        from .analyze.llm.prompt_loader import PromptLoader
+        from .analyze.review_cascade import cascade_generator_system_prompt
+        from .analyze.review_costs import (
+            CASCADE_CONTEXT_BYTES_PER_BUDGET_TOKEN,
+            cascade_cost_reservation_bytes,
+        )
+
+        prompts_dir = Path(__file__).resolve().parents[2] / "prompts"
+        base_prompt = PromptLoader(prompts_dir).get_prompt(scan_mode=config.scan_mode)
+        system_prompt = cascade_generator_system_prompt(base_prompt, config.review_policy)
+        return cascade_cost_reservation_bytes(
+            config.max_input_tokens * CASCADE_CONTEXT_BYTES_PER_BUDGET_TOKEN,
+            len(system_prompt.encode("utf-8")),
+            intent_price_profile=config.intent_price_profile,
+        )
+
     if not ctx.pr_number:
         return 0.0
 

@@ -130,6 +130,23 @@ def generator_transport(monkeypatch):
     return create
 
 
+async def test_generator_refuses_utf8_context_above_preflight_byte_envelope(
+    configured, monkeypatch, generator_transport,
+):
+    from omargate.analyze.llm.context_builder import BuiltContext
+
+    configured.config = configured.config.model_copy(update={"max_input_tokens": 10})
+    monkeypatch.setattr(configured.context_builder, "build_context", lambda **_kwargs:
+        BuiltContext("é" * 100, 10, ["x.py"], [], [], []))
+    result = await configured._run_llm_analysis(
+        ingest={"files": [{"path": "x.py"}]}, deterministic_findings=[],
+        quick_learn=None, spec_context=None, scan_mode="pr-diff",
+        diff_content="+value = 1\n", changed_files=["x.py"], review_route=DEEP,
+    )
+    assert not result.success and result.failure_class == "cascade_context_incomplete"
+    generator_transport.assert_not_awaited()
+
+
 async def test_rejected_changed_source_never_reaches_generator_sdk(configured, monkeypatch, generator_transport):
     # Construct credential-shaped bytes at runtime; never publish key-shaped fixtures.
     source = 'api_key = "' + 'sk' + '-' + 'A' * 32 + '"\n'

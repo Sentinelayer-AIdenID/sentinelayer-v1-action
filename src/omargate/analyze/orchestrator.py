@@ -44,8 +44,8 @@ from .llm import (
 from .llm.providers import detect_provider_from_model
 from .llm.response_parser import ParsedFinding
 from .typesafe_client import TypeSafeClient, TypeSafeError
-from .review_cascade import DEEP, MID, ReviewRoute, choose_route, excellence_coverage, triage_questions, response_model_matches
-from .review_costs import CASCADE_MAX_OUTPUT_TOKENS, cost_ledger, estimate_usage, partition_cost_reservation
+from .review_cascade import DEEP, MID, ReviewRoute, cascade_generator_system_prompt, choose_route, excellence_coverage, triage_questions, response_model_matches
+from .review_costs import CASCADE_CONTEXT_BYTES_PER_BUDGET_TOKEN, CASCADE_MAX_OUTPUT_TOKENS, cost_ledger, estimate_usage, partition_cost_reservation
 from .deterministic.workflow_scanner import scan_workflow_files
 from .typesafe_review import (
     TypedReview,
@@ -1761,10 +1761,7 @@ class AnalysisOrchestrator:
     def _generator_system_prompt(self, scan_mode: str, review_route: Optional[ReviewRoute]) -> str:
         prompt = self.prompt_loader.get_prompt(scan_mode=scan_mode)
         if review_route:
-            private_policy = self.config.review_policy
-            dimensions = [criterion for _, criterion in private_policy.routing["domains"].values()]
-            prompt += ("\n" + private_policy.generator_instructions + "\nReview dimensions: "
-                       + json.dumps(dimensions) + "\nReport source defects; do not quote private configuration.")
+            prompt = cascade_generator_system_prompt(prompt, self.config.review_policy)
         return prompt
 
     async def _run_llm_analysis(
@@ -1812,6 +1809,8 @@ class AnalysisOrchestrator:
         if review_route and (context.files_truncated or context.files_skipped
                              or context.sections_incomplete
                              or context.token_count > self.config.max_input_tokens
+                             or len(context.content.encode("utf-8")) > (
+                                 self.config.max_input_tokens * CASCADE_CONTEXT_BYTES_PER_BUDGET_TOKEN)
                              or not set(changed_files or []).issubset(context.files_included)):
             return self._llm_failure_result(
                 deterministic_findings=deterministic_findings, attempted=False,

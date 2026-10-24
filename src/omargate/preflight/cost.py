@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Tuple
 
 from ..config import OmarGateConfig
@@ -27,7 +28,7 @@ def estimate_cost(
 
 
 async def check_cost_approval(
-    estimated_cost: float,
+    estimated_cost: float | None,
     config: OmarGateConfig,
     ctx: GitHubContext,
     gh: GitHubClient,
@@ -38,7 +39,8 @@ async def check_cost_approval(
     Returns:
         (approved, status)
     """
-    if estimated_cost <= config.require_cost_confirmation:
+    if (estimated_cost is not None and math.isfinite(estimated_cost)
+            and estimated_cost <= config.require_cost_confirmation):
         return True, "below_threshold"
 
     if config.approval_mode == "none":

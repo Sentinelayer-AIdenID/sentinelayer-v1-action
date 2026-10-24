@@ -16,6 +16,9 @@ RATES = {
     "gpt-6-sol": ("2", "0.20", "10"),
 }
 CASCADE_MAX_OUTPUT_TOKENS = 16384
+# ContextBuilder budgets approximately four characters per token. The cascade
+# also enforces this as a UTF-8 byte ceiling before a paid generator request.
+CASCADE_CONTEXT_BYTES_PER_BUDGET_TOKEN = 4
 
 
 def partition_cost_reservation(context: str, system_prompt: str, *, intent_price_profile: str) -> float | None:
@@ -27,8 +30,18 @@ def partition_cost_reservation(context: str, system_prompt: str, *, intent_price
     enforced 24k/48k byte envelope limits. This is a token-rate estimate, never
     a guarantee about the provider's bill or non-token fees.
     """
+    return cascade_cost_reservation_bytes(
+        len(context.encode("utf-8")), len(system_prompt.encode("utf-8")),
+        intent_price_profile=intent_price_profile,
+    )
+
+
+def cascade_cost_reservation_bytes(
+    context_bytes: int, system_prompt_bytes: int, *, intent_price_profile: str,
+) -> float | None:
+    """Reserve every route from bounded byte lengths without allocating a dummy prompt."""
     from .review_cascade import LOW, MID, DEEP
-    tokens = len(context.encode("utf-8")) + len(system_prompt.encode("utf-8")) + 1024
+    tokens = context_bytes + system_prompt_bytes + 1024
     predicted = [estimate_usage("openai", route.model,
                  {"input_tokens": tokens, "output_tokens": CASCADE_MAX_OUTPUT_TOKENS})
                  for route in (LOW, MID, DEEP)]
