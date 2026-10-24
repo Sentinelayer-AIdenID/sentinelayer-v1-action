@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 
 def compute_file_hash(path: Path) -> str:
@@ -15,8 +14,8 @@ def compute_file_hash(path: Path) -> str:
 def generate_artifact_manifest(
     run_dir: Path,
     run_id: str,
-    tenant_id: Optional[str] = None,
-    repo_id: Optional[str] = None,
+    tenant_id: str | None = None,
+    repo_id: str | None = None,
 ) -> dict:
     """
     Generate manifest for artifact upload.
@@ -57,7 +56,7 @@ def generate_artifact_manifest(
         "tenant_id": tenant_id,
         "repo_id": repo_id,
         "artifact_root": f"runs/{run_id}/",
-        "uploaded_at_utc": datetime.now(timezone.utc).isoformat(),
+        "uploaded_at_utc": datetime.now(UTC).isoformat(),
         "objects": objects,
         "retention_days": 90,
     }

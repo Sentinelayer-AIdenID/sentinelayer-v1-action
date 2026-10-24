@@ -17,7 +17,6 @@ from omargate.main import _build_llm_evidence
 from omargate.models import GateConfig, GateStatus
 from omargate.packaging import write_findings_jsonl, write_pack_summary
 
-
 ParserAdapter = Callable[[str], tuple[list[object], list[str], bool]]
 
 _FINDING = {

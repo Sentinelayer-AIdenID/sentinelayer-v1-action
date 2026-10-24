@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
 
 from ..finding_contract import parse_finding_payload
 
@@ -22,8 +21,8 @@ class ParsedFinding:
 
 @dataclass
 class ParseResult:
-    findings: List[ParsedFinding]
-    parse_errors: List[str]
+    findings: list[ParsedFinding]
+    parse_errors: list[str]
     raw_response: str
     no_findings_reported: bool
 

@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-from policy_fixture import FAKE_POLICY_JSON
-
-from omargate.intent_identity import intent_model_reference
-
 import copy
 import json
 import re
@@ -13,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from policy_fixture import FAKE_POLICY_JSON
 
 import omargate.analyze.orchestrator as module
 from omargate.analyze.codex.codex_runner import parse_codex_findings
@@ -20,18 +17,18 @@ from omargate.analyze.llm.response_parser import ResponseParser
 from omargate.analyze.orchestrator import AnalysisOrchestrator, LLMAnalysisResult
 from omargate.analyze.typesafe_client import TypeSafeClient, TypeSafeResult
 from omargate.analyze.typesafe_review import (
+    RatedFinding,
     ReviewDecision,
     ReviewPlan,
-    RatedFinding,
     TypeSafeReviewIncomplete,
 )
 from omargate.config import OmarGateConfig
 from omargate.gate import evaluate_gate
+from omargate.intent_identity import intent_model_reference
 from omargate.logging import OmarLogger
 from omargate.main import _build_llm_evidence
 from omargate.models import GateConfig, GateStatus
 from omargate.packaging import write_findings_jsonl, write_pack_summary
-
 
 PIN = "model-under-test-1.13.0"
 GENERATOR = "gpt-5.3-codex"
@@ -1903,6 +1900,12 @@ async def test_pr_with_tests_and_lockfile_reaches_client_and_routes_exclusion(tm
             "+++ b/tests/test_main.py\n"
             "@@ -0,0 +1 @@\n"
             "+def test_x(): assert True\n"
+            "diff --git a/package-lock.json b/package-lock.json\n"
+            "--- a/package-lock.json\n"
+            "+++ b/package-lock.json\n"
+            "@@ -1 +1 @@\n"
+            '-{"lockfileVersion": 2}\n'
+            '+{"lockfileVersion": 3}\n'
         ),
     )
 

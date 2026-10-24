@@ -1,15 +1,20 @@
 """Immutable, explicitly bounded tracked-text scopes for whole-repository review."""
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
-from pathlib import Path
 import subprocess
+from dataclasses import dataclass
+from pathlib import Path
 
 from .typesafe_review import (
-    MAX_FILE_BYTES, ReviewInventory, TypeSafeReviewIncomplete, _source_path,
-    build_inventory, verify_sources, verify_source_path_privacy,
+    MAX_FILE_BYTES,
+    ReviewInventory,
+    TypeSafeReviewIncomplete,
+    _source_path,
+    build_inventory,
+    verify_source_path_privacy,
+    verify_sources,
 )
 
 

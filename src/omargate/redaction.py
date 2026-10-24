@@ -4,11 +4,10 @@ import ast
 import html
 import io
 import re
-from pathlib import PurePosixPath
 import string
 import tokenize
 import unicodedata
-
+from pathlib import PurePosixPath
 
 _QUERY_SECRET_RE = re.compile(
     r"(?i)([?&](?:key|api_key|access_token|token|signature)=)"

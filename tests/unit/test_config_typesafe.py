@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from policy_fixture import FAKE_POLICY_JSON
-
 import os
-from pathlib import Path
 import re
+from pathlib import Path
 
 import pytest
+from policy_fixture import FAKE_POLICY_JSON
 from pydantic import SecretStr, ValidationError
 
 from omargate.config import OmarGateConfig

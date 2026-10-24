@@ -6,7 +6,11 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from omargate.telemetry.uploader import fetch_oidc_token, upload_artifacts, upload_telemetry
+from omargate.telemetry.uploader import (
+    fetch_oidc_token,
+    upload_artifacts,
+    upload_telemetry,
+)
 
 
 class DummyResponse:

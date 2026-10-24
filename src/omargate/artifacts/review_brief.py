@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
 
-from .priority_ranker import CATEGORY_SCORE, CATEGORIES, SEVERITY_SCORE, detect_categories, rank_files
 from ..fix_plan import ensure_fix_plan
 from ..ingest.codebase_snapshot import build_codebase_snapshot, build_codebase_synopsis
 from ..redaction import sanitize_public_error, sanitize_untrusted_markdown_scalar
+from .priority_ranker import (
+    CATEGORIES,
+    CATEGORY_SCORE,
+    SEVERITY_SCORE,
+    detect_categories,
+    rank_files,
+)
 
 CATEGORY_ACTIONS = {
     "auth": "Review auth and session controls",
@@ -24,11 +30,11 @@ _SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3, "P4": 4}
 def generate_review_brief(
     run_dir: Path,
     run_id: str,
-    findings: List[dict],
+    findings: list[dict],
     ingest: dict,
     scan_mode: str,
     version: str,
-    dashboard_url: Optional[str] = None,
+    dashboard_url: str | None = None,
 ) -> Path:
     """Generate REVIEW_BRIEF.md in the run directory."""
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -47,11 +53,11 @@ def generate_review_brief(
 
 def render_review_brief(
     run_id: str,
-    findings: List[dict],
+    findings: list[dict],
     ingest: dict,
     scan_mode: str,
     version: str,
-    dashboard_url: Optional[str] = None,
+    dashboard_url: str | None = None,
 ) -> str:
     """Render review brief markdown without writing to disk."""
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -70,7 +76,7 @@ def render_review_brief(
 
     resolved_dashboard_url = dashboard_url or f"https://sentinelayer.com/runs/{run_id}"
 
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append("# 🛡️ Omar Gate Review Brief")
     lines.append("")
     lines.append(f"**Run:** {run_id}  ")
@@ -151,7 +157,7 @@ def render_review_brief(
     return "\n".join(lines)
 
 
-def _format_fix_plan_section(findings: List[dict]) -> List[str]:
+def _format_fix_plan_section(findings: list[dict]) -> list[str]:
     if not findings:
         return ["No findings."]
 
@@ -164,7 +170,7 @@ def _format_fix_plan_section(findings: List[dict]) -> List[str]:
         ),
     )
 
-    lines: List[str] = []
+    lines: list[str] = []
     for idx, finding in enumerate(sorted_findings, start=1):
         severity = str(finding.get("severity") or "P3").upper()
         category = sanitize_untrusted_markdown_scalar(
@@ -200,7 +206,7 @@ def _truncate_message(text: str, max_chars: int = 220) -> str:
     return f"{normalized[: max_chars - 3]}..."
 
 
-def _format_codebase_snapshot(ingest: dict) -> List[str]:
+def _format_codebase_snapshot(ingest: dict) -> list[str]:
     """Return a small, deterministic codebase summary for the review brief."""
     try:
         snapshot = build_codebase_snapshot(ingest)
@@ -216,7 +222,7 @@ def _format_codebase_snapshot(ingest: dict) -> List[str]:
     loc = int(stats.get("source_loc_total", 0) or 0)
     pm = str(deps.get("package_manager") or "unknown")
 
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append(f"- In-scope files (source): `{in_scope}`")
     lines.append(f"- LOC (source only): `{loc:,}`")
     lines.append(f"- Package manager: `{pm}`")
@@ -258,7 +264,7 @@ def _files_scanned(ingest: dict) -> int:
     return len(files)
 
 
-def _count_by_severity(findings: Iterable[dict]) -> Dict[str, int]:
+def _count_by_severity(findings: Iterable[dict]) -> dict[str, int]:
     counts = {"P0": 0, "P1": 0, "P2": 0, "P3": 0, "P4": 0}
     for finding in findings:
         sev = str(finding.get("severity", "")).upper()
@@ -267,7 +273,7 @@ def _count_by_severity(findings: Iterable[dict]) -> Dict[str, int]:
     return counts
 
 
-def _format_summary_table(counts: Dict[str, int]) -> List[str]:
+def _format_summary_table(counts: dict[str, int]) -> list[str]:
     return [
         "| Severity | Count |",
         "|----------|-------|",
@@ -279,9 +285,9 @@ def _format_summary_table(counts: Dict[str, int]) -> List[str]:
     ]
 
 
-def _collect_detected_categories(findings: List[dict], ingest: dict) -> List[str]:
+def _collect_detected_categories(findings: list[dict], ingest: dict) -> list[str]:
     hotspots = ingest.get("hotspots", {}) if isinstance(ingest, dict) else {}
-    detected: List[str] = []
+    detected: list[str] = []
 
     for finding in findings:
         path = finding.get("file_path")
@@ -298,10 +304,10 @@ def _collect_detected_categories(findings: List[dict], ingest: dict) -> List[str
     return detected
 
 
-def _format_category_badges(categories: List[str]) -> str:
+def _format_category_badges(categories: list[str]) -> str:
     if not categories:
         return "None detected"
-    parts: List[str] = []
+    parts: list[str] = []
     for key in _category_order(categories):
         config = CATEGORIES.get(key)
         if not config:
@@ -310,7 +316,7 @@ def _format_category_badges(categories: List[str]) -> str:
     return " ".join(parts)
 
 
-def _format_risk_table(ranked_files: List[dict]) -> List[str]:
+def _format_risk_table(ranked_files: list[dict]) -> list[str]:
     lines = [
         "| Priority | File | Category | Issues | Action |",
         "|----------|------|----------|--------|--------|",
@@ -335,16 +341,16 @@ def _format_risk_table(ranked_files: List[dict]) -> List[str]:
 
 
 def _format_review_order(
-    findings: List[dict],
+    findings: list[dict],
     ingest: dict,
-    ranked_files: List[dict],
-) -> List[str]:
+    ranked_files: list[dict],
+) -> list[str]:
     if not findings and not (ingest.get("hotspots") if isinstance(ingest, dict) else None):
         return ["No category signals detected."]
 
     hotspots = ingest.get("hotspots", {}) if isinstance(ingest, dict) else {}
-    category_files: Dict[str, List[str]] = {key: [] for key in CATEGORIES}
-    category_findings: Dict[str, List[dict]] = {key: [] for key in CATEGORIES}
+    category_files: dict[str, list[str]] = {key: [] for key in CATEGORIES}
+    category_findings: dict[str, list[dict]] = {key: [] for key in CATEGORIES}
 
     for finding in findings:
         path = finding.get("file_path")
@@ -373,7 +379,7 @@ def _format_review_order(
         ),
     )
 
-    lines: List[str] = []
+    lines: list[str] = []
     index = 1
     for category in order:
         files = category_files.get(category, [])
@@ -397,11 +403,11 @@ def _format_review_order(
     return lines
 
 
-def _format_quick_commands(categories: List[str]) -> List[str]:
+def _format_quick_commands(categories: list[str]) -> list[str]:
     if not categories:
         return ["# No category-specific commands available"]
 
-    lines: List[str] = []
+    lines: list[str] = []
     for key in _category_order(categories):
         config = CATEGORIES.get(key)
         if not config:
@@ -416,11 +422,11 @@ def _format_quick_commands(categories: List[str]) -> List[str]:
     return lines
 
 
-def _category_order(categories: List[str]) -> List[str]:
+def _category_order(categories: list[str]) -> list[str]:
     return [key for key in CATEGORIES.keys() if key in categories]
 
 
-def _category_label(category: Optional[str]) -> str:
+def _category_label(category: str | None) -> str:
     if not category:
         return "Uncategorized"
     config = CATEGORIES.get(category)
@@ -429,13 +435,13 @@ def _category_label(category: Optional[str]) -> str:
     return f"{config['icon']} {config['name']}"
 
 
-def _primary_category(categories: List[str]) -> Optional[str]:
+def _primary_category(categories: list[str]) -> str | None:
     if not categories:
         return None
     return max(categories, key=lambda key: CATEGORY_SCORE.get(key, 1))
 
 
-def _issue_summary(findings: List[dict]) -> str:
+def _issue_summary(findings: list[dict]) -> str:
     if not findings:
         return "0"
     counts = _count_by_severity(findings)
@@ -447,10 +453,10 @@ def _issue_summary(findings: List[dict]) -> str:
     return " • ".join(parts) if parts else "0"
 
 
-def _severity_sum(findings: List[dict]) -> int:
+def _severity_sum(findings: list[dict]) -> int:
     return sum(SEVERITY_SCORE.get(str(f.get("severity", "")), 0) for f in findings)
 
 
-def _order_files(files: List[str], ranked_paths: List[str]) -> List[str]:
+def _order_files(files: list[str], ranked_paths: list[str]) -> list[str]:
     ranked_set = {path: idx for idx, path in enumerate(ranked_paths)}
     return sorted(files, key=lambda path: ranked_set.get(path, len(ranked_set)))

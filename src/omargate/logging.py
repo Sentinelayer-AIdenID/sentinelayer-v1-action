@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
-from typing import Any, Dict, Iterator
+from datetime import UTC, datetime
+from typing import Any
 
 
 class OmarLogger:
@@ -26,7 +27,7 @@ class OmarLogger:
     @contextmanager
     def stage(self, name: str) -> Iterator[None]:
         """Context manager that tracks stage timing."""
-        start = datetime.now(timezone.utc)
+        start = datetime.now(UTC)
         self._stage_starts[name] = start
         self.info("stage_start", stage=name)
         status = "ok"
@@ -37,14 +38,14 @@ class OmarLogger:
             self.error("stage_error", stage=name, error=str(exc))
             raise
         finally:
-            end = datetime.now(timezone.utc)
+            end = datetime.now(UTC)
             duration_ms = int((end - start).total_seconds() * 1000)
             self.info("stage_end", stage=name, duration_ms=duration_ms, status=status)
 
     def _emit(self, level: str, message: str, **kwargs: Any) -> None:
         """Emit structured JSON log + GitHub annotation if error."""
-        payload: Dict[str, Any] = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+        payload: dict[str, Any] = {
+            "timestamp": datetime.now(UTC).isoformat(),
             "level": level,
             "run_id": self.run_id,
             "message": message,
@@ -62,8 +63,8 @@ class OmarLogger:
             sys.stderr.flush()
 
     @staticmethod
-    def _sanitize(fields: Dict[str, Any]) -> Dict[str, Any]:
-        redacted: Dict[str, Any] = {}
+    def _sanitize(fields: dict[str, Any]) -> dict[str, Any]:
+        redacted: dict[str, Any] = {}
         for key, value in fields.items():
             if OmarLogger._is_sensitive_key(key):
                 redacted[key] = "***"

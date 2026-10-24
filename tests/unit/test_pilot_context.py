@@ -3,8 +3,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-
 from test_review_cascade import configured as configured
+
 from omargate.analyze.llm.context_builder import ContextBuilder
 from omargate.analyze.review_cascade import LOW
 

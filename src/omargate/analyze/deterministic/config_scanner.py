@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import List, Optional
 
 from .pattern_scanner import Finding, PatternScanner, mask_secret_in_snippet
 
@@ -92,7 +91,7 @@ class ConfigScanner:
             pattern for pattern in self._pattern_scanner.patterns if str(pattern.get("id", "")).startswith("CICD-")
         ]
 
-    def _load_json_content(self, raw: str) -> Optional[dict]:
+    def _load_json_content(self, raw: str) -> dict | None:
         if not isinstance(raw, str):
             return None
         stripped = _strip_json_comments(raw)
@@ -103,12 +102,12 @@ class ConfigScanner:
         return payload if isinstance(payload, dict) else None
 
     def scan_file(
-        self, file_path: Path, content: str, *, repo_root: Optional[Path] = None
-    ) -> List[Finding]:
+        self, file_path: Path, content: str, *, repo_root: Path | None = None
+    ) -> list[Finding]:
         rel_path = file_path.as_posix()
         normalized = rel_path.replace("\\", "/")
         name = file_path.name.lower()
-        findings: List[Finding] = []
+        findings: list[Finding] = []
 
         if name.startswith(".env"):
             findings.extend(self._scan_env(rel_path, content))
@@ -129,8 +128,8 @@ class ConfigScanner:
 
         return findings
 
-    def scan_files(self, files: List[dict], repo_root: Path) -> List[Finding]:
-        findings: List[Finding] = []
+    def scan_files(self, files: list[dict], repo_root: Path) -> list[Finding]:
+        findings: list[Finding] = []
         for entry in sorted(files, key=lambda item: item.get("path") or ""):
             rel_path = entry.get("path")
             if not rel_path:
@@ -143,7 +142,7 @@ class ConfigScanner:
             findings.extend(self.scan_file(Path(rel_path), content, repo_root=repo_root))
         return findings
 
-    def _scan_env(self, file_path: str, content: str) -> List[Finding]:
+    def _scan_env(self, file_path: str, content: str) -> list[Finding]:
         # Template / example .env files contain only placeholders — skip entirely.
         lower_path = file_path.lower()
         if any(
@@ -152,7 +151,7 @@ class ConfigScanner:
         ):
             return []
 
-        findings: List[Finding] = []
+        findings: list[Finding] = []
         for line_no, line in enumerate(content.splitlines(), start=1):
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -185,12 +184,12 @@ class ConfigScanner:
             )
         return findings
 
-    def _scan_package_json(self, file_path: str, content: str) -> List[Finding]:
+    def _scan_package_json(self, file_path: str, content: str) -> list[Finding]:
         try:
             data = json.loads(content)
         except json.JSONDecodeError:
             return []
-        findings: List[Finding] = []
+        findings: list[Finding] = []
         for section_name in ("dependencies", "devDependencies", "optionalDependencies"):
             section = data.get(section_name)
             if not isinstance(section, dict):
@@ -215,7 +214,7 @@ class ConfigScanner:
                     )
         return findings
 
-    def _load_json_file(self, path: Path) -> Optional[dict]:
+    def _load_json_file(self, path: Path) -> dict | None:
         try:
             raw = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -254,8 +253,8 @@ class ConfigScanner:
         return checked > 0 and strict_true == checked
 
     def _scan_tsconfig(
-        self, file_path: str, content: str, *, repo_root: Optional[Path] = None
-    ) -> List[Finding]:
+        self, file_path: str, content: str, *, repo_root: Path | None = None
+    ) -> list[Finding]:
         data = self._load_json_content(content)
         if data is None:
             return []
@@ -290,8 +289,8 @@ class ConfigScanner:
             )
         ]
 
-    def _scan_docker_compose(self, file_path: str, content: str) -> List[Finding]:
-        findings: List[Finding] = []
+    def _scan_docker_compose(self, file_path: str, content: str) -> list[Finding]:
+        findings: list[Finding] = []
         privileged_re = re.compile(r"^\s*privileged:\s*true\b", re.IGNORECASE)
         ports_re = re.compile(
             r"^\s*-\s*['\"]?\d{1,5}:\d{1,5}(?:/(tcp|udp))?['\"]?\s*$"

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from policy_fixture import FAKE_POLICY_JSON
-
 from types import SimpleNamespace
 
 import pytest
+from policy_fixture import FAKE_POLICY_JSON
 
 from omargate.config import OmarGateConfig
 from omargate.main import (

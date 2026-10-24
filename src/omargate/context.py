@@ -4,10 +4,10 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+from typing import Any
 
 
-def _load_event() -> Dict[str, Any]:
+def _load_event() -> dict[str, Any]:
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     if not event_path:
         return {}
@@ -17,14 +17,14 @@ def _load_event() -> Dict[str, Any]:
         return {}
 
 
-def _coerce_int(value: Any) -> Optional[int]:
+def _coerce_int(value: Any) -> int | None:
     try:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
 
 
-def _workflow_dispatch_pr_number(event_name: str) -> Optional[int]:
+def _workflow_dispatch_pr_number(event_name: str) -> int | None:
     if event_name != "workflow_dispatch":
         return None
 
@@ -40,7 +40,7 @@ def _workflow_dispatch_pr_number(event_name: str) -> Optional[int]:
     return pr_number
 
 
-def _detect_fork(event: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+def _detect_fork(event: dict[str, Any]) -> tuple[bool, str | None]:
     """Detect if PR is from a fork and return fork owner."""
     pr = event.get("pull_request", {})
     head = pr.get("head", {})
@@ -69,22 +69,22 @@ class GitHubContext:
     event_name: str  # pull_request, push, workflow_dispatch
 
     # PR-specific (None if not a PR)
-    pr_number: Optional[int]
-    pr_title: Optional[str]
+    pr_number: int | None
+    pr_title: str | None
     head_sha: str
-    base_sha: Optional[str]
-    head_ref: Optional[str]
-    base_ref: Optional[str]
+    base_sha: str | None
+    head_ref: str | None
+    base_ref: str | None
 
     # Fork detection
     is_fork: bool
-    fork_owner: Optional[str]
+    fork_owner: str | None
 
     # Actor
     actor: str
 
     @classmethod
-    def from_environment(cls) -> "GitHubContext":
+    def from_environment(cls) -> GitHubContext:
         """Load context from GitHub Actions environment."""
         event = _load_event()
 
@@ -143,7 +143,7 @@ class GitHubContext:
         )
 
     @property
-    def dedupe_components(self) -> Dict[str, str | int | None]:
+    def dedupe_components(self) -> dict[str, str | int | None]:
         """Components used for dedupe key computation."""
         return {
             "repo": self.repo_full_name,

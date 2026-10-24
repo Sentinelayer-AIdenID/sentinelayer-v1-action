@@ -6,7 +6,6 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from .config import OmarGateConfig
 from .models import Counts, GateResult, GateStatus
@@ -40,8 +39,8 @@ def _emit_gate_annotation(
     severity_gate: str,
     run_id: str,
     run_dir: Path,
-    workflow_run_url: Optional[str],
-    dashboard_url: Optional[str],
+    workflow_run_url: str | None,
+    dashboard_url: str | None,
 ) -> None:
     status = (
         gate_result.status.value
@@ -73,9 +72,9 @@ def _emit_gate_annotation(
     sys.stderr.flush()
 
 
-def _latest_completed_check_run(runs: list[dict]) -> Optional[dict]:
-    best: Optional[dict] = None
-    best_ts: Optional[datetime] = None
+def _latest_completed_check_run(runs: list[dict]) -> dict | None:
+    best: dict | None = None
+    best_ts: datetime | None = None
     for run in runs:
         if run.get("status") != "completed":
             continue
@@ -170,14 +169,14 @@ def _exit_code_from_gate_result(result: GateResult) -> int:
     return 1 if result.block_merge else 0
 
 
-def _find_check_run_by_external_id(runs: list[dict], external_id: str) -> Optional[dict]:
+def _find_check_run_by_external_id(runs: list[dict], external_id: str) -> dict | None:
     for run in runs:
         if run.get("external_id") == external_id:
             return run
     return None
 
 
-def _find_check_run_by_marker(runs: list[dict], marker: str) -> Optional[dict]:
+def _find_check_run_by_marker(runs: list[dict], marker: str) -> dict | None:
     for candidate in runs:
         output = candidate.get("output") or {}
         summary = output.get("summary") or ""
@@ -187,14 +186,14 @@ def _find_check_run_by_marker(runs: list[dict], marker: str) -> Optional[dict]:
     return None
 
 
-def _select_check_run_for_dedupe(runs: list[dict], idem_key: str) -> Optional[dict]:
+def _select_check_run_for_dedupe(runs: list[dict], idem_key: str) -> dict | None:
     return _find_check_run_by_external_id(runs, idem_key) or _find_check_run_by_marker(
         runs,
         idem_key,
     )
 
 
-def _select_check_run_for_mirror(runs: list[dict]) -> Optional[dict]:
+def _select_check_run_for_mirror(runs: list[dict]) -> dict | None:
     return _latest_completed_check_run(runs) or (runs[0] if runs else None)
 
 
@@ -206,7 +205,7 @@ def _write_preflight_artifacts(
     config: OmarGateConfig,
     idem_key: str,
     skip_label: str,
-    link_url: Optional[str],
+    link_url: str | None,
     action_version: str,
 ) -> tuple[Path, Path]:
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -304,9 +303,9 @@ def _map_category_to_spec_sections(category: str) -> set[str]:
 
 def _build_spec_compliance_from_findings(
     *,
-    spec_context: Optional[dict],
+    spec_context: dict | None,
     findings: list[dict],
-) -> Optional[SpecComplianceTelemetry]:
+) -> SpecComplianceTelemetry | None:
     if not spec_context:
         return None
 

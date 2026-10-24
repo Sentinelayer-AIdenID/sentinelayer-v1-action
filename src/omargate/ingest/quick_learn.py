@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
-from pathlib import Path
 import re
-from typing import Any, Optional
-
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 _CHARS_PER_TOKEN = 4.0
 _MAX_TOKENS = 600
@@ -34,7 +33,7 @@ def is_boilerplate_description(desc: str) -> bool:
     return any(phrase in lower for phrase in _BOILERPLATE_PHRASES)
 
 
-def build_llm_synopsis_prompt(quick_learn: "QuickLearnSummary", largest_files: list[str]) -> str:
+def build_llm_synopsis_prompt(quick_learn: QuickLearnSummary, largest_files: list[str]) -> str:
     """Build a concise prompt for LLM to synthesize a project synopsis from repo structure."""
     stack = ", ".join(quick_learn.tech_stack) if quick_learn.tech_stack else "undetected"
     file_lines = "\n".join(f"  {f}" for f in largest_files[:10])
@@ -96,7 +95,7 @@ def extract_quick_learn_summary(repo_root: Path) -> QuickLearnSummary:
         "Cargo.toml",
     ]
 
-    selected: Optional[str] = None
+    selected: str | None = None
     for rel in doc_candidates:
         if (repo_root / rel).is_file():
             selected = rel
@@ -317,9 +316,7 @@ def _extract_project_name(
 
 def _extract_description(source_doc: str, excerpt: str, structured: dict[str, Any]) -> str:
     desc = ""
-    if source_doc == "package.json":
-        desc = str(structured.get("description") or "").strip()
-    elif source_doc in {"pyproject.toml", "Cargo.toml"}:
+    if source_doc == "package.json" or source_doc in {"pyproject.toml", "Cargo.toml"}:
         desc = str(structured.get("description") or "").strip()
 
     if not desc and excerpt:

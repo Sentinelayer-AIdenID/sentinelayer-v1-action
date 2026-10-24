@@ -3,7 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from omargate.analyze.deterministic.eng_quality_helpers import bounded_python_deadline_loops
+from omargate.analyze.deterministic.eng_quality_helpers import (
+    bounded_python_deadline_loops,
+)
 from omargate.analyze.deterministic.eng_quality_scanner import EngQualityScanner
 from omargate.harness.runner import CommandResult
 from omargate.harness.suites import dep_audit

@@ -1,11 +1,11 @@
 """Routing mechanics. Rubrics and calibration belong to private configuration."""
 from __future__ import annotations
 
+import hashlib
+import re
 from dataclasses import dataclass
 from datetime import date
-import hashlib
 from pathlib import PurePosixPath
-import re
 from typing import Any
 
 from ..private_policy import PrivateReviewPolicy

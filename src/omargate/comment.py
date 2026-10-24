@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable, List, Optional
+from collections.abc import Iterable
 
+from .fix_plan import ensure_fix_plan
 from .formatting import (
     format_int,
     format_usd,
@@ -10,8 +11,10 @@ from .formatting import (
     humanize_duration_ms,
     truncate,
 )
-from .fix_plan import ensure_fix_plan
-from .ingest.codebase_snapshot import build_codebase_synopsis, render_codebase_snapshot_md
+from .ingest.codebase_snapshot import (
+    build_codebase_synopsis,
+    render_codebase_snapshot_md,
+)
 from .models import GateResult, GateStatus
 from .redaction import sanitize_public_error, sanitize_untrusted_markdown_scalar
 
@@ -58,7 +61,7 @@ def _status_badge(status: GateStatus | str) -> str:
     return badges.get(_status_key(status), "❓ UNKNOWN")
 
 
-def _blocking_severities(severity_gate: str) -> List[str]:
+def _blocking_severities(severity_gate: str) -> list[str]:
     gate = (severity_gate or "P1").strip().upper()
     if gate == "P0":
         return ["P0"]
@@ -106,7 +109,7 @@ def _next_steps(status: GateStatus | str, severity_gate: str) -> str:
     return "\n".join(f"- {line}" for line in lines)
 
 
-def _warnings_section(warnings: Optional[List[str]]) -> str:
+def _warnings_section(warnings: list[str] | None) -> str:
     if not warnings:
         return ""
     lines = ["<details>", "<summary>Warnings</summary>", ""]
@@ -117,8 +120,8 @@ def _warnings_section(warnings: Optional[List[str]]) -> str:
     return "\n".join(lines)
 
 
-def _select_top_findings(findings: Iterable[dict], *, max_items: int = 5) -> List[dict]:
-    out: List[dict] = []
+def _select_top_findings(findings: Iterable[dict], *, max_items: int = 5) -> list[dict]:
+    out: list[dict] = []
     seen = set()
     for finding in sorted(
         (f for f in findings or [] if isinstance(f, dict)),
@@ -148,11 +151,11 @@ def _select_top_findings(findings: Iterable[dict], *, max_items: int = 5) -> Lis
 
 
 def _top_findings_section(
-    findings: Optional[List[dict]],
+    findings: list[dict] | None,
     *,
     server_url: str,
     repo_full_name: str,
-    head_sha: Optional[str],
+    head_sha: str | None,
     max_items: int = 5,
 ) -> str:
     if not findings:
@@ -205,7 +208,7 @@ def _top_findings_section(
 
     return "\n".join(lines)
 
-def _codebase_snapshot_section(codebase_snapshot: Optional[dict]) -> str:
+def _codebase_snapshot_section(codebase_snapshot: dict | None) -> str:
     if not codebase_snapshot:
         return ""
     try:
@@ -231,30 +234,30 @@ def render_pr_comment(
     run_id: str,
     repo_full_name: str,
     pr_number: int,
-    dashboard_url: Optional[str],
-    artifacts_url: Optional[str],
-    estimated_cost_usd: Optional[float],
+    dashboard_url: str | None,
+    artifacts_url: str | None,
+    estimated_cost_usd: float | None,
     version: str,
-    findings: Optional[List[dict]] = None,
-    warnings: Optional[List[str]] = None,
-    review_brief_md: Optional[str] = None,
+    findings: list[dict] | None = None,
+    warnings: list[str] | None = None,
+    review_brief_md: str | None = None,
     scan_mode: str = "pr-diff",
     policy_pack: str = "omar",
     policy_pack_version: str = "v1",
     severity_gate: str = "P1",
-    duration_ms: Optional[int] = None,
-    files_scanned: Optional[int] = None,
+    duration_ms: int | None = None,
+    files_scanned: int | None = None,
     llm_engine: str = "disabled",
     llm_model: str = "n/a",
-    actual_cost_usd: Optional[float] = None,
-    review_cost_ledger: Optional[dict] = None,
+    actual_cost_usd: float | None = None,
+    review_cost_ledger: dict | None = None,
     deterministic_count: int = 0,
     llm_count: int = 0,
-    dedupe_key: Optional[str] = None,
-    head_sha: Optional[str] = None,
+    dedupe_key: str | None = None,
+    head_sha: str | None = None,
     server_url: str = "https://github.com",
-    codebase_snapshot: Optional[dict] = None,
-    codebase_synopsis: Optional[str] = None,
+    codebase_snapshot: dict | None = None,
+    codebase_synopsis: str | None = None,
     comment_tag: str = "",
 ) -> str:
     """
@@ -287,7 +290,7 @@ def render_pr_comment(
     next_steps = _next_steps(result.status, severity_gate)
 
     # Links / artifacts
-    links: List[str] = []
+    links: list[str] = []
     if artifacts_url:
         links.append(f"- Workflow run: {artifacts_url}")
     if dashboard_url:

@@ -1,14 +1,14 @@
 """Exercise the real process boundary with offline npm stand-ins, never network."""
 import json
-from dataclasses import asdict
 import os
-from pathlib import Path
 import shutil
+from dataclasses import asdict
+from pathlib import Path
 
 import pytest
-
 import test_dep_audit_suite as fixture
 from test_nested_npm_audits import evaluate
+
 from omargate.harness.suites.dep_audit import DepAuditSuite
 
 pytestmark = pytest.mark.anyio

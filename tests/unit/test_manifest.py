@@ -1,5 +1,9 @@
 from pathlib import Path
-from omargate.package.manifest import generate_artifact_manifest, write_artifact_manifest
+
+from omargate.package.manifest import (
+    generate_artifact_manifest,
+    write_artifact_manifest,
+)
 
 
 def test_manifest_lists_artifacts(tmp_path: Path):

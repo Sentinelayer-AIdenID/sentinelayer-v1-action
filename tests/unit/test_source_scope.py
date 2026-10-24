@@ -1,5 +1,5 @@
-from dataclasses import replace
 import subprocess
+from dataclasses import replace
 
 import pytest
 

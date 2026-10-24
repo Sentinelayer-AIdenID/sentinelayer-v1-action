@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-
 HITL_BANNER = (
     "> Generated stub. Human review required before publishing.\n"
     ">\n"
@@ -166,13 +165,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.dry_run:
         print("Minimal doc set generator")
-        print("")
+        print()
         if created:
             print("Created/Updated")
             for p in created:
                 print(f"- {p}")
         if skipped:
-            print("")
+            print()
             print("Skipped (already exists)")
             for p in skipped:
                 print(f"- {p}")

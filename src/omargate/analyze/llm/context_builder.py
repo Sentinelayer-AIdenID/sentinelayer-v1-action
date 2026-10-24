@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from ...ingest.codebase_snapshot import build_codebase_snapshot
 from ...ingest.quick_learn import QuickLearnSummary
-
 
 TRUNCATION_MARKER = "... (truncated)"
 
@@ -22,11 +20,11 @@ class ContextBudget:
 class BuiltContext:
     content: str
     token_count: int
-    files_included: List[str]
-    files_truncated: List[str]
-    files_skipped: List[str]
-    hotspots_included: List[str]
-    sections_incomplete: List[str] = field(default_factory=list)
+    files_included: list[str]
+    files_truncated: list[str]
+    files_skipped: list[str]
+    hotspots_included: list[str]
+    sections_incomplete: list[str] = field(default_factory=list)
 
 
 class ContextBuilder:
@@ -45,13 +43,13 @@ class ContextBuilder:
     def build_context(
         self,
         ingest: dict,
-        deterministic_findings: List[dict],
+        deterministic_findings: list[dict],
         repo_root: Path,
-        quick_learn: Optional[QuickLearnSummary] = None,
-        spec_context: Optional[dict] = None,
+        quick_learn: QuickLearnSummary | None = None,
+        spec_context: dict | None = None,
         scan_mode: str = "pr-diff",
-        diff_content: Optional[str] = None,
-        changed_files: Optional[List[str]] = None,
+        diff_content: str | None = None,
+        changed_files: list[str] | None = None,
     ) -> BuiltContext:
         """
         Build context for LLM analysis.
@@ -59,14 +57,14 @@ class ContextBuilder:
         Each section added until budget exhausted.
         """
         ingest = ingest or {}
-        context_parts: List[str] = []
+        context_parts: list[str] = []
         used_tokens = 0
 
-        files_included: List[str] = []
-        files_truncated: List[str] = []
-        files_skipped: List[str] = []
-        hotspots_included: List[str] = []
-        sections_incomplete: List[str] = []
+        files_included: list[str] = []
+        files_truncated: list[str] = []
+        files_skipped: list[str] = []
+        hotspots_included: list[str] = []
+        sections_incomplete: list[str] = []
 
         def add_with_budget(text: str, allow_truncate: bool = False) -> tuple[bool, bool, int]:
             nonlocal used_tokens
@@ -169,7 +167,7 @@ class ContextBuilder:
             sections_incomplete=sections_incomplete,
         )
 
-    def _build_quick_learn_context(self, quick_learn: Optional[QuickLearnSummary]) -> str:
+    def _build_quick_learn_context(self, quick_learn: QuickLearnSummary | None) -> str:
         """Build lightweight project summary header."""
         if not quick_learn:
             return ""
@@ -246,7 +244,7 @@ class ContextBuilder:
             languages = snapshot.get("languages", []) if isinstance(snapshot.get("languages"), list) else []
             god_files = snapshot.get("god_files", []) if isinstance(snapshot.get("god_files"), list) else []
 
-            snapshot_lines: List[str] = []
+            snapshot_lines: list[str] = []
             if source_loc is not None:
                 snapshot_lines.append(f"- Source LOC: {source_loc}")
             if languages:
@@ -272,7 +270,7 @@ class ContextBuilder:
 
         return overview + snapshot_section + hotspots_section
 
-    def _build_deterministic_context(self, findings: List[dict]) -> str:
+    def _build_deterministic_context(self, findings: list[dict]) -> str:
         """Summarize deterministic findings for LLM context."""
         if not findings:
             return "## Deterministic Scan Results\nNo issues detected by pattern scanners.\n"
@@ -291,7 +289,7 @@ class ContextBuilder:
             lines.append(f"... and {len(findings) - 20} more")
         return "\n".join(lines) + "\n"
 
-    def _format_hotspots(self, hotspots: Dict[str, List[str]]) -> str:
+    def _format_hotspots(self, hotspots: dict[str, list[str]]) -> str:
         if not hotspots:
             return "- (none detected)"
         lines = []
@@ -322,10 +320,10 @@ class ContextBuilder:
         return bounded
 
     def _prioritize_files(
-        self, ingest: dict, changed_files: Optional[List[str]], scan_mode: str
-    ) -> List[str]:
+        self, ingest: dict, changed_files: list[str] | None, scan_mode: str
+    ) -> list[str]:
         """Return files in priority order for context inclusion."""
-        priority: List[str] = []
+        priority: list[str] = []
         ingest_paths = {
             file_info.get("path")
             for file_info in ingest.get("files", [])

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import FrozenInstanceError
 import json
 import traceback
+from dataclasses import FrozenInstanceError
 
 import httpx
 import pytest
@@ -15,7 +15,6 @@ from omargate.analyze.typesafe_client import (
     TypeSafeResult,
     validate_answers,
 )
-
 
 KEY = "synthetic-typesafe-key"
 MODEL = "model-under-test-1.13.0"

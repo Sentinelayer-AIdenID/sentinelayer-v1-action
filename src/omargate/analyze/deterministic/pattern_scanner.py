@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from bisect import bisect_right
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, Iterable, List
-
 import fnmatch
 import json
 import re
+from bisect import bisect_right
+from collections.abc import Iterable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 MAX_SNIPPET_CHARS = 500
 MAX_SCAN_BYTES = 1_000_000
@@ -66,8 +66,8 @@ def _truncate_snippet(snippet: str, max_chars: int = MAX_SNIPPET_CHARS) -> str:
     return f"{snippet[: max_chars - 3]}..."
 
 
-def _build_line_starts(content: str) -> List[int]:
-    line_starts: List[int] = []
+def _build_line_starts(content: str) -> list[int]:
+    line_starts: list[int] = []
     offset = 0
     for line in content.splitlines(keepends=True):
         line_starts.append(offset)
@@ -77,11 +77,11 @@ def _build_line_starts(content: str) -> List[int]:
     return line_starts
 
 
-def _index_to_line(line_starts: List[int], idx: int) -> int:
+def _index_to_line(line_starts: list[int], idx: int) -> int:
     return bisect_right(line_starts, idx)
 
 
-def _snippet_from_lines(lines: List[str], line_start: int, line_end: int) -> str:
+def _snippet_from_lines(lines: list[str], line_start: int, line_end: int) -> str:
     if not lines:
         return ""
     start_idx = max(line_start - 1, 0)
@@ -97,11 +97,11 @@ class PatternScanner:
     def __init__(self, patterns_dir: Path):
         self.patterns = self._load_patterns(patterns_dir)
 
-    def _load_patterns(self, patterns_dir: Path) -> List[Dict[str, Any]]:
+    def _load_patterns(self, patterns_dir: Path) -> list[dict[str, Any]]:
         pattern_files = sorted(patterns_dir.glob("*.json"))
         if not pattern_files:
             raise ValueError(f"No pattern files found in {patterns_dir}")
-        patterns: List[Dict[str, Any]] = []
+        patterns: list[dict[str, Any]] = []
         for pattern_file in pattern_files:
             data = json.loads(pattern_file.read_text(encoding="utf-8"))
             if data.get("schema_version") != "1.0":
@@ -116,7 +116,7 @@ class PatternScanner:
                 patterns.append(enriched)
         return patterns
 
-    def _file_matches_pattern(self, file_path: str, pattern: Dict[str, Any]) -> bool:
+    def _file_matches_pattern(self, file_path: str, pattern: dict[str, Any]) -> bool:
         normalized = file_path.replace("\\", "/")
         include_patterns = pattern.get("file_patterns") or ["*"]
         if include_patterns and not any(fnmatch.fnmatch(normalized, pat) for pat in include_patterns):
@@ -126,14 +126,14 @@ class PatternScanner:
             return False
         return True
 
-    def _mask_sensitive(self, snippet: str, pattern: Dict[str, Any]) -> str:
+    def _mask_sensitive(self, snippet: str, pattern: dict[str, Any]) -> str:
         return mask_secret_in_snippet(snippet, pattern.get("category", ""))
 
-    def _scan_content(self, file_path: Path, content: str, patterns: Iterable[Dict[str, Any]]) -> List[Finding]:
+    def _scan_content(self, file_path: Path, content: str, patterns: Iterable[dict[str, Any]]) -> list[Finding]:
         rel_path = file_path.as_posix()
         line_starts = _build_line_starts(content)
         lines = content.splitlines()
-        findings: List[Finding] = []
+        findings: list[Finding] = []
         for pattern in patterns:
             if not self._file_matches_pattern(rel_path, pattern):
                 continue
@@ -182,16 +182,16 @@ class PatternScanner:
                 )
         return findings
 
-    def scan_file(self, file_path: Path, content: str) -> List[Finding]:
+    def scan_file(self, file_path: Path, content: str) -> list[Finding]:
         return self._scan_content(file_path, content, self.patterns)
 
     def scan_file_with_patterns(
-        self, file_path: Path, content: str, patterns: Iterable[Dict[str, Any]]
-    ) -> List[Finding]:
+        self, file_path: Path, content: str, patterns: Iterable[dict[str, Any]]
+    ) -> list[Finding]:
         return self._scan_content(file_path, content, patterns)
 
-    def scan_files(self, files: List[Dict[str, Any]], repo_root: Path) -> List[Finding]:
-        findings: List[Finding] = []
+    def scan_files(self, files: list[dict[str, Any]], repo_root: Path) -> list[Finding]:
+        findings: list[Finding] = []
         for entry in sorted(files, key=lambda item: item.get("path") or ""):
             rel_path = entry.get("path")
             if not rel_path:

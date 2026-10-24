@@ -6,12 +6,13 @@ import time
 import uuid
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Any
 
 from .models import Finding
-from .utils import ensure_writable_dir, sha256_hex, json_dumps
+from .utils import ensure_writable_dir, json_dumps, sha256_hex
 
-def _finding_to_dict(finding: Any) -> Dict[str, Any]:
+
+def _finding_to_dict(finding: Any) -> dict[str, Any]:
     if isinstance(finding, dict):
         return finding
     if is_dataclass(finding):
@@ -19,7 +20,7 @@ def _finding_to_dict(finding: Any) -> Dict[str, Any]:
     return dict(getattr(finding, "__dict__", {}))
 
 
-def write_findings_jsonl(path: Path, findings: List[Finding]) -> None:
+def write_findings_jsonl(path: Path, findings: list[Finding]) -> None:
     with path.open("w", encoding="utf-8") as f:
         for finding in findings:
             payload = _finding_to_dict(finding)
@@ -30,15 +31,15 @@ def write_pack_summary(
     run_id: str,
     writer_complete: bool,
     findings_path: Path,
-    counts: Dict[str, int],
-    tool_versions: Dict[str, str],
-    stages_completed: List[str],
+    counts: dict[str, int],
+    tool_versions: dict[str, str],
+    stages_completed: list[str],
     review_brief_path: Path | None = None,
     severity_gate: str | None = None,
-    llm_usage: Dict[str, Any] | None = None,
-    llm_evidence: Dict[str, Any] | None = None,
+    llm_usage: dict[str, Any] | None = None,
+    llm_evidence: dict[str, Any] | None = None,
     error: str | None = None,
-    errors: List[str] | None = None,
+    errors: list[str] | None = None,
     fingerprint_count: int | None = None,
     dedupe_key: str | None = None,
     policy_pack: str | None = None,
@@ -49,7 +50,7 @@ def write_pack_summary(
     model_fallback: str | None = None,
     model_fallback_used: bool | None = None,
     duration_ms: int | None = None,
-    dependency_audit_evidence: Dict[str, Any] | None = None,
+    dependency_audit_evidence: dict[str, Any] | None = None,
 ) -> Path:
     errors_list = list(errors or [])
     if error:

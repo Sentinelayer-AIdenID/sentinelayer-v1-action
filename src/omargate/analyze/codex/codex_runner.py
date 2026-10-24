@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import json
 import os
-from pathlib import Path
 import shutil
 import tempfile
 import time
-from typing import Any, Mapping, Optional
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 from ...fix_plan import ensure_fix_plan
 from ..finding_contract import parse_finding_payload
-
 
 # Codex needs a small amount of host process context to locate its runtime,
 # configuration and temporary files.  Passing the complete Action environment
@@ -94,8 +94,8 @@ class CodexResult:
     raw_output: str
     success: bool
     duration_ms: int
-    error: Optional[str] = None
-    parse_errors: Optional[list[str]] = None
+    error: str | None = None
+    parse_errors: list[str] | None = None
     no_findings_reported: bool = False
 
 
@@ -148,10 +148,10 @@ def parse_codex_findings(text: str) -> tuple[list[dict], list[str], bool]:
     )
 
 
-def extract_codex_cli_failure(stdout: str) -> Optional[str]:
+def extract_codex_cli_failure(stdout: str) -> str | None:
     """Return the terminal error from Codex JSONL without exposing the prompt."""
-    last_error: Optional[str] = None
-    terminal_error: Optional[str] = None
+    last_error: str | None = None
+    terminal_error: str | None = None
 
     for line in (stdout or "").splitlines():
         try:
@@ -180,7 +180,7 @@ class CodexRunner:
         self.api_key = api_key
         self.model = model
 
-    def _resolve_codex_bin(self, working_dir: Path) -> Optional[str]:
+    def _resolve_codex_bin(self, working_dir: Path) -> str | None:
         path = shutil.which("codex")
         if path:
             try:

@@ -1,23 +1,28 @@
-from policy_fixture import FAKE_POLICY_JSON, FAKE_POLICY
-
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from policy_fixture import FAKE_POLICY, FAKE_POLICY_JSON
 from pydantic import ValidationError
 
+from omargate.analyze.llm.providers.openai_provider import OpenAIProvider
+from omargate.analyze.orchestrator import AnalysisOrchestrator, LLMAnalysisResult
 from omargate.analyze.review_cascade import (
-    DEEP, LOW, MID, choose_route, excellence_coverage,
-    response_model_matches, triage_questions,
+    DEEP,
+    LOW,
+    MID,
+    choose_route,
+    excellence_coverage,
+    response_model_matches,
+    triage_questions,
 )
 from omargate.analyze.review_costs import cost_ledger, estimate_usage
 from omargate.analyze.typesafe_client import ChoiceAnswer, TypeSafeResult
-from omargate.analyze.orchestrator import AnalysisOrchestrator, LLMAnalysisResult
-from omargate.analyze.llm.providers.openai_provider import OpenAIProvider
+from omargate.analyze.typesafe_review import TypedReview
+from omargate.analyze.typesafe_review import review_inventory as real_review_inventory
 from omargate.config import OmarGateConfig
 from omargate.logging import OmarLogger
-from omargate.analyze.typesafe_review import TypedReview, review_inventory as real_review_inventory
 
 pytestmark = pytest.mark.anyio
 
@@ -354,8 +359,9 @@ async def test_incomplete_openai_response_keeps_cost_but_cannot_pass():
 
 
 def test_cascade_disables_hidden_sdk_retries(monkeypatch):
-    from omargate.analyze.llm.llm_client import LLMClient
     import openai
+
+    from omargate.analyze.llm.llm_client import LLMClient
     received = []
     monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kwargs: received.append(kwargs) or object())
     client = LLMClient("test-only", reasoning_effort="max")

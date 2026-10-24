@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import builtins
+import types
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
-import types
 
 import pytest
 
 from omargate.analyze.llm.llm_client import LLMClient
 from omargate.analyze.llm.providers import detect_provider_from_model
-from omargate.analyze.llm.providers.base import ProviderResponse
-from omargate.analyze.llm.providers.openai_provider import OpenAIProvider
 from omargate.analyze.llm.providers.anthropic_provider import AnthropicProvider
+from omargate.analyze.llm.providers.base import ProviderResponse
 from omargate.analyze.llm.providers.gemini_provider import GeminiProvider
+from omargate.analyze.llm.providers.openai_provider import OpenAIProvider
 from omargate.analyze.llm.providers.xai_provider import XAIProvider
 
 

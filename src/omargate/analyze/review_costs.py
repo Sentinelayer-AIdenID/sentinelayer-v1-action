@@ -1,8 +1,8 @@
 """Published-rate estimates, never provider billing records. Unknown stays null."""
 from __future__ import annotations
 
-from decimal import Decimal
 import re
+from decimal import Decimal
 
 from ..intent_identity import intent_model_reference
 from .review_cascade import response_model_matches
@@ -27,7 +27,7 @@ def partition_cost_reservation(context: str, system_prompt: str, *, intent_price
     enforced 24k/48k byte envelope limits. This is a token-rate estimate, never
     a guarantee about the provider's bill or non-token fees.
     """
-    from .review_cascade import LOW, MID, DEEP
+    from .review_cascade import DEEP, LOW, MID
     tokens = len(context.encode("utf-8")) + len(system_prompt.encode("utf-8")) + 1024
     predicted = [estimate_usage("openai", route.model,
                  {"input_tokens": tokens, "output_tokens": CASCADE_MAX_OUTPUT_TOKENS})

@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import json
 import math
 import os
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from ..intent_identity import redact_intent_pin
 from types import MappingProxyType
-from typing import List, Mapping, Optional
 
 from ..artifacts import generate_review_brief
 from ..config import OmarGateConfig
+from ..fix_plan import ensure_fix_plan
+from ..harness import HarnessRunner
 from ..ingest import (
     QuickLearnSummary,
     build_llm_synopsis_prompt,
@@ -20,10 +21,9 @@ from ..ingest import (
     is_boilerplate_description,
     run_ingest,
 )
-from ..harness import HarnessRunner
+from ..intent_identity import redact_intent_pin
 from ..logging import OmarLogger
 from ..package.fingerprint import add_fingerprints_to_findings
-from ..fix_plan import ensure_fix_plan
 from ..redaction import contains_credential_material, sanitize_public_error
 from .codex import CodexPromptBuilder, CodexRunner
 from .deterministic import (
@@ -32,6 +32,7 @@ from .deterministic import (
     PatternScanner,
     scan_for_secrets,
 )
+from .deterministic.workflow_scanner import scan_workflow_files
 from .llm import (
     ContextBuilder,
     LLMClient,
@@ -43,10 +44,29 @@ from .llm import (
 )
 from .llm.providers import detect_provider_from_model
 from .llm.response_parser import ParsedFinding
+from .review_cascade import (
+    DEEP,
+    MID,
+    ReviewRoute,
+    choose_route,
+    excellence_coverage,
+    response_model_matches,
+    triage_questions,
+)
+from .review_costs import (
+    CASCADE_MAX_OUTPUT_TOKENS,
+    cost_ledger,
+    estimate_usage,
+    partition_cost_reservation,
+)
+from .scope_context import plan_scope_requests, validate_scope_coverage
+from .source_scope import (
+    SourceScope,
+    build_source_scope,
+    verify_scope_partition,
+    verify_source_scope,
+)
 from .typesafe_client import TypeSafeClient, TypeSafeError
-from .review_cascade import DEEP, MID, ReviewRoute, choose_route, excellence_coverage, triage_questions, response_model_matches
-from .review_costs import CASCADE_MAX_OUTPUT_TOKENS, cost_ledger, estimate_usage, partition_cost_reservation
-from .deterministic.workflow_scanner import scan_workflow_files
 from .typesafe_review import (
     TypedReview,
     TypeSafeReviewIncomplete,
@@ -56,10 +76,7 @@ from .typesafe_review import (
     verify_sources,
 )
 from .typesafe_state import build_typed_context
-from .source_scope import SourceScope, build_source_scope, verify_scope_partition, verify_source_scope
-from .scope_context import plan_scope_requests, validate_scope_coverage
-from .typesafe_writer import explain_review, WRITER_MODEL
-
+from .typesafe_writer import WRITER_MODEL, explain_review
 
 _LOG_SECRET_SCRUB_RES = (
     (re.compile(r"sk-[A-Za-z0-9_-]{16,}"), "[REDACTED]"),
@@ -351,7 +368,7 @@ def _finding_provenance(finding: dict) -> dict[str, object]:
     return provenance
 
 
-def _resolve_finding_collision(findings: List[dict]) -> dict:
+def _resolve_finding_collision(findings: list[dict]) -> dict:
     """Collapse one collision group without weakening severity or provenance.
 
     The winner stays authoritative at the top level. Alternate provenance is
@@ -474,41 +491,41 @@ def _preserve_review_after_writer_failure(
 class AnalysisResult:
     """Complete analysis result."""
 
-    findings: List[dict]
-    quick_learn: Optional[QuickLearnSummary]
+    findings: list[dict]
+    quick_learn: QuickLearnSummary | None
     ingest: dict
     counts: dict
     ingest_stats: dict
     deterministic_count: int
     llm_count: int
     llm_success: bool
-    llm_usage: Optional[dict]
-    warnings: List[str]
-    review_brief_path: Optional[Path]
+    llm_usage: dict | None
+    warnings: list[str]
+    review_brief_path: Path | None
     scan_mode: str
     total_files_scanned: int
-    hotspots_found: List[str]
+    hotspots_found: list[str]
     llm_attempted: bool = False
     llm_output_valid: bool = False
     llm_no_findings_reported: bool = False
     llm_reported_finding_count: int = 0
     llm_parse_error_count: int = 0
-    llm_failure_class: Optional[str] = None
-    dependency_audit_evidence: Optional[dict] = None
+    llm_failure_class: str | None = None
+    dependency_audit_evidence: dict | None = None
 
 
 @dataclass
 class LLMAnalysisResult:
-    findings: List[dict]
+    findings: list[dict]
     success: bool
-    usage: Optional[dict]
-    warning: Optional[str]
+    usage: dict | None
+    warning: str | None
     attempted: bool = False
     output_valid: bool = False
     no_findings_reported: bool = False
     reported_finding_count: int = 0
     parse_error_count: int = 0
-    failure_class: Optional[str] = None
+    failure_class: str | None = None
     # Set only by the full-source runner; generator output can never supply it.
     source_scope: SourceScope | None = None
 
@@ -527,7 +544,7 @@ class AnalysisOrchestrator:
         self.logger = logger
         self.repo_root = repo_root
         self.allow_llm = allow_llm
-        self._quick_learn: Optional[QuickLearnSummary] = None
+        self._quick_learn: QuickLearnSummary | None = None
 
         patterns_dir = Path(__file__).parent / "deterministic" / "patterns"
         self.pattern_scanner = PatternScanner(patterns_dir=patterns_dir)
@@ -542,13 +559,13 @@ class AnalysisOrchestrator:
     async def run(
         self,
         scan_mode: str = "pr-diff",
-        diff_content: Optional[str] = None,
-        changed_files: Optional[List[str]] = None,
-        spec_context: Optional[dict] = None,
-        run_dir: Optional[Path] = None,
-        run_id: Optional[str] = None,
-        version: Optional[str] = None,
-        dashboard_url: Optional[str] = None,
+        diff_content: str | None = None,
+        changed_files: list[str] | None = None,
+        spec_context: dict | None = None,
+        run_dir: Path | None = None,
+        run_id: str | None = None,
+        version: str | None = None,
+        dashboard_url: str | None = None,
     ) -> AnalysisResult:
         """
         Run complete analysis pipeline.
@@ -562,7 +579,7 @@ class AnalysisOrchestrator:
         6. Merge and dedupe findings
         7. Return results
         """
-        warnings: List[str] = []
+        warnings: list[str] = []
 
         # Step 0: Quick Learn
         quick_learn: QuickLearnSummary
@@ -663,7 +680,7 @@ class AnalysisOrchestrator:
             disabled_dependency_audit_evidence,
         )
 
-        harness_findings: List[dict] = []
+        harness_findings: list[dict] = []
         dependency_audit_evidence = disabled_dependency_audit_evidence()
         if self.config.run_harness:
             with self.logger.stage("harness"):
@@ -708,15 +725,15 @@ class AnalysisOrchestrator:
             )
 
         # Step 4-5: Deep scan via Codex CLI, then API/managed LLM fallback.
-        llm_findings: List[dict] = []
+        llm_findings: list[dict] = []
         llm_success = False
-        llm_usage: Optional[dict] = None
+        llm_usage: dict | None = None
         llm_attempted = False
         llm_output_valid = False
         llm_no_findings_reported = False
         llm_reported_finding_count = 0
         llm_parse_error_count = 0
-        llm_failure_class: Optional[str] = "not_attempted"
+        llm_failure_class: str | None = "not_attempted"
         generator_result_recorded = False
 
         def record_llm_result(result: LLMAnalysisResult) -> None:
@@ -786,7 +803,7 @@ class AnalysisOrchestrator:
                         )
                     )
 
-        typed_result: Optional[LLMAnalysisResult] = None
+        typed_result: LLMAnalysisResult | None = None
         verified_scope: SourceScope | None = None
         cascade = self.config.review_routing == "intent-cascade-v1"
         if cascade and self.allow_llm:
@@ -964,7 +981,7 @@ class AnalysisOrchestrator:
         )
         counts = self._count_by_severity(all_findings)
 
-        review_brief_path: Optional[Path] = None
+        review_brief_path: Path | None = None
         if run_dir and run_id:
             try:
                 review_brief_path = generate_review_brief(
@@ -1072,11 +1089,11 @@ class AnalysisOrchestrator:
         return "openai" if self.config.llm_provider == "typesafe" else self.config.llm_provider
 
     async def _run_cascade_analysis(
-        self, *, ingest: dict, changed_files: Optional[List[str]], scan_mode: str,
-        deterministic_findings: List[dict], quick_learn: Optional[QuickLearnSummary],
-        spec_context: Optional[dict], diff_content: Optional[str],
-        run_dir: Optional[Path],
-        dep_audit_evidence: Optional[dict] = None,
+        self, *, ingest: dict, changed_files: list[str] | None, scan_mode: str,
+        deterministic_findings: list[dict], quick_learn: QuickLearnSummary | None,
+        spec_context: dict | None, diff_content: str | None,
+        run_dir: Path | None,
+        dep_audit_evidence: dict | None = None,
         _source_scope=None, _inventory=None, _typed_context=None,
         _generator_context=None,
     ) -> LLMAnalysisResult:
@@ -1437,10 +1454,10 @@ class AnalysisOrchestrator:
             return [], assessment
 
     async def _run_typesafe_analysis(
-        self, *, ingest: dict, changed_files: Optional[List[str]], scan_mode: str,
-        deterministic_findings: List[dict], run_dir: Optional[Path] = None,
-        diff_content: Optional[str] = None,
-        dep_audit_evidence: Optional[dict] = None,
+        self, *, ingest: dict, changed_files: list[str] | None, scan_mode: str,
+        deterministic_findings: list[dict], run_dir: Path | None = None,
+        diff_content: str | None = None,
+        dep_audit_evidence: dict | None = None,
     ) -> LLMAnalysisResult:
         attempted = False
         client = None
@@ -1538,7 +1555,7 @@ class AnalysisOrchestrator:
                 review.assessment["generator_required_categories"] = (
                     generator_required_categories
                 )
-            warning: Optional[str]
+            warning: str | None
             if policy_complete and clean_candidate_ids:
                 success = False
                 failure_class = "typesafe_clean_requires_generator"
@@ -1659,7 +1676,7 @@ class AnalysisOrchestrator:
         return result
 
     @staticmethod
-    def _llm_usage_to_dict(usage) -> Optional[dict]:
+    def _llm_usage_to_dict(usage) -> dict | None:
         if not usage:
             return None
         payload = {
@@ -1681,9 +1698,9 @@ class AnalysisOrchestrator:
             payload["raw_usage"] = raw_usage
         return payload
 
-    def _run_deterministic_scans(self, ingest: dict) -> List[dict]:
+    def _run_deterministic_scans(self, ingest: dict) -> list[dict]:
         """Run all deterministic scanners."""
-        findings: List[dict] = []
+        findings: list[dict] = []
         findings.extend(self._finding_to_dict(f) for f in scan_workflow_files(
             ingest.get("files", []), self.repo_root,
         ))
@@ -1758,7 +1775,7 @@ class AnalysisOrchestrator:
                 pass
         return files
 
-    def _generator_system_prompt(self, scan_mode: str, review_route: Optional[ReviewRoute]) -> str:
+    def _generator_system_prompt(self, scan_mode: str, review_route: ReviewRoute | None) -> str:
         prompt = self.prompt_loader.get_prompt(scan_mode=scan_mode)
         if review_route:
             private_policy = self.config.review_policy
@@ -1770,14 +1787,14 @@ class AnalysisOrchestrator:
     async def _run_llm_analysis(
         self,
         ingest: dict,
-        deterministic_findings: List[dict],
-        quick_learn: Optional[QuickLearnSummary],
-        spec_context: Optional[dict],
+        deterministic_findings: list[dict],
+        quick_learn: QuickLearnSummary | None,
+        spec_context: dict | None,
         scan_mode: str,
-        diff_content: Optional[str],
-        changed_files: Optional[List[str]],
-        review_route: Optional[ReviewRoute] = None,
-        source_context: Optional[str] = None,
+        diff_content: str | None,
+        changed_files: list[str] | None,
+        review_route: ReviewRoute | None = None,
+        source_context: str | None = None,
     ) -> LLMAnalysisResult:
         """Run LLM analysis with fallback handling."""
         context_ingest = ingest
@@ -1908,11 +1925,11 @@ class AnalysisOrchestrator:
         self,
         *,
         ingest: dict,
-        deterministic_findings: List[dict],
-        quick_learn: Optional[QuickLearnSummary],
+        deterministic_findings: list[dict],
+        quick_learn: QuickLearnSummary | None,
         scan_mode: str,
-        diff_content: Optional[str],
-        codex_model_override: Optional[str] = None,
+        diff_content: str | None,
+        codex_model_override: str | None = None,
     ) -> LLMAnalysisResult:
         """
         Run Codex CLI agentic audit and parse JSONL findings.
@@ -2021,11 +2038,11 @@ class AnalysisOrchestrator:
     def _llm_failure_result(
         self,
         *,
-        deterministic_findings: List[dict],
+        deterministic_findings: list[dict],
         attempted: bool,
         failure_class: str,
         public_error: str,
-        usage: Optional[dict] = None,
+        usage: dict | None = None,
         no_findings_reported: bool = False,
         reported_finding_count: int = 0,
         parse_error_count: int = 0,
@@ -2072,8 +2089,8 @@ class AnalysisOrchestrator:
             failure_class=failure_class,
         )
 
-    def _flatten_hotspots(self, hotspots: dict) -> List[str]:
-        files: List[str] = []
+    def _flatten_hotspots(self, hotspots: dict) -> list[str]:
+        files: list[str] = []
         seen = set()
         for group in hotspots.values():
             if not isinstance(group, list):
@@ -2085,7 +2102,7 @@ class AnalysisOrchestrator:
                 files.append(rel_path)
         return files
 
-    def _merge_findings(self, deterministic: List[dict], llm: List[dict]) -> List[dict]:
+    def _merge_findings(self, deterministic: list[dict], llm: list[dict]) -> list[dict]:
         """Merge one finding per file/span/category without severity loss."""
 
         def collision_key(finding: dict) -> tuple[str, int, int, str]:
@@ -2117,7 +2134,7 @@ class AnalysisOrchestrator:
             )
             return path, normalized_start, normalized_end, category
 
-        groups: dict[tuple[str, int, int, str], List[dict]] = {}
+        groups: dict[tuple[str, int, int, str], list[dict]] = {}
         for finding in [*deterministic, *llm]:
             groups.setdefault(collision_key(finding), []).append(finding)
         merged = [
@@ -2163,8 +2180,8 @@ class AnalysisOrchestrator:
 
     @staticmethod
     def _compose_llm_findings(
-        typed_findings: List[dict], generator_findings: List[dict]
-    ) -> List[dict]:
+        typed_findings: list[dict], generator_findings: list[dict]
+    ) -> list[dict]:
         """Compose guarded lanes, collapsing only exact source-bound overlap."""
 
         def span_key(
@@ -2196,8 +2213,8 @@ class AnalysisOrchestrator:
                 return None
             return (path.replace("\\", "/"), line_start, line_end, category)
 
-        composed: List[dict | tuple[str, int, int, str]] = []
-        collision_groups: dict[tuple[str, int, int, str], List[dict]] = {}
+        composed: list[dict | tuple[str, int, int, str]] = []
+        collision_groups: dict[tuple[str, int, int, str], list[dict]] = {}
         for finding in typed_findings:
             if not isinstance(finding, dict):
                 continue
@@ -2230,12 +2247,12 @@ class AnalysisOrchestrator:
     def _apply_llm_guardrails(
         self,
         *,
-        llm_findings: List[dict],
-        non_llm_findings: List[dict],
+        llm_findings: list[dict],
+        non_llm_findings: list[dict],
         ingest: dict,
         source_scope: SourceScope | None = None,
         discarded: list[object] | None = None,
-    ) -> List[dict]:
+    ) -> list[dict]:
         """
         Normalize and guardrail LLM/Codex findings before merge.
 
@@ -2266,7 +2283,7 @@ class AnalysisOrchestrator:
             else:
                 line_limits[rel_path.replace("\\", "/")] = 1
 
-        normalized: List[dict] = []
+        normalized: list[dict] = []
         for finding in llm_findings:
             if not isinstance(finding, dict):
                 if discarded is not None:
@@ -2401,7 +2418,7 @@ class AnalysisOrchestrator:
         line_start: int,
         line_end: int,
         category: str,
-        non_llm_findings: List[dict],
+        non_llm_findings: list[dict],
         *,
         typed_candidate: bool = False,
     ) -> bool:
@@ -2459,7 +2476,7 @@ class AnalysisOrchestrator:
                 return True
         return False
 
-    def _count_by_severity(self, findings: List[dict]) -> dict:
+    def _count_by_severity(self, findings: list[dict]) -> dict:
         """Count findings by severity."""
         counts = {"P0": 0, "P1": 0, "P2": 0, "P3": 0, "P4": 0, "total": len(findings)}
         for finding in findings:
@@ -2469,8 +2486,8 @@ class AnalysisOrchestrator:
         return counts
 
     def _identify_hotspots_with_findings(
-        self, findings: List[dict], hotspots: dict
-    ) -> List[str]:
+        self, findings: list[dict], hotspots: dict
+    ) -> list[str]:
         """Return hotspot files that have findings."""
         if not hotspots:
             return []

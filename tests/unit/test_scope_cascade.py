@@ -5,17 +5,21 @@ from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import pytest
+from policy_fixture import FAKE_POLICY
+from test_review_cascade import configured as configured
+from test_review_cascade import generator_result, triage
+from test_review_cascade import generator_transport as generator_transport
 
-from test_review_cascade import configured as configured, triage, generator_result, generator_transport as generator_transport
-from omargate.analyze.review_cascade import LOW
+from omargate.analyze.review_cascade import LOW, triage_questions
 from omargate.analyze.scope_context import plan_scope_requests, validate_scope_coverage
 from omargate.analyze.source_scope import build_source_scope, verify_scope_partition
-from omargate.analyze.typesafe_review import TypeSafeReviewIncomplete, load_policy
-from omargate.analyze.typesafe_review import review_inventory as real_review_inventory
 from omargate.analyze.typesafe_client import ChoiceAnswer, TypeSafeResult
-from policy_fixture import FAKE_POLICY
-from omargate.analyze.review_cascade import triage_questions
-from omargate.analyze.typesafe_review import TypedReview
+from omargate.analyze.typesafe_review import (
+    TypedReview,
+    TypeSafeReviewIncomplete,
+    load_policy,
+)
+from omargate.analyze.typesafe_review import review_inventory as real_review_inventory
 from omargate.gate import evaluate_gate
 from omargate.main import _build_llm_evidence
 from omargate.models import GateConfig
@@ -191,11 +195,10 @@ async def test_zero_estimate_budget_refuses_all_transport_even_with_approval_non
 
 
 async def test_cumulative_estimate_budget_preserves_paid_defect_and_unreviewed_tail(full):
+    from omargate.analyze.review_cascade import DEEP, triage_questions
     from omargate.analyze.review_costs import partition_cost_reservation
-    from omargate.analyze.review_cascade import DEEP
     from omargate.analyze.source_scope import build_source_scope
     from omargate.analyze.typesafe_review import load_policy
-    from omargate.analyze.review_cascade import triage_questions
     requests = plan_scope_requests(build_source_scope(full.repo_root, "deep"), [],
         load_policy(full.config.intent_policy.get_secret_value()), triage_questions(full.config.review_policy),
         max_candidates=1, max_generator_bytes=full.config.max_input_tokens)
@@ -238,6 +241,7 @@ async def test_unknown_price_profile_refuses_before_any_partition(full):
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -1, 1001])
 def test_estimate_ceiling_rejects_unbounded_or_invalid_config(full, value):
     from pydantic import ValidationError
+
     from omargate.config import OmarGateConfig
     with pytest.raises(ValidationError):
         OmarGateConfig(max_review_estimate_usd=value, _env_file=None)

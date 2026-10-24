@@ -2,9 +2,12 @@ import json
 
 import pytest
 
-from omargate.analyze.deterministic.workflow_scanner import scan_workflow, scan_workflow_files
 from omargate.analyze.deterministic.eng_quality_scanner import EngQualityScanner
 from omargate.analyze.deterministic.pattern_scanner import PatternScanner
+from omargate.analyze.deterministic.workflow_scanner import (
+    scan_workflow,
+    scan_workflow_files,
+)
 
 PATH = ".github/workflows/ci.yml"
 SHA = "a" * 40
@@ -103,6 +106,7 @@ def test_modern_react_updates_are_not_automatically_a_defect():
 
 def test_regex_rules_have_explicit_retirement_and_new_scanner_runs_in_orchestrator(tmp_path):
     from pathlib import Path
+
     from omargate.analyze.orchestrator import AnalysisOrchestrator
     from omargate.config import OmarGateConfig
     from omargate.logging import OmarLogger

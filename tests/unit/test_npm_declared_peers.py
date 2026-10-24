@@ -5,12 +5,12 @@ import shutil
 from dataclasses import asdict
 
 import pytest
-
 import test_dep_audit_suite as fixture
 from test_nested_npm_audits import evaluate
+
+from omargate.harness.runner import run_command
 from omargate.harness.suites import dep_audit
 from omargate.harness.suites.dep_audit import DepAuditSuite
-from omargate.harness.runner import run_command
 
 pytestmark = pytest.mark.anyio
 

@@ -7,10 +7,10 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Optional
 
 from .analyze import AnalysisOrchestrator
 from .analyze.spec_context import fetch_spec_context
+from .artifacts import write_audit_report
 from .comment import marker, render_pr_comment
 from .config import OmarGateConfig
 from .context import GitHubContext
@@ -28,10 +28,15 @@ from .ingest.codebase_snapshot import (
 )
 from .logging import OmarLogger
 from .models import Counts, GateConfig, GateResult, GateStatus
-from .artifacts import write_audit_report
-from .packaging import get_run_dir, write_findings_jsonl, write_pack_summary
-from .publish import prepare_artifacts_for_upload, write_step_summary
 from .package import write_artifact_manifest
+from .packaging import get_run_dir, write_findings_jsonl, write_pack_summary
+from .preflight import (
+    check_branch_protection,
+    check_cost_approval,
+    check_fork_policy,
+    check_rate_limits,
+)
+from .publish import prepare_artifacts_for_upload, write_step_summary
 from .runtime_helpers import (
     _build_spec_compliance_from_findings,
     _counts_from_check_run_output,
@@ -42,17 +47,6 @@ from .runtime_helpers import (
     _map_category_to_spec_sections,
     _write_preflight_artifacts,
 )
-from .telemetry_runtime import (
-    _estimate_cost,
-    _upload_telemetry_always,
-    _write_github_outputs,
-)
-from .preflight import (
-    check_branch_protection,
-    check_cost_approval,
-    check_fork_policy,
-    check_rate_limits,
-)
 from .telemetry import (
     TelemetryCollector,
     fetch_oidc_token,
@@ -61,6 +55,11 @@ from .telemetry.schemas import (
     SpecComplianceTelemetry,
 )
 from .telemetry.uploader import upload_telemetry
+from .telemetry_runtime import (
+    _estimate_cost,
+    _upload_telemetry_always,
+    _write_github_outputs,
+)
 from .utils import ensure_writable_dir, json_dumps
 
 ACTION_VERSION = "1.3.11"
@@ -70,16 +69,16 @@ ACTION_IDEMPOTENCY_VERSION = "4:dependency-audit-v1.2:complete-discovery:workspa
 DEPENDENCY_AUDIT_CONTRACT_VERSION = "dependency-audit-evidence-v1.2:workspace-root:complete-discovery:root-declared-peer-edges:isolated-npm-config"
 CHECK_NAME_BASE = "Omar Gate"
 __all__ = [
-    "main",
-    "async_main",
-    "_latest_completed_check_run",
-    "_counts_from_check_run_output",
-    "_gate_result_from_check_run",
-    "_exit_code_from_gate_result",
-    "_map_category_to_spec_sections",
-    "_build_spec_compliance_from_findings",
-    "_github_publish_enabled",
     "DEPENDENCY_AUDIT_CONTRACT_VERSION",
+    "_build_spec_compliance_from_findings",
+    "_counts_from_check_run_output",
+    "_exit_code_from_gate_result",
+    "_gate_result_from_check_run",
+    "_github_publish_enabled",
+    "_latest_completed_check_run",
+    "_map_category_to_spec_sections",
+    "async_main",
+    "main",
 ]
 
 
@@ -109,7 +108,7 @@ def _llm_display_identity(analysis) -> tuple[str, str]:
     return engine, model
 
 
-def _llm_display_cost(analysis) -> Optional[float]:
+def _llm_display_cost(analysis) -> float | None:
     """Keep an attempted review's unreported cost unknown, including failures."""
     usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
     if isinstance(usage.get("cost_ledger"), dict):
@@ -155,7 +154,7 @@ def _short_circuit_with_gate_result(
     config: OmarGateConfig,
     idem_key: str,
     skip_label: str,
-    link_url: Optional[str],
+    link_url: str | None,
     estimated_cost_usd: float = 0.0,
 ) -> int:
     findings_path, pack_summary_path = _write_preflight_artifacts(
@@ -296,23 +295,23 @@ async def async_main() -> int:
     )
     collector.model_used = (os.environ.get("INPUT_MODEL") or "").strip()
 
-    config: Optional[OmarGateConfig] = None
-    ctx: Optional[GitHubContext] = None
+    config: OmarGateConfig | None = None
+    ctx: GitHubContext | None = None
     effective_scan_mode = "pr-diff"
     repo_root = Path(os.environ.get("GITHUB_WORKSPACE", "."))
 
-    dashboard_url: Optional[str] = None
+    dashboard_url: str | None = None
     idem_key = ""
     analysis = None
-    codebase_snapshot: Optional[dict] = None
+    codebase_snapshot: dict | None = None
     codebase_synopsis = ""
-    spec_context: Optional[dict] = None
-    spec_compliance: Optional[SpecComplianceTelemetry] = None
-    gate_result: Optional[GateResult] = None
-    findings_path: Optional[Path] = None
-    pack_summary_path: Optional[Path] = None
+    spec_context: dict | None = None
+    spec_compliance: SpecComplianceTelemetry | None = None
+    gate_result: GateResult | None = None
+    findings_path: Path | None = None
+    pack_summary_path: Path | None = None
     server_url = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
-    workflow_run_url: Optional[str] = None
+    workflow_run_url: str | None = None
 
     try:
         try:
@@ -417,7 +416,7 @@ async def async_main() -> int:
 
         # === PREFLIGHT ===
         preflight_success = True
-        scan_mode_override: Optional[str] = None
+        scan_mode_override: str | None = None
         collector.stage_start("preflight")
         try:
             with logger.stage("preflight"):
@@ -521,8 +520,8 @@ async def async_main() -> int:
             allow_llm=not limited_mode,
         )
 
-        diff_content: Optional[str] = None
-        changed_files: Optional[list[str]] = None
+        diff_content: str | None = None
+        changed_files: list[str] | None = None
         if effective_scan_mode == "pr-diff" and ctx.pr_number:
             collector.stage_start("fetch_diff")
             try:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from omargate.constants import ExitCode
-from omargate.errors import GateBlockedError, DedupeSkip
+from omargate.errors import DedupeSkip, GateBlockedError
 from omargate.logging import OmarLogger
 
 

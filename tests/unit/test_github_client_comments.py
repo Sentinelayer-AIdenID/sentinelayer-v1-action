@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 from omargate.github import GitHubClient
 
@@ -21,10 +21,10 @@ class _FakeResponse:
 class _FakeSession:
     def __init__(self, comments: list[dict[str, Any]]):
         self._comments = comments
-        self.patch_url: Optional[str] = None
-        self.patch_body: Optional[str] = None
-        self.post_url: Optional[str] = None
-        self.post_body: Optional[str] = None
+        self.patch_url: str | None = None
+        self.patch_body: str | None = None
+        self.post_url: str | None = None
+        self.post_body: str | None = None
 
     def get(self, _url: str, **_kwargs: Any) -> _FakeResponse:
         return _FakeResponse(self._comments)

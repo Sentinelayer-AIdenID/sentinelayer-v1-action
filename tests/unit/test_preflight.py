@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -22,10 +22,10 @@ from omargate.preflight import (
 class DummyGitHub:
     def __init__(
         self,
-        runs: Optional[List[Dict[str, Any]]] = None,
+        runs: list[dict[str, Any]] | None = None,
         pr_head: str = "headsha",
-        labels: Optional[List[str]] = None,
-        protection: Optional[Dict[str, Any]] = None,
+        labels: list[str] | None = None,
+        protection: dict[str, Any] | None = None,
     ) -> None:
         # Mirror GitHubClient: rate-limit logic checks for a truthy token before enforcing.
         self.token = "gh_test_token"
@@ -34,24 +34,24 @@ class DummyGitHub:
         self._labels = labels or []
         self._protection = protection
 
-    def list_check_runs(self, head_sha: str, check_name: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_check_runs(self, head_sha: str, check_name: str | None = None) -> list[dict[str, Any]]:
         return self._runs
 
     def find_check_run_by_external_id(
-        self, head_sha: str, external_id: str, check_name: Optional[str] = None
-    ) -> Optional[Dict[str, Any]]:
+        self, head_sha: str, external_id: str, check_name: str | None = None
+    ) -> dict[str, Any] | None:
         for run in self._runs:
             if run.get("external_id") == external_id:
                 return run
         return None
 
-    def get_pull_request(self, pr_number: int) -> Dict[str, Any]:
+    def get_pull_request(self, pr_number: int) -> dict[str, Any]:
         return {"head": {"sha": self._pr_head}}
 
     def has_label(self, pr_number: int, label: str) -> bool:
         return label in self._labels
 
-    def get_branch_protection(self, branch: str) -> Optional[Dict[str, Any]]:
+    def get_branch_protection(self, branch: str) -> dict[str, Any] | None:
         return self._protection
 
 
@@ -202,7 +202,7 @@ def test_remote_check_metadata_does_not_authorize_gate_reuse() -> None:
 
 
 def test_rate_limit_cooldown_blocks() -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     gh = DummyGitHub(
         runs=[{"completed_at": (now - timedelta(minutes=1)).isoformat()}],
         pr_head="headsha",
@@ -216,7 +216,7 @@ def test_rate_limit_cooldown_blocks() -> None:
 
 
 def test_rate_limit_daily_cap_blocks() -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     gh = DummyGitHub(
         runs=[{"completed_at": (now - timedelta(hours=2)).isoformat()}],
         pr_head="headsha",

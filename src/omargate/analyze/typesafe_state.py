@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 import re
+from pathlib import Path
 
 from ..redaction import redact_secret_source, sanitize_public_error
 from .typesafe_review import ReviewInventory, TypeSafeReviewIncomplete
-
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _DIFF_METADATA = re.compile(r"(?:index [a-fA-F0-9]{4,64}\.\.[a-fA-F0-9]{4,64}(?: [0-7]{6})?|(?:old|new|new file|deleted file) mode [0-7]{6})")
@@ -25,15 +24,20 @@ def build_typed_context(
     if not diff_content or len(diff_content.encode("utf-8")) > 100_000:
         raise TypeSafeReviewIncomplete("typed_diff_unavailable_or_oversize")
     expected = dict(inventory.source_hashes)
-    headers = {f"diff --git a/{path} b/{path}" for path in expected}
-    headers.update("--- a/" + path for path in expected)
-    headers.update("+++ b/" + path for path in expected)
+    excluded_paths = frozenset(path for path, _ in inventory.policy_excluded)
+    all_known = frozenset(expected) | excluded_paths
+    if len(expected) + len(excluded_paths) != len(all_known):
+        raise TypeSafeReviewIncomplete("incomplete_typed_diff_file_coverage")
+    headers = {f"diff --git a/{path} b/{path}" for path in all_known}
+    headers.update("--- a/" + path for path in all_known)
+    headers.update("+++ b/" + path for path in all_known)
     headers.add("--- /dev/null")
     lines = diff_content.splitlines()
     hunks = []
     current = None
     index = 0
     touched = set()
+    diff_paths_seen: set[str] = set()
     while index < len(lines):
         line = lines[index]
         if line.startswith(("rename from ", "rename to ", "copy from ", "copy to ",
@@ -45,9 +49,12 @@ def build_typed_context(
             path = line[4:]
             # Quoted paths, binary patches, deletion-only and renames are not
             # approximated by this bounded first implementation.
-            if not path.startswith("b/") or path[2:] not in expected:
+            if not path.startswith("b/") or path[2:] not in all_known:
                 raise TypeSafeReviewIncomplete("unsupported_typed_diff_path")
             current = path[2:]
+            if current in diff_paths_seen:
+                raise TypeSafeReviewIncomplete("unsupported_typed_diff_path")
+            diff_paths_seen.add(current)
         match = _HUNK.match(line)
         if not match:
             # Generator context includes the complete original patch. Arbitrary
@@ -61,6 +68,20 @@ def build_typed_context(
             continue
         if current is None:
             raise TypeSafeReviewIncomplete("unbound_typed_diff_hunk")
+        # Policy-excluded files: accept diff record but withhold content
+        if current in excluded_paths:
+            touched.add(current)
+            # Skip hunk body lines; advance past @@ header and content
+            index += 1
+            while index < len(lines):
+                body = lines[index]
+                if body.startswith("\\ No newline at end of file"):
+                    index += 1
+                    continue
+                if not body or body[0] not in {" ", "+", "-"}:
+                    break
+                index += 1
+            continue
         start = int(match[3])
         old_count = int(match[2]) if match[2] is not None else 1
         new_count = int(match[4]) if match[4] is not None else 1
@@ -113,7 +134,7 @@ def build_typed_context(
             "diff_hunk_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             "source_redacted": source_redacted,
         })
-    if touched != set(expected):
+    if touched != set(all_known):
         raise TypeSafeReviewIncomplete("incomplete_typed_diff_file_coverage")
     metadata = {row.get("path"): row for row in ingest.get("files", []) if isinstance(row, dict)}
     candidates = {}

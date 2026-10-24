@@ -4,10 +4,16 @@ import sys
 from unittest.mock import AsyncMock
 
 import pytest
+from test_review_cascade import configured as configured
+from test_review_cascade import generator_transport as generator_transport
+from test_review_cascade import triage
 
-from test_review_cascade import configured as configured, generator_transport as generator_transport, triage
 from omargate.ingest.quick_learn import QuickLearnSummary
-from omargate.redaction import contains_credential_material, redact_secret_source, sanitize_public_error
+from omargate.redaction import (
+    contains_credential_material,
+    redact_secret_source,
+    sanitize_public_error,
+)
 
 pytestmark = pytest.mark.anyio
 

@@ -2,9 +2,9 @@ import copy
 import json
 
 import pytest
-
 import test_dep_audit_suite as fixture
 import test_gate as gate_fixture
+
 from omargate.gate import evaluate_gate
 from omargate.harness.suites import dep_audit
 from omargate.harness.suites.dep_audit import DepAuditSuite

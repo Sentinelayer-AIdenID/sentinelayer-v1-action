@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from ...analyze.deterministic.pattern_scanner import Finding
 from ...analyze.deterministic.secret_scanner import scan_for_secrets
 from ..runner import SecuritySuite, run_command
 
 
-def _is_diff_path_line(line: str) -> Optional[str]:
+def _is_diff_path_line(line: str) -> str | None:
     if line.startswith("+++ b/"):
         p = line[6:].strip()
         return None if p == "/dev/null" else p
@@ -64,8 +63,8 @@ class SecretsInGitSuite(SecuritySuite):
             if show_res.returncode != 0 or not show_res.stdout:
                 continue
 
-            current_file: Optional[str] = None
-            file_lines: Dict[str, Dict[str, List[str]]] = {}
+            current_file: str | None = None
+            file_lines: dict[str, dict[str, list[str]]] = {}
             for line in show_res.stdout.splitlines():
                 maybe_path = _is_diff_path_line(line)
                 if maybe_path is not None:

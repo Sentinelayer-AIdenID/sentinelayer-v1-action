@@ -2,9 +2,9 @@ import copy
 import json
 
 import pytest
+from policy_fixture import FAKE_DOCUMENT, FAKE_POLICY, FAKE_POLICY_JSON
 
 from omargate.private_policy import PrivatePolicyError, load_private_policy
-from policy_fixture import FAKE_DOCUMENT, FAKE_POLICY, FAKE_POLICY_JSON
 
 
 def test_private_profile_has_stable_public_reference_and_fresh_data_views():

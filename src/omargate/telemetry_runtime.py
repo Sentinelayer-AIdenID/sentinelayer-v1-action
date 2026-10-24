@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Optional
 
 from .config import OmarGateConfig
 from .context import GitHubContext
@@ -36,7 +35,7 @@ async def _upload_telemetry(
     idem_key: str,
     analysis,
     gate_result: GateResult,
-    spec_compliance: Optional[SpecComplianceTelemetry],
+    spec_compliance: SpecComplianceTelemetry | None,
     ctx: GitHubContext,
     run_dir: Path,
     collector: TelemetryCollector,
@@ -92,16 +91,16 @@ async def _upload_telemetry(
     if should_upload_tier(3, consent):
         if not sentinelayer_token:
             logger.warning("Telemetry tier 3 requires sentinelayer_token")
-            return None
+            return
         manifest_path = run_dir / "ARTIFACT_MANIFEST.json"
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except Exception as exc:
             logger.warning("Failed to load artifact manifest", error=str(exc))
-            return None
+            return
         await upload_artifacts(run_dir, manifest, sentinelayer_token, logger=logger)
 
-    return None
+    return
 
 
 def _resolve_consent(config: OmarGateConfig) -> ConsentConfig:
@@ -123,14 +122,14 @@ def _resolve_consent(config: OmarGateConfig) -> ConsentConfig:
     )
 
 
-def _parse_bool_env(value: Optional[str], default: bool) -> bool:
+def _parse_bool_env(value: str | None, default: bool) -> bool:
     if value is None:
         return default
     normalized = value.strip().lower()
     return normalized in {"1", "true", "yes", "y", "on"}
 
 
-def _parse_int_env(value: Optional[str], default: int) -> int:
+def _parse_int_env(value: str | None, default: int) -> int:
     if value is None:
         return default
     try:
@@ -139,7 +138,7 @@ def _parse_int_env(value: Optional[str], default: int) -> int:
         return default
 
 
-def _resolve_consent_best_effort(config: Optional[OmarGateConfig]) -> ConsentConfig:
+def _resolve_consent_best_effort(config: OmarGateConfig | None) -> ConsentConfig:
     if config is not None:
         return _resolve_consent(config)
 
@@ -168,13 +167,13 @@ def _resolve_consent_best_effort(config: Optional[OmarGateConfig]) -> ConsentCon
 
 async def _upload_telemetry_always(
     *,
-    config: Optional[OmarGateConfig],
+    config: OmarGateConfig | None,
     run_id: str,
     idem_key: str,
     analysis,
     gate_result,
-    spec_compliance: Optional[SpecComplianceTelemetry],
-    ctx: Optional[GitHubContext],
+    spec_compliance: SpecComplianceTelemetry | None,
+    ctx: GitHubContext | None,
     run_dir: Path,
     collector: TelemetryCollector,
     logger: OmarLogger,
@@ -276,24 +275,24 @@ def _write_github_outputs(
     findings_path: Path,
     pack_summary_path: Path,
     gate_result: GateResult,
-    estimated_cost_usd: Optional[float] = 0.0,
-    review_brief_path: Optional[Path] = None,
-    audit_report_path: Optional[Path] = None,
-    scan_mode: Optional[str] = None,
-    severity_gate: Optional[str] = None,
-    llm_provider: Optional[str] = None,
-    model: Optional[str] = None,
-    model_fallback: Optional[str] = None,
-    model_fallback_used: Optional[bool] = None,
-    llm_attempted: Optional[bool] = None,
-    llm_success: Optional[bool] = None,
-    llm_output_valid: Optional[bool] = None,
-    llm_no_findings_reported: Optional[bool] = None,
-    llm_findings_count: Optional[int] = None,
-    llm_parse_error_count: Optional[int] = None,
-    llm_failure_class: Optional[str] = None,
-    policy_pack: Optional[str] = None,
-    policy_pack_version: Optional[str] = None,
+    estimated_cost_usd: float | None = 0.0,
+    review_brief_path: Path | None = None,
+    audit_report_path: Path | None = None,
+    scan_mode: str | None = None,
+    severity_gate: str | None = None,
+    llm_provider: str | None = None,
+    model: str | None = None,
+    model_fallback: str | None = None,
+    model_fallback_used: bool | None = None,
+    llm_attempted: bool | None = None,
+    llm_success: bool | None = None,
+    llm_output_valid: bool | None = None,
+    llm_no_findings_reported: bool | None = None,
+    llm_findings_count: int | None = None,
+    llm_parse_error_count: int | None = None,
+    llm_failure_class: str | None = None,
+    policy_pack: str | None = None,
+    policy_pack_version: str | None = None,
 ) -> None:
     output_path = os.environ.get("GITHUB_OUTPUT")
     if not output_path:

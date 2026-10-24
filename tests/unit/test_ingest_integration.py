@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-import omargate.ingest.ingest_runner as ingest_runner
+from omargate.ingest import ingest_runner
 from omargate.ingest.ingest_runner import run_ingest
 
 

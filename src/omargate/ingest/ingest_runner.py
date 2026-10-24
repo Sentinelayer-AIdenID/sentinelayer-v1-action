@@ -6,7 +6,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ..logging import OmarLogger
 from ..utils import safe_read_text
@@ -44,8 +44,8 @@ def run_ingest(
     repo_root: Path,
     max_files: int = DEFAULT_MAX_FILES,
     max_file_size_bytes: int = DEFAULT_MAX_FILE_BYTES,
-    logger: Optional[OmarLogger] = None,
-) -> Dict[str, Any]:
+    logger: OmarLogger | None = None,
+) -> dict[str, Any]:
     repo_root = repo_root.resolve()
     ignore_patterns = _load_ignore_patterns(repo_root)
     node_result = _run_node_mapper(repo_root, max_files, max_file_size_bytes)
@@ -61,7 +61,7 @@ def run_ingest(
     if too_large_files and logger:
         logger.warning("ingest_oversized_files_skipped", count=too_large_files)
 
-    files_out: List[Dict[str, Any]] = []
+    files_out: list[dict[str, Any]] = []
     total_lines = 0
     in_scope_files = 0
     read_failures = int(node_stats.get("read_failures", 0))
@@ -134,9 +134,9 @@ def run_ingest(
     }
 
 
-def _load_ignore_patterns(repo_root: Path) -> List[str]:
+def _load_ignore_patterns(repo_root: Path) -> list[str]:
     ignore_path = repo_root / ".sentinelayerignore"
-    patterns: List[str] = list(DEFAULT_IGNORE_PATTERNS)
+    patterns: list[str] = list(DEFAULT_IGNORE_PATTERNS)
     if not ignore_path.exists():
         return patterns
     try:
@@ -151,7 +151,7 @@ def _load_ignore_patterns(repo_root: Path) -> List[str]:
     return patterns
 
 
-def _matches_ignore(path: str, patterns: List[str]) -> bool:
+def _matches_ignore(path: str, patterns: list[str]) -> bool:
     if not patterns:
         return False
     normalized = path.replace("\\", "/")
@@ -181,7 +181,7 @@ def _matches_ignore(path: str, patterns: List[str]) -> bool:
     return ignored
 
 
-def _run_node_mapper(repo_root: Path, max_files: int, max_file_size_bytes: int) -> Dict[str, Any]:
+def _run_node_mapper(repo_root: Path, max_files: int, max_file_size_bytes: int) -> dict[str, Any]:
     script_path = Path(__file__).with_name("codebase_map.mjs")
     try:
         result = subprocess.run(
@@ -236,16 +236,16 @@ def _is_binary_file(path: Path) -> bool:
     return (non_text / len(chunk)) > 0.3
 
 
-def _run_python_mapper(repo_root: Path, max_files: int, max_file_size_bytes: int) -> Dict[str, Any]:
+def _run_python_mapper(repo_root: Path, max_files: int, max_file_size_bytes: int) -> dict[str, Any]:
     root = repo_root.resolve()
-    stats: Dict[str, Any] = {
+    stats: dict[str, Any] = {
         "total_files": 0,
         "binary_files": 0,
         "too_large": 0,
         "truncated": False,
         "read_failures": 0,
     }
-    files: List[Dict[str, Any]] = []
+    files: list[dict[str, Any]] = []
 
     def unreadable_directory(_error):
         stats["read_failures"] += 1
@@ -297,7 +297,7 @@ def _run_python_mapper(repo_root: Path, max_files: int, max_file_size_bytes: int
     return {"root": str(root), "files": files, "stats": stats}
 
 
-def _detect_dependencies(repo_root: Path) -> Dict[str, Any]:
+def _detect_dependencies(repo_root: Path) -> dict[str, Any]:
     package_manager = "unknown"
     lockfile = ""
     direct_deps = 0

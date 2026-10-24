@@ -8,8 +8,7 @@ from typing import Any
 
 from ..redaction import sanitize_public_error
 from .llm import LLMClient
-from .typesafe_review import TypeSafeReviewIncomplete, TypedReview
-
+from .typesafe_review import TypedReview, TypeSafeReviewIncomplete
 
 WRITER_MODEL = "gpt-5.3-codex"
 

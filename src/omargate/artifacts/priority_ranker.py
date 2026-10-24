@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import fnmatch
-from typing import Dict, List, Optional
 
-CATEGORIES: Dict[str, Dict[str, object]] = {
+CATEGORIES: dict[str, dict[str, object]] = {
     "auth": {
         "icon": "🔐",
         "name": "Auth & Session",
@@ -72,14 +71,14 @@ def _normalize_path(path: str) -> str:
     return path.replace("\\", "/").lower()
 
 
-def detect_categories(path: str, hotspots: Optional[dict] = None) -> List[str]:
+def detect_categories(path: str, hotspots: dict | None = None) -> list[str]:
     """Detect category keys for a path using globs, keywords, and hotspot lists."""
     if not path:
         return []
 
     normalized = _normalize_path(path)
     hotspots = hotspots or {}
-    detected: List[str] = []
+    detected: list[str] = []
 
     for key, config in CATEGORIES.items():
         if _matches_category(normalized, key, config, hotspots):
@@ -91,7 +90,7 @@ def detect_categories(path: str, hotspots: Optional[dict] = None) -> List[str]:
 def _matches_category(
     normalized_path: str,
     key: str,
-    config: Dict[str, object],
+    config: dict[str, object],
     hotspots: dict,
 ) -> bool:
     hotspot_paths = hotspots.get(key) or []
@@ -112,10 +111,10 @@ def _matches_category(
 
 def calculate_priority(
     file_path: str,
-    findings: List[dict],
-    categories: List[str],
+    findings: list[dict],
+    categories: list[str],
     loc: int,
-    file_findings: Optional[List[dict]] = None,
+    file_findings: list[dict] | None = None,
 ) -> float:
     """
     Priority = severity_sum + category_weight + complexity_factor
@@ -143,12 +142,12 @@ def calculate_priority(
     return float(severity_sum + category_weight + complexity)
 
 
-def rank_files(findings: List[dict], ingest: dict, top_n: int = 10) -> List[dict]:
+def rank_files(findings: list[dict], ingest: dict, top_n: int = 10) -> list[dict]:
     """Return top N priority files with ranking details."""
-    file_scores: Dict[str, dict] = {}
+    file_scores: dict[str, dict] = {}
     hotspots = ingest.get("hotspots", {}) if isinstance(ingest, dict) else {}
 
-    findings_by_path: Dict[str, List[dict]] = {}
+    findings_by_path: dict[str, list[dict]] = {}
     for finding in findings:
         path = finding.get("file_path")
         if not path:

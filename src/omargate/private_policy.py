@@ -1,11 +1,11 @@
 """Bounded private configuration. Public code owns validation, not the rubric."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import hashlib
 import json
 import math
 import re
+from dataclasses import dataclass, field
 
 
 class PrivatePolicyError(ValueError):

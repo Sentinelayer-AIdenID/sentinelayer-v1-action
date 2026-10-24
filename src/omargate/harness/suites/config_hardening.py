@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
-import re
 
 from ...analyze.deterministic.pattern_scanner import Finding, _truncate_snippet
 from ..detectors import read_text_best_effort

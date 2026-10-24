@@ -1238,3 +1238,269 @@ def test_pylock_txt_not_classified_as_lockfile(tmp_path: Path):
     paths = {c.file_path for c in inventory.candidates}
     assert "pylock.txt" in paths, "pylock.txt must stay as a candidate"
     assert inventory.policy_excluded == ()
+
+
+# === Gap 2: build_typed_context handles policy_excluded files in diff ===
+
+def test_build_typed_context_skips_policy_excluded_lockfile_in_diff(tmp_path: Path):
+    """When a lockfile is correctly excluded (in policy_excluded) but present
+    in the PR diff, build_typed_context must accept the diff record and skip
+    its content rather than raising unbound_typed_diff_record."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("answer = 42\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+
+    import hashlib
+    real_hash = hashlib.sha256((tmp_path / "package-lock.json").read_bytes()).hexdigest()
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": real_hash,
+            "outcome": {"state": "clean"},
+        }]},
+    }
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "package-lock.json"]
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    # package-lock.json is excluded
+    assert inventory.policy_excluded == (("package-lock.json", "dep_audit_coverage"),)
+    assert {c.file_path for c in inventory.candidates} == {"src/main.py"}
+
+    diff = (
+        "diff --git a/src/main.py b/src/main.py\n"
+        "--- a/src/main.py\n"
+        "+++ b/src/main.py\n"
+        "@@ -1 +1 @@\n"
+        "-answer = 0\n"
+        "+answer = 42\n"
+        "diff --git a/package-lock.json b/package-lock.json\n"
+        "--- a/package-lock.json\n"
+        "+++ b/package-lock.json\n"
+        "@@ -1 +1 @@\n"
+        '-{"lockfileVersion": 2}\n'
+        '+{"lockfileVersion": 3}\n'
+    )
+
+    context = build_typed_context(
+        repo_root=tmp_path, inventory=inventory, diff_content=diff,
+        ingest=ingest, deterministic_findings=[],
+    )
+    # Must not raise unbound_typed_diff_record
+    assert context["diff_head_lines_verified"] is True
+    assert "src/main.py" in str(context["candidate_context"])
+
+
+def test_build_typed_context_rejects_unknown_diff_file_even_with_exclusions(tmp_path: Path):
+    """A diff record for a file that is neither in source_hashes nor in
+    policy_excluded must still be rejected."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("answer = 42\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+
+    import hashlib
+    real_hash = hashlib.sha256((tmp_path / "package-lock.json").read_bytes()).hexdigest()
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": real_hash,
+            "outcome": {"state": "clean"},
+        }]},
+    }
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "package-lock.json"]
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+
+    # Diff includes an unknown file not in source_hashes or policy_excluded
+    diff = (
+        "diff --git a/src/main.py b/src/main.py\n"
+        "--- a/src/main.py\n"
+        "+++ b/src/main.py\n"
+        "@@ -1 +1 @@\n"
+        "-answer = 0\n"
+        "+answer = 42\n"
+        "diff --git a/unknown.txt b/unknown.txt\n"
+        "--- a/unknown.txt\n"
+        "+++ b/unknown.txt\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    with pytest.raises(TypeSafeReviewIncomplete):
+        build_typed_context(
+            repo_root=tmp_path, inventory=inventory, diff_content=diff,
+            ingest=ingest, deterministic_findings=[],
+        )
+
+
+def test_build_typed_context_rejects_duplicate_excluded_diff_record(tmp_path: Path):
+    """A diff that repeats an excluded file's path as a separate diff record
+    must still be rejected — each path appears exactly once."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("answer = 42\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+
+    import hashlib
+    real_hash = hashlib.sha256((tmp_path / "package-lock.json").read_bytes()).hexdigest()
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": real_hash,
+            "outcome": {"state": "clean"},
+        }]},
+    }
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "package-lock.json"]
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+
+    diff = (
+        "diff --git a/package-lock.json b/package-lock.json\n"
+        "--- a/package-lock.json\n"
+        "+++ b/package-lock.json\n"
+        "@@ -1 +1 @@\n"
+        '-{"lockfileVersion": 2}\n'
+        '+{"lockfileVersion": 3}\n'
+        "diff --git a/src/main.py b/src/main.py\n"
+        "--- a/src/main.py\n"
+        "+++ b/src/main.py\n"
+        "@@ -1 +1 @@\n"
+        "-answer = 0\n"
+        "+answer = 42\n"
+        "diff --git a/package-lock.json b/package-lock.json\n"
+        "--- a/package-lock.json\n"
+        "+++ b/package-lock.json\n"
+        "@@ -1 +1 @@\n"
+        '-{"lockfileVersion": 2}\n'
+        '+{"lockfileVersion": 3}\n'
+    )
+
+    with pytest.raises(TypeSafeReviewIncomplete):
+        build_typed_context(
+            repo_root=tmp_path, inventory=inventory, diff_content=diff,
+            ingest=ingest, deterministic_findings=[],
+        )
+
+
+# === Gap 3: verify_sources checks excluded file digests ===
+
+def test_verify_sources_retains_and_verifies_excluded_file_digest(tmp_path: Path):
+    """When a lockfile is excluded, its digest must be stored and re-verified
+    before publishing a source-coverage claim. Changing it after inventory
+    must be detected."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("answer = 42\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+
+    import hashlib
+    real_hash = hashlib.sha256((tmp_path / "package-lock.json").read_bytes()).hexdigest()
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": real_hash,
+            "outcome": {"state": "clean"},
+        }]},
+    }
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "package-lock.json"]
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    assert inventory.policy_excluded == (("package-lock.json", "dep_audit_coverage"),)
+
+    # verify_sources should pass with unchanged excluded file
+    verify_sources(tmp_path, inventory)
+
+    # Now change the excluded file
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 4}\n', encoding="utf-8")
+
+    # verify_sources must detect the change
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_changed_during_review"):
+        verify_sources(tmp_path, inventory)
+
+
+def test_policy_excluded_changes_do_not_fail_regular_verify(tmp_path: Path):
+    """When there are no excluded files, verify_sources must still work as before."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("answer = 42\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py"]
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+    )
+    assert inventory.policy_excluded == ()
+
+    verify_sources(tmp_path, inventory)
+
+    # Change the file
+    (tmp_path / "src" / "main.py").write_text("answer = 99\n", encoding="utf-8")
+
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_changed_during_review"):
+        verify_sources(tmp_path, inventory)
+
+
+# === Gap 1: pylock.toml without matching receipt stays as candidate ===
+
+def test_pylock_toml_without_matching_receipt_stays_candidate(tmp_path: Path):
+    """pylock.toml classified as a lockfile but without a matching per-file
+    receipt from the pip audit must stay as a review candidate."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "pylock.toml").write_text("[lock]\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/app.py"}]}
+    changed = ["src/app.py", "pylock.toml"]
+    # Pip audit has a clean outcome but NO per-file receipt for pylock.toml
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "pip", "applicable": True, "state": "clean"}],
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "src/app.py" in paths
+    assert "pylock.toml" in paths, (
+        "pylock.toml without matching per-file receipt must stay as candidate"
+    )
+    assert inventory.policy_excluded == ()

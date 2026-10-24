@@ -1,8 +1,8 @@
 """Preflight complete request budgets without clipping source or rubric inputs."""
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 

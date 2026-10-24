@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from omargate.ingest.hotspot_detector import HOTSPOT_PATTERNS, build_hotspot_map, hotspot_categories_for_path
+from omargate.ingest.hotspot_detector import (
+    HOTSPOT_PATTERNS,
+    build_hotspot_map,
+    hotspot_categories_for_path,
+)
 
 
 def test_hotspot_categories_for_path() -> None:

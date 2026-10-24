@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple
+from datetime import UTC, datetime, timedelta
 
 from ..config import OmarGateConfig
 from ..github import GitHubClient
@@ -11,11 +10,11 @@ from ..utils import parse_iso8601
 
 async def check_rate_limits(
     gh: GitHubClient,
-    pr_number: Optional[int],
+    pr_number: int | None,
     config: OmarGateConfig,
     logger: OmarLogger,
     check_name: str = "Omar Gate",
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     """
     Check cooldown and daily limits.
 
@@ -42,7 +41,7 @@ async def check_rate_limits(
             return True, "missing_github_token_skip_limits"
         return False, "missing_github_token_require_approval"
 
-    def _on_api_error(reason: str, error: Optional[str] = None) -> Tuple[bool, str]:
+    def _on_api_error(reason: str, error: str | None = None) -> tuple[bool, str]:
         logger.warning("rate_limit_api_error", reason=reason, error=error or "")
         if config.rate_limit_fail_mode == "open":
             return True, "api_error_skip_limits"
@@ -57,7 +56,7 @@ async def check_rate_limits(
     except Exception as exc:
         return _on_api_error("exception", error=str(exc))
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     completed_times = [
         ts for ts in (parse_iso8601(r.get("completed_at")) for r in runs) if ts
     ]

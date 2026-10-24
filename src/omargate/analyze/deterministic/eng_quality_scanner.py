@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
-from typing import Iterable, Optional
+from collections.abc import Iterable
+from dataclasses import dataclass
 
 from .eng_quality_helpers import (
+    bounded_python_deadline_loops,
     index_to_line,
     is_test_file,
     line_snippet,
@@ -12,10 +13,8 @@ from .eng_quality_helpers import (
     python_httpx_calls,
     python_interpolated_sql_lines,
     strip_js_comments_and_strings,
-    bounded_python_deadline_loops,
 )
 from .pattern_scanner import Finding, _truncate_snippet
-
 
 _JS_EXTS = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
 _PY_EXTS = (".py",)
@@ -102,7 +101,7 @@ class EngQualityScanner:
         return findings
 
     def _iter_files(
-        self, files: dict[str, str], *, exts: Optional[tuple[str, ...]] = None
+        self, files: dict[str, str], *, exts: tuple[str, ...] | None = None
     ) -> Iterable[tuple[str, str]]:
         for path, content in sorted(files.items(), key=lambda kv: kv[0]):
             norm = path.replace("\\", "/")
@@ -131,7 +130,7 @@ class EngQualityScanner:
         *,
         file_path: str,
         line_start: int,
-        line_end: Optional[int] = None,
+        line_end: int | None = None,
         snippet: str = "",
         confidence: float = 0.8,
     ) -> Finding:
@@ -1078,7 +1077,7 @@ class EngQualityScanner:
             return []
 
         # Attribute to the most likely server entry file.
-        preferred: Optional[str] = None
+        preferred: str | None = None
         for p, c in backend_files:
             if re.search(r"(app|server|main)\.(py|ts|js|go)$", p, re.IGNORECASE):
                 preferred = p

@@ -19,14 +19,14 @@ def test_repo(tmp_path):
     auth_file.parent.mkdir(parents=True, exist_ok=True)
     api_key_value = "sk_test_" + ("a" * 20)
     auth_file.write_text(
-        (
+        
             "# Authentication module\n"
             'API_KEY = "' + api_key_value + '"  # SEC-001: Hardcoded API key\n\n'
             "def login(username, password):\n"
             "    # TODO: Add rate limiting  # QUAL-001\n"
             "    query = f\"SELECT * FROM users WHERE username = '{username}'\"  # SEC-008: SQL injection\n"
             "    return execute(query)\n"
-        )
+        
     )
 
     utils_file = tmp_path / "src" / "utils.py"

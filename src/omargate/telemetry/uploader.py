@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
-from typing import Optional
 
 import httpx
 
@@ -17,9 +16,9 @@ BACKOFF_SECONDS = 1
 
 async def upload_telemetry(
     payload: dict,
-    sentinelayer_token: Optional[str] = None,
-    oidc_token: Optional[str] = None,
-    logger: Optional[OmarLogger] = None,
+    sentinelayer_token: str | None = None,
+    oidc_token: str | None = None,
+    logger: OmarLogger | None = None,
 ) -> bool:
     """
     Upload telemetry to Sentinelayer API.
@@ -93,7 +92,7 @@ async def upload_artifacts(
     run_dir: Path,
     manifest: dict,
     sentinelayer_token: str,
-    logger: Optional[OmarLogger] = None,
+    logger: OmarLogger | None = None,
 ) -> bool:
     """
     Upload Tier 3 artifacts to Sentinelayer S3.
@@ -172,7 +171,7 @@ async def upload_artifacts(
         return False
 
 
-async def fetch_oidc_token(logger: Optional[OmarLogger] = None) -> Optional[str]:
+async def fetch_oidc_token(logger: OmarLogger | None = None) -> str | None:
     """Fetch GitHub Actions OIDC token if available."""
     request_url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL")
     request_token = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")

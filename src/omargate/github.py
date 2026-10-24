@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, Optional, List
+from typing import Any
 
 import httpx
 import requests
@@ -48,7 +48,7 @@ class GitHubClient:
             "User-Agent": "omar-gate-action",
         })
 
-    def create_or_update_pr_comment(self, pr_number: int, body: str, marker_token: str) -> Optional[str]:
+    def create_or_update_pr_comment(self, pr_number: int, body: str, marker_token: str) -> str | None:
         """Idempotent update: match exact marker token; update if found else create."""
         url = f"{GITHUB_API}/repos/{self.repo}/issues/{pr_number}/comments"
         r = self.session.get(url, params={"per_page": 100}, timeout=DEFAULT_HTTP_TIMEOUT_SECONDS)
@@ -80,19 +80,19 @@ class GitHubClient:
         head_sha: str,
         conclusion: str,
         summary: str,
-        title: Optional[str] = None,
-        text: Optional[str] = None,
-        details_url: Optional[str] = None,
-        external_id: Optional[str] = None,
-        annotations: Optional[List[Dict[str, Any]]] = None,
-    ) -> Optional[str]:
+        title: str | None = None,
+        text: str | None = None,
+        details_url: str | None = None,
+        external_id: str | None = None,
+        annotations: list[dict[str, Any]] | None = None,
+    ) -> str | None:
         url = f"{GITHUB_API}/repos/{self.repo}/check-runs"
-        output: Dict[str, Any] = {"title": title or name, "summary": summary}
+        output: dict[str, Any] = {"title": title or name, "summary": summary}
         if text:
             output["text"] = text
         if annotations:
             output["annotations"] = annotations
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "name": name,
             "head_sha": head_sha,
             "status": "completed",
@@ -110,28 +110,28 @@ class GitHubClient:
         except Exception:
             return None
 
-    def list_check_runs(self, head_sha: str, check_name: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_check_runs(self, head_sha: str, check_name: str | None = None) -> list[dict[str, Any]]:
         url = f"{GITHUB_API}/repos/{self.repo}/commits/{head_sha}/check-runs"
-        params: Dict[str, Any] = {"per_page": 100}
+        params: dict[str, Any] = {"per_page": 100}
         if check_name:
             params["check_name"] = check_name
         r = self.session.get(url, params=params, timeout=DEFAULT_HTTP_TIMEOUT_SECONDS)
         r.raise_for_status()
         return r.json().get("check_runs", [])
 
-    def find_check_run_by_external_id(self, head_sha: str, external_id: str, check_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def find_check_run_by_external_id(self, head_sha: str, external_id: str, check_name: str | None = None) -> dict[str, Any] | None:
         for run in self.list_check_runs(head_sha, check_name):
             if run.get("external_id") == external_id:
                 return run
         return None
 
-    def get_pull_request(self, pr_number: int) -> Dict[str, Any]:
+    def get_pull_request(self, pr_number: int) -> dict[str, Any]:
         url = f"{GITHUB_API}/repos/{self.repo}/pulls/{pr_number}"
         r = self.session.get(url, timeout=DEFAULT_HTTP_TIMEOUT_SECONDS)
         r.raise_for_status()
         return r.json()
 
-    def list_issue_labels(self, pr_number: int) -> List[str]:
+    def list_issue_labels(self, pr_number: int) -> list[str]:
         url = f"{GITHUB_API}/repos/{self.repo}/issues/{pr_number}/labels"
         r = self.session.get(url, params={"per_page": 100}, timeout=DEFAULT_HTTP_TIMEOUT_SECONDS)
         r.raise_for_status()
@@ -140,7 +140,7 @@ class GitHubClient:
     def has_label(self, pr_number: int, label: str) -> bool:
         return label in self.list_issue_labels(pr_number)
 
-    def get_branch_protection(self, branch: str) -> Optional[Dict[str, Any]]:
+    def get_branch_protection(self, branch: str) -> dict[str, Any] | None:
         url = f"{GITHUB_API}/repos/{self.repo}/branches/{branch}/protection"
         r = self.session.get(url, timeout=DEFAULT_HTTP_TIMEOUT_SECONDS)
         if r.status_code == 404:
@@ -185,7 +185,7 @@ class GitHubClient:
                 text = text_bytes[:MAX_PR_DIFF_BYTES].decode("utf-8", errors="ignore")
             return text
 
-    async def get_pr_changed_files(self, pr_number: int) -> List[str]:
+    async def get_pr_changed_files(self, pr_number: int) -> list[str]:
         """Get list of changed file paths in PR."""
         url = f"{GITHUB_API}/repos/{self.repo}/pulls/{pr_number}/files"
         headers = {
@@ -194,7 +194,7 @@ class GitHubClient:
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "omar-gate-action",
         }
-        changed_files: List[str] = []
+        changed_files: list[str] = []
         async with httpx.AsyncClient(timeout=30.0) as client:
             for page in range(1, MAX_PR_FILES_PAGES + 1):
                 resp = await client.get(
@@ -234,7 +234,7 @@ def load_context() -> GitHubContext:
     return GitHubContext.from_environment()
 
 
-def findings_to_annotations(findings: List[Dict[str, Any]], max_annotations: int = 50) -> List[Dict[str, Any]]:
+def findings_to_annotations(findings: list[dict[str, Any]], max_annotations: int = 50) -> list[dict[str, Any]]:
     """Convert findings to GitHub Check Run annotations."""
     severity_to_level = {
         "P0": "failure",
@@ -243,7 +243,7 @@ def findings_to_annotations(findings: List[Dict[str, Any]], max_annotations: int
         "P3": "notice",
         "P4": "notice",
     }
-    annotations: List[Dict[str, Any]] = []
+    annotations: list[dict[str, Any]] = []
     for finding in findings:
         if len(annotations) >= max_annotations:
             break

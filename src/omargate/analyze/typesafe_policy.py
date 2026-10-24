@@ -8,10 +8,10 @@ by :mod:`typesafe_review`.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
 import hashlib
 import math
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any

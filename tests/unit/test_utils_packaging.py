@@ -3,10 +3,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from omargate import packaging
 from omargate.idempotency import compute_idempotency_key
 from omargate.models import Finding
-import omargate.packaging as packaging
-from omargate.packaging import get_run_dir, new_run_dir, write_findings_jsonl, write_pack_summary
+from omargate.packaging import (
+    get_run_dir,
+    new_run_dir,
+    write_findings_jsonl,
+    write_pack_summary,
+)
 from omargate.utils import sha256_hex
 
 

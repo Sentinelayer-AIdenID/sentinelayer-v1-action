@@ -5,7 +5,14 @@ import re
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, conint, confloat, field_validator, model_validator
+from pydantic import (
+    Field,
+    SecretStr,
+    confloat,
+    conint,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .models import (
@@ -17,7 +24,6 @@ from .models import (
     ScanMode,
     SeverityGate,
 )
-
 
 TYPESAFE_GENERATOR_MODEL = "gpt-5.3-codex"
 
@@ -187,7 +193,7 @@ class OmarGateConfig(BaseSettings):
         }
 
     @model_validator(mode="after")
-    def _validate_review_routing(self) -> "OmarGateConfig":
+    def _validate_review_routing(self) -> OmarGateConfig:
         if self.review_routing == "intent-cascade-v1":
             if self.llm_provider != "typesafe":
                 raise ValueError("intent-cascade-v1 requires llm_provider=typesafe")
@@ -256,7 +262,7 @@ class OmarGateConfig(BaseSettings):
         return value
 
     @model_validator(mode="after")
-    def _validate_provider_keys(self) -> "OmarGateConfig":
+    def _validate_provider_keys(self) -> OmarGateConfig:
         """
         Cross-field validation for provider keys.
 
@@ -310,7 +316,7 @@ class OmarGateConfig(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _auto_detect_sentinelayer_spec_id(self) -> "OmarGateConfig":
+    def _auto_detect_sentinelayer_spec_id(self) -> OmarGateConfig:
         if self.sentinelayer_spec_id:
             return self
 

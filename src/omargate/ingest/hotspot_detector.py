@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, Iterable, List
+from collections.abc import Iterable
 
-
-HOTSPOT_PATTERNS: Dict[str, List[str]] = {
+HOTSPOT_PATTERNS: dict[str, list[str]] = {
     "auth": [
         r"auth",
         r"session",
@@ -54,23 +53,23 @@ HOTSPOT_PATTERNS: Dict[str, List[str]] = {
 }
 
 
-_COMPILED_PATTERNS: Dict[str, List[re.Pattern[str]]] = {
+_COMPILED_PATTERNS: dict[str, list[re.Pattern[str]]] = {
     category: [re.compile(pattern, re.IGNORECASE) for pattern in patterns]
     for category, patterns in HOTSPOT_PATTERNS.items()
 }
 
 
-def hotspot_categories_for_path(path: str) -> List[str]:
+def hotspot_categories_for_path(path: str) -> list[str]:
     normalized = path.replace("\\", "/")
-    matched: List[str] = []
+    matched: list[str] = []
     for category, patterns in _COMPILED_PATTERNS.items():
         if any(pattern.search(normalized) for pattern in patterns):
             matched.append(category)
     return matched
 
 
-def build_hotspot_map(paths: Iterable[str]) -> Dict[str, List[str]]:
-    hotspots: Dict[str, List[str]] = {category: [] for category in HOTSPOT_PATTERNS}
+def build_hotspot_map(paths: Iterable[str]) -> dict[str, list[str]]:
+    hotspots: dict[str, list[str]] = {category: [] for category in HOTSPOT_PATTERNS}
     for path in paths:
         for category in hotspot_categories_for_path(path):
             hotspots[category].append(path)

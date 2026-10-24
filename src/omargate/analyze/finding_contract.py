@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import math
 import re
+from dataclasses import dataclass
 from typing import Any
-
 
 _REQUIRED_STRING_FIELDS = {"severity", "category", "file_path", "message"}
 _REQUIRED_FIELDS = _REQUIRED_STRING_FIELDS | {"line_start"}

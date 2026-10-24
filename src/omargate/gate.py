@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path, PurePosixPath
 import re
-from typing import Any, Dict, Optional, Tuple
+from pathlib import Path, PurePosixPath
+from typing import Any
 
 from .models import (
     DEPENDENCY_AUDIT_COVERAGE_SCOPE,
@@ -15,7 +15,6 @@ from .models import (
     GateStatus,
 )
 from .utils import sha256_file, sha256_hex
-
 
 _DEPENDENCY_AUDIT_ECOSYSTEMS = frozenset(DEPENDENCY_AUDIT_COVERAGE_SCOPE)
 _DEPENDENCY_AUDIT_EVIDENCE_KEYS = frozenset(
@@ -50,13 +49,13 @@ def _resolve_summary_path(run_dir_or_summary: Path) -> Path:
     return run_dir_or_summary
 
 
-def _validate_pack_summary(summary_path: Path) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
+def _validate_pack_summary(summary_path: Path) -> tuple[bool, str | None, dict[str, Any] | None]:
     """Validate PACK_SUMMARY.json integrity."""
     if not summary_path.exists():
         return False, "FAIL-CLOSED: PACK_SUMMARY.json missing. Run did not complete.", None
 
     try:
-        summary: Dict[str, Any] = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary: dict[str, Any] = json.loads(summary_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         return False, f"FAIL-CLOSED: PACK_SUMMARY.json corrupted ({exc}).", None
 
@@ -102,7 +101,7 @@ def _validate_pack_summary(summary_path: Path) -> Tuple[bool, Optional[str], Opt
     return True, None, summary
 
 
-def _validate_llm_evidence(summary: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+def _validate_llm_evidence(summary: dict[str, Any]) -> tuple[bool, str | None]:
     evidence = summary.get("llm_evidence")
     if not isinstance(evidence, dict):
         return False, "FAIL-CLOSED: live LLM evidence is missing."
@@ -208,9 +207,9 @@ def _validate_npm_project_evidence(evidence: dict, aggregate: dict) -> bool:
 
 
 def _validate_dependency_audit_evidence(
-    summary: Dict[str, Any],
+    summary: dict[str, Any],
     findings_path: Path,
-) -> Tuple[bool, Optional[str], int]:
+) -> tuple[bool, str | None, int]:
     evidence = summary.get("dependency_audit_evidence")
     if not isinstance(evidence, dict):
         return False, "FAIL-CLOSED: dependency audit evidence is missing.", 0
@@ -246,7 +245,7 @@ def _validate_dependency_audit_evidence(
         return False, "FAIL-CLOSED: dependency audit outcomes are incomplete.", 0
 
     seen: set[str] = set()
-    states: dict[str, Optional[str]] = {}
+    states: dict[str, str | None] = {}
     vulnerable_outcomes = 0
     for outcome in outcomes:
         if (

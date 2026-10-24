@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from .base import LLMProvider, ProviderResponse
-from .openai_provider import OpenAIProvider
 from .anthropic_provider import AnthropicProvider
+from .base import LLMProvider, ProviderResponse
 from .gemini_provider import GeminiProvider
+from .openai_provider import OpenAIProvider
 from .xai_provider import XAIProvider
-
 
 PROVIDERS: dict[str, type[LLMProvider]] = {
     "openai": OpenAIProvider,
@@ -33,13 +32,13 @@ def detect_provider_from_model(model: str, *, default_provider: str = "openai") 
 
 
 __all__ = [
-    "LLMProvider",
-    "ProviderResponse",
-    "OpenAIProvider",
+    "PROVIDERS",
     "AnthropicProvider",
     "GeminiProvider",
+    "LLMProvider",
+    "OpenAIProvider",
+    "ProviderResponse",
     "XAIProvider",
-    "PROVIDERS",
     "detect_provider_from_model",
 ]
 

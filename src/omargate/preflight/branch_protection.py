@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from typing import Dict, Any, Tuple
+from typing import Any
 
 from ..context import GitHubContext
 from ..github import GitHubClient
 
 
-def _required_check_names(protection: Dict[str, Any]) -> set[str]:
+def _required_check_names(protection: dict[str, Any]) -> set[str]:
     required = protection.get("required_status_checks") or {}
     contexts = set(required.get("contexts") or [])
     checks = required.get("checks") or []
@@ -21,7 +21,7 @@ def check_branch_protection(
     gh: GitHubClient,
     ctx: GitHubContext,
     check_name: str = "Omar Gate",
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     """
     Best-effort verification that branch protection requires this check.
 

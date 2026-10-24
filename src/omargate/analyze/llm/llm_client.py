@@ -4,11 +4,11 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass
-from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 
+from ...redaction import sanitize_public_error
 from .providers import (
     AnthropicProvider,
     GeminiProvider,
@@ -16,7 +16,6 @@ from .providers import (
     XAIProvider,
     detect_provider_from_model,
 )
-from ...redaction import sanitize_public_error
 
 
 @dataclass
@@ -28,8 +27,8 @@ class LLMUsage:
     latency_ms: int
     provider: str = "openai"
     route: str = "byo"
-    fallback_chain: Optional[str] = None
-    raw_usage: Optional[dict] = None
+    fallback_chain: str | None = None
+    raw_usage: dict | None = None
 
 
 def _unreturned_usage(provider: str, latency_ms: int = 0, **fields) -> LLMUsage:
@@ -42,7 +41,7 @@ class LLMResponse:
     content: str
     usage: LLMUsage
     success: bool
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class LLMClient:
@@ -84,7 +83,7 @@ class LLMClient:
         self.allow_fallback = allow_fallback
         self._client = None
         self._providers: dict[str, object] = {}
-        self._managed_oidc_token: Optional[str] = None
+        self._managed_oidc_token: str | None = None
 
     @property
     def client(self):
@@ -170,7 +169,7 @@ class LLMClient:
         max_tokens: int,
         temperature: float,
         route: str = "managed",
-        fallback_chain: Optional[str] = None,
+        fallback_chain: str | None = None,
     ) -> LLMResponse:
         endpoint = f"{self.managed_api_url.rstrip('/')}/api/v1/proxy/llm"
 
@@ -275,7 +274,7 @@ class LLMClient:
         )
 
     @staticmethod
-    def _is_capacity_error(error: Optional[str]) -> bool:
+    def _is_capacity_error(error: str | None) -> bool:
         message = str(error or "").strip().lower()
         if not message:
             return False
@@ -371,7 +370,7 @@ class LLMClient:
         if fallback_response.success:
             return fallback_response
 
-        managed_error: Optional[str] = None
+        managed_error: str | None = None
         if self._should_try_managed_capacity_fallback(
             primary_response=primary_response,
             fallback_response=fallback_response,
@@ -427,7 +426,7 @@ class LLMClient:
         max_tokens: int,
     ) -> LLMResponse:
         """Call provider API with retry on transient failures."""
-        last_error: Optional[str] = None
+        last_error: str | None = None
 
         provider_name = detect_provider_from_model(model, default_provider=self.llm_provider)
         use_managed_proxy = self._should_use_managed_proxy(provider_name)
@@ -480,7 +479,7 @@ class LLMClient:
                         error=("Provider response did not report model identity" if not identity_valid else
                                None if getattr(response, "completed", True) else "Provider response did not complete"),
                     )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 last_error = f"Timeout after {self.timeout}s"
             except Exception as exc:
                 last_error = sanitize_public_error(exc)

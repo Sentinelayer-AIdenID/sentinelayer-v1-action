@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import List, Optional
 
 from ..fix_plan import ensure_fix_plan
 from ..formatting import humanize_duration_ms
@@ -27,10 +26,10 @@ CATEGORY_ICONS = {
 def generate_audit_report(
     run_id: str,
     summary: dict,
-    findings: List[dict],
+    findings: list[dict],
     ingest: dict,
     config: dict,
-    review_brief_path: Optional[Path] = None,
+    review_brief_path: Path | None = None,
     version: str = "1.0.0",
 ) -> str:
     """
@@ -64,7 +63,7 @@ def generate_audit_report(
             "# 🛡️ Omar Gate Audit Report",
             "",
             f"**Run ID:** `{run_id}`",
-            f"**Generated:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+            f"**Generated:** {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}",
             f"**Policy:** {policy_display}",
             f"**Gate:** `{severity_gate}`",
             f"**Duration:** {humanize_duration_ms(summary.get('duration_ms'))}",
@@ -328,7 +327,7 @@ def write_audit_report(
     run_dir: Path,
     run_id: str,
     summary: dict,
-    findings: List[dict],
+    findings: list[dict],
     ingest: dict,
     config: dict,
     version: str = "1.0.0",

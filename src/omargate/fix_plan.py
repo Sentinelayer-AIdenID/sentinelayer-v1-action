@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 _DEFAULT_FIX_PLAN = (
     "Pseudo-code: locate the affected code path, replace the unsafe pattern with a safe "
     "implementation, add a regression test that fails before and passes after the change, "

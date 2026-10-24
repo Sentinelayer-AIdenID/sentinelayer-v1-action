@@ -10,7 +10,7 @@ __all__ = [
     "add_fingerprints_to_findings",
     "compute_fingerprint",
     "fingerprint_finding",
-    "normalize_snippet",
     "generate_artifact_manifest",
+    "normalize_snippet",
     "write_artifact_manifest",
 ]

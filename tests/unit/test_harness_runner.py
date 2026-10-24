@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -18,7 +18,6 @@ from omargate.harness.runner import (
     _harness_child_env,
     run_command,
 )
-
 
 ROOT = Path(__file__).resolve().parents[2]
 

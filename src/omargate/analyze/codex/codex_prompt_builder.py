@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
 
 from ...ingest.codebase_snapshot import build_codebase_snapshot
 from ...ingest.quick_learn import QuickLearnSummary
-
 
 # Persona is proprietary to the Omar Pack and must remain inline (not externalized).
 _PERSONA_SYSTEM_PROMPT = """You are Omar Singh, a senior CI/CD and release engineering specialist.
@@ -56,8 +54,8 @@ TRUNCATION_MARKER = "... (truncated)"
 class BuiltCodexPrompt:
     prompt: str
     token_count: int
-    files_included: List[str]
-    files_truncated: List[str]
+    files_included: list[str]
+    files_truncated: list[str]
 
 
 class CodexPromptBuilder:
@@ -86,13 +84,13 @@ class CodexPromptBuilder:
         self,
         *,
         repo_root: Path,
-        quick_learn: Optional[QuickLearnSummary],
-        deterministic_findings: List[dict],
+        quick_learn: QuickLearnSummary | None,
+        deterministic_findings: list[dict],
         tech_stack: list[str],
         scan_mode: str,
-        diff_content: Optional[str] = None,
-        hotspot_files: Optional[List[str]] = None,
-        ingest: Optional[dict] = None,
+        diff_content: str | None = None,
+        hotspot_files: list[str] | None = None,
+        ingest: dict | None = None,
     ) -> BuiltCodexPrompt:
         repo_root = repo_root.resolve()
         deterministic_findings = deterministic_findings or []
@@ -102,10 +100,10 @@ class CodexPromptBuilder:
         # Always reserve budget for the output contract so downstream parsing remains deterministic.
         body_budget = max(self.max_tokens - output_contract_tokens, 0)
 
-        parts: List[str] = []
+        parts: list[str] = []
         used_tokens = 0
-        files_included: List[str] = []
-        files_truncated: List[str] = []
+        files_included: list[str] = []
+        files_truncated: list[str] = []
 
         def add(text: str, allow_truncate: bool = False) -> None:
             nonlocal used_tokens
@@ -176,7 +174,7 @@ class CodexPromptBuilder:
             files_truncated=files_truncated,
         )
 
-    def _build_codebase_snapshot_section(self, ingest: Optional[dict]) -> str:
+    def _build_codebase_snapshot_section(self, ingest: dict | None) -> str:
         if not ingest:
             return ""
         try:
@@ -196,7 +194,7 @@ class CodexPromptBuilder:
         languages = snapshot.get("languages", []) if isinstance(snapshot, dict) else []
         god_files = snapshot.get("god_files", []) if isinstance(snapshot, dict) else []
 
-        lines: List[str] = ["## Codebase Snapshot (Deterministic)"]
+        lines: list[str] = ["## Codebase Snapshot (Deterministic)"]
         if in_scope is not None:
             lines.append(f"- In-scope files (source): {in_scope}")
         if source_loc is not None:
@@ -220,7 +218,7 @@ class CodexPromptBuilder:
             "# CI/CD & Release Engineering Audit\n\n"
         )
 
-    def _build_project_context(self, quick_learn: Optional[QuickLearnSummary]) -> str:
+    def _build_project_context(self, quick_learn: QuickLearnSummary | None) -> str:
         if not quick_learn:
             return "## Project Context\nunknown\n\n"
         stack = ", ".join(quick_learn.tech_stack) if quick_learn.tech_stack else "unknown"
@@ -239,7 +237,7 @@ class CodexPromptBuilder:
             f"- Entry points: {entry_points}\n\n"
         )
 
-    def _build_deterministic_summary(self, findings: List[dict]) -> str:
+    def _build_deterministic_summary(self, findings: list[dict]) -> str:
         if not findings:
             return "## Already Found (Deterministic)\n0 findings.\n\n"
         lines = [
@@ -350,10 +348,10 @@ class CodexPromptBuilder:
             "\nDo not include markdown fences or commentary.\n"
         )
 
-    def _select_review_files(self, hotspot_files: List[str], ingest: Optional[dict]) -> List[str]:
+    def _select_review_files(self, hotspot_files: list[str], ingest: dict | None) -> list[str]:
         seen: set[str] = set()
-        selected: List[str] = []
-        ingest_paths: List[str] = []
+        selected: list[str] = []
+        ingest_paths: list[str] = []
         if isinstance(ingest, dict):
             for file_info in ingest.get("files", []) or []:
                 if not isinstance(file_info, dict):

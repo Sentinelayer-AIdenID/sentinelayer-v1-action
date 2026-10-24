@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
-from typing import List, Optional, TYPE_CHECKING
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .collector import TelemetryCollector
@@ -11,11 +11,11 @@ if TYPE_CHECKING:
 @dataclass
 class SpecComplianceTelemetry:
     spec_hash: str
-    sections_checked: List[str]
-    sections_violated: List[str]
+    sections_checked: list[str]
+    sections_violated: list[str]
 
 
-def build_tier1_payload(collector: "TelemetryCollector") -> dict:
+def build_tier1_payload(collector: TelemetryCollector) -> dict:
     """
     Build Tier 1 (anonymous) telemetry payload.
 
@@ -79,20 +79,20 @@ def build_tier1_payload(collector: "TelemetryCollector") -> dict:
 
 
 def build_tier2_payload(
-    collector: "TelemetryCollector",
+    collector: TelemetryCollector,
     repo_owner: str,
     repo_name: str,
     branch: str,
-    pr_number: Optional[int],
+    pr_number: int | None,
     head_sha: str,
     is_fork_pr: bool,
     policy_pack: str,
     policy_pack_version: str,
     action_version: str,
-    findings_summary: List[dict],
+    findings_summary: list[dict],
     idempotency_key: str,
     severity_threshold: str = "P1",
-    spec_compliance: Optional[SpecComplianceTelemetry] = None,
+    spec_compliance: SpecComplianceTelemetry | None = None,
 ) -> dict:
     """
     Build Tier 2 (identified) telemetry payload.
@@ -180,10 +180,10 @@ def build_tier2_payload(
 
 
 def build_tier3_manifest(
-    collector: "TelemetryCollector",
+    collector: TelemetryCollector,
     tenant_id: str,
     repo_id: str,
-    artifacts: List[dict],
+    artifacts: list[dict],
     s3_prefix: str,
 ) -> dict:
     """
@@ -199,7 +199,7 @@ def build_tier3_manifest(
         "repo_id": repo_id,
         "run_id": collector.run_id,
         "artifact_root": f"{s3_prefix}/{tenant_id}/{repo_id}/{collector.run_id}/",
-        "uploaded_at_utc": datetime.now(timezone.utc).isoformat(),
+        "uploaded_at_utc": datetime.now(UTC).isoformat(),
         "objects": artifacts,
         "retention_days": 90,
         "encryption": {
@@ -208,7 +208,7 @@ def build_tier3_manifest(
     }
 
 
-def findings_to_summary(findings: List[dict]) -> List[dict]:
+def findings_to_summary(findings: list[dict]) -> list[dict]:
     """
     Strip findings to Tier 2-safe summary.
 

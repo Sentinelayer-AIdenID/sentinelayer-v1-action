@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from omargate.analyze.codex.codex_runner import CodexResult, CodexRunner
 from omargate.analyze.llm.context_builder import BuiltContext
 from omargate.analyze.llm.llm_client import LLMClient, LLMResponse, LLMUsage
-from omargate.analyze.codex.codex_runner import CodexResult, CodexRunner
 from omargate.analyze.orchestrator import AnalysisOrchestrator, LLMAnalysisResult
 from omargate.config import OmarGateConfig
 from omargate.logging import OmarLogger

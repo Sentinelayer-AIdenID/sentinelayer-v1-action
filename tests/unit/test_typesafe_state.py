@@ -3,8 +3,8 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
-from pathlib import Path
 import socket
+from pathlib import Path
 
 import httpx
 import pytest

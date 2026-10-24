@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 GENERATOR_SOURCE_BOUNDARY_VERSION = "generator-source-privacy-v5:complete-tracked-text:non-utf8-png-jpeg-ico:private-coordinates:scanner-credential-backstop"
 
@@ -25,10 +25,10 @@ def review_config_digest(config) -> str:
 
 def dependency_audit_freshness_epoch(now: datetime | None = None) -> str:
     """Return the UTC calendar day used to bound dependency-audit dedupe."""
-    instant = datetime.now(timezone.utc) if now is None else now
+    instant = datetime.now(UTC) if now is None else now
     if instant.tzinfo is None or instant.utcoffset() is None:
         raise ValueError("dependency audit freshness time must be timezone-aware")
-    return instant.astimezone(timezone.utc).date().isoformat()
+    return instant.astimezone(UTC).date().isoformat()
 
 
 def _normalize_dependency_audit_freshness_epoch(value: str) -> str:

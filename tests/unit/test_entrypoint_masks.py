@@ -1,9 +1,9 @@
 """Exercise workflow masking with synthetic secrets through the actual shell."""
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Literal, Optional
+from typing import Literal
 
 from ...fix_plan import ensure_fix_plan
 from ...redaction import sanitize_public_error
@@ -13,17 +13,17 @@ FailurePolicy = Literal["block", "deterministic_only", "allow_with_warning"]
 
 @dataclass
 class AnalysisResult:
-    findings: List[ParsedFinding]
+    findings: list[ParsedFinding]
     llm_success: bool
     fallback_used: bool
-    policy_applied: Optional[str]
-    warning_message: Optional[str]
-    usage: Optional[dict]
+    policy_applied: str | None
+    warning_message: str | None
+    usage: dict | None
 
 
 def handle_llm_failure(
     llm_response: LLMResponse,
-    deterministic_findings: List[dict],
+    deterministic_findings: list[dict],
     policy: FailurePolicy,
 ) -> AnalysisResult:
     """

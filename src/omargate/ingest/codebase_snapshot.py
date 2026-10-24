@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any
 
 from ..utils import json_dumps, sha256_hex
 
@@ -83,7 +84,7 @@ def build_codebase_synopsis(
     1) Quick Learn context (README/manifest driven)
     2) Deterministic codebase snapshot fallback
     """
-    parts: List[str] = []
+    parts: list[str] = []
 
     project_name = _compact_text(_quick_learn_value(quick_learn, "project_name"), max_chars=64)
     description = _compact_text(_quick_learn_value(quick_learn, "description"), max_chars=180)
@@ -133,7 +134,7 @@ def build_codebase_synopsis(
     if in_scope > 0:
         parts.append(f"Inferred: {in_scope} source files, {loc:,} LOC.")
 
-    top_languages: List[str] = []
+    top_languages: list[str] = []
     if isinstance(languages, list):
         for item in languages[:3]:
             if not isinstance(item, dict):
@@ -144,7 +145,7 @@ def build_codebase_synopsis(
     if top_languages:
         parts.append(f"Primary languages: {', '.join(top_languages)}.")
 
-    hotspot_categories: List[str] = []
+    hotspot_categories: list[str] = []
     if isinstance(hotspots, list):
         ranked = sorted(
             [row for row in hotspots if isinstance(row, dict)],
@@ -170,7 +171,7 @@ def _inventory_hash(ingest_files: Iterable[dict]) -> str:
 
     This is used for UI/debugging and to detect drift between deterministic stages.
     """
-    lines: List[str] = []
+    lines: list[str] = []
     for f in ingest_files or []:
         if not isinstance(f, dict):
             continue
@@ -212,9 +213,9 @@ def build_codebase_snapshot(
     ingest_files = ingest.get("files", []) if isinstance(ingest, dict) else []
     hotspots = ingest.get("hotspots", {}) if isinstance(ingest, dict) else {}
 
-    files_list: List[dict] = [f for f in ingest_files if isinstance(f, dict)]
+    files_list: list[dict] = [f for f in ingest_files if isinstance(f, dict)]
 
-    source_files: List[dict] = [
+    source_files: list[dict] = [
         f
         for f in files_list
         if str(f.get("category") or "") == "source" and f.get("path")
@@ -223,7 +224,7 @@ def build_codebase_snapshot(
     source_loc_total = sum(_safe_int(f.get("lines")) for f in source_files)
 
     # Language breakdown (source only).
-    lang_acc: Dict[str, dict] = {}
+    lang_acc: dict[str, dict] = {}
     for f in source_files:
         lang = str(f.get("language") or "unknown") or "unknown"
         entry = lang_acc.setdefault(lang, {"language": lang, "files": 0, "loc": 0})
@@ -234,8 +235,8 @@ def build_codebase_snapshot(
         key=lambda e: (-_safe_int(e.get("loc")), str(e.get("language") or "")),
     )
 
-    def _path_loc_rows(rows: Iterable[dict]) -> List[dict]:
-        out: List[dict] = []
+    def _path_loc_rows(rows: Iterable[dict]) -> list[dict]:
+        out: list[dict] = []
         for f in rows:
             path = f.get("path")
             if not path:
@@ -263,7 +264,7 @@ def build_codebase_snapshot(
     )[: max(int(max_god_files), 0)]
 
     # Hotspot summary.
-    hotspot_rows: List[dict] = []
+    hotspot_rows: list[dict] = []
     if isinstance(hotspots, dict):
         for category in sorted(hotspots.keys(), key=lambda k: str(k)):
             paths = hotspots.get(category) or []
@@ -321,7 +322,7 @@ def render_codebase_snapshot_md(snapshot: dict) -> str:
     largest = snapshot.get("largest_source_files", []) if isinstance(snapshot, dict) else []
     hotspots = snapshot.get("hotspots", []) if isinstance(snapshot, dict) else []
 
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append("# Codebase Snapshot (Deterministic)")
     lines.append("")
     lines.append(
@@ -428,7 +429,7 @@ def render_codebase_ingest_md(ingest: dict, snapshot: dict) -> str:
         key=lambda f: (-_safe_int(f.get("lines")), _norm_path(str(f.get("path") or ""))),
     )
 
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append("# Codebase Ingest")
     lines.append("")
     lines.append(
@@ -492,7 +493,7 @@ def render_codebase_ingest_md(ingest: dict, snapshot: dict) -> str:
 
 def write_codebase_ingest_artifacts(
     run_dir: Path, ingest: dict, *, snapshot: dict | None = None
-) -> Dict[str, Path]:
+) -> dict[str, Path]:
     """
     Write codebase ingest artifacts into run directory.
 
@@ -506,7 +507,7 @@ def write_codebase_ingest_artifacts(
 
     snapshot = snapshot or build_codebase_snapshot(ingest)
 
-    out_paths: Dict[str, Path] = {}
+    out_paths: dict[str, Path] = {}
 
     codebase_json = run_dir / "CODEBASE_INGEST.json"
     codebase_json.write_text(json_dumps(ingest or {}), encoding="utf-8")

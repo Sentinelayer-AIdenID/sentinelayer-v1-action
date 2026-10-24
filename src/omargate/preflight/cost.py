@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Tuple
-
 from ..config import OmarGateConfig
 from ..context import GitHubContext
 from ..github import GitHubClient
@@ -31,7 +29,7 @@ async def check_cost_approval(
     config: OmarGateConfig,
     ctx: GitHubContext,
     gh: GitHubClient,
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     """
     Check if cost approval is required and granted.
 

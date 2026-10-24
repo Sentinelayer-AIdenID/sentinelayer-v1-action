@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from typing import Optional
 from urllib.parse import quote
 
 
-def humanize_duration_ms(duration_ms: Optional[int]) -> str:
+def humanize_duration_ms(duration_ms: int | None) -> str:
     if duration_ms is None:
         return "n/a"
     try:
@@ -40,7 +39,7 @@ def format_int(value: int) -> str:
         return "0"
 
 
-def format_usd(cost_usd: Optional[float]) -> str:
+def format_usd(cost_usd: float | None) -> str:
     if cost_usd is None:
         return "unknown"
     try:
@@ -71,7 +70,7 @@ def github_blob_url(
     repo_full_name: str,
     head_sha: str,
     path: str,
-    line: Optional[int] = None,
+    line: int | None = None,
 ) -> str:
     """
     Build a stable GitHub blob URL for a file at a specific commit SHA.

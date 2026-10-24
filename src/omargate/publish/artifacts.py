@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 DEFAULT_ARTIFACTS = [
     "PACK_SUMMARY.json",

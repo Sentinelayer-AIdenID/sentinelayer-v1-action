@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional
 
 import httpx
 
@@ -15,7 +14,7 @@ async def fetch_spec_context(
     spec_hash: str,
     sentinelayer_token: str = "",
     oidc_token: str = "",
-) -> Optional[dict]:
+) -> dict | None:
     """
     Fetch compact spec context from Sentinelayer API.
 

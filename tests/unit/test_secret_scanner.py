@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from omargate.analyze.deterministic.secret_scanner import calculate_entropy, scan_for_secrets
+from omargate.analyze.deterministic.secret_scanner import (
+    calculate_entropy,
+    scan_for_secrets,
+)
 
 
 def test_entropy_detection() -> None:

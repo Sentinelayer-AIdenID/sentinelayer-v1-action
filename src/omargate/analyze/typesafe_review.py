@@ -47,7 +47,7 @@ def _is_dep_audit_lockfile(path: str) -> bool:
         if isinstance(entry, tuple):
             prefix, min_len = entry
             if name.startswith(prefix) and len(name) > min_len:
-                if prefix == "pylock." and (name.endswith(".py") or name.endswith(".pyi") or name.endswith(".txt")):
+                if prefix == "pylock." and (name.endswith((".py", ".pyi", ".txt"))):
                     continue
                 return True
         elif name == entry:
@@ -223,6 +223,7 @@ class ReviewInventory:
     source_hashes: tuple[tuple[str, str], ...]
     scan_mode: str
     policy_excluded: tuple[tuple[str, str], ...] = ()
+    excluded_source_hashes: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -306,6 +307,7 @@ def build_inventory(
     candidates: list[ReviewCandidate] = []
     hashes: list[tuple[str, str]] = []
     excluded: list[tuple[str, str]] = []
+    excluded_hashes: list[tuple[str, str]] = []
     ingest_files = {entry["path"] for entry in ingest.get("files", ()) if isinstance(entry, dict) and "path" in entry}
     for relative in sorted(set(changed_files)):
         if scan_mode != "pr-diff" and relative not in ingest_files:
@@ -324,6 +326,7 @@ def build_inventory(
             receipt = _lockfile_coverage_receipt(relative, dep_audit_evidence, absolute_path=path)
             if receipt is not None:
                 excluded.append((relative, receipt))
+                excluded_hashes.append((relative, _digest(raw)))
                 continue
         lines = text.splitlines(keepends=True)
         if not lines:
@@ -343,10 +346,20 @@ def build_inventory(
             ))
             if len(candidates) > max_candidates:
                 raise TypeSafeReviewIncomplete("candidate_budget_exceeded")
-    return ReviewInventory(tuple(candidates), tuple(hashes), scan_mode, tuple(excluded))
+    return ReviewInventory(tuple(candidates), tuple(hashes), scan_mode, tuple(excluded), tuple(excluded_hashes))
 
 
 def verify_sources(repo_root: Path, inventory: ReviewInventory) -> None:
+    for relative, expected in inventory.excluded_source_hashes:
+        path = _source_path(repo_root, relative)
+        try:
+            if path.stat().st_size > MAX_FILE_BYTES:
+                raise TypeSafeReviewIncomplete("source_changed_during_review")
+            raw = path.read_bytes()
+        except OSError:
+            raise TypeSafeReviewIncomplete("source_unavailable") from None
+        if len(raw) > MAX_FILE_BYTES or _digest(raw) != expected:
+            raise TypeSafeReviewIncomplete("source_changed_during_review")
     expected_hashes = dict(inventory.source_hashes)
     if (
         inventory.scan_mode != "pr-diff"

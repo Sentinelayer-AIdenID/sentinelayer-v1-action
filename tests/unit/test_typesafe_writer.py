@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from omargate.analyze.llm import LLMClient, LLMResponse, LLMUsage
-from omargate.analyze.typesafe_review import TypeSafeReviewIncomplete, TypedReview
+from omargate.analyze.typesafe_review import TypedReview, TypeSafeReviewIncomplete
 from omargate.analyze.typesafe_writer import explain_review
 from omargate.redaction import sanitize_public_error
 

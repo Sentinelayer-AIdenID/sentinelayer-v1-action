@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from omargate.config import OmarGateConfig
 from omargate.main import (
-    _check_name,
     _build_spec_compliance_from_findings,
+    _check_name,
     _counts_from_check_run_output,
     _exit_code_from_gate_result,
     _gate_result_from_check_run,
@@ -10,7 +11,6 @@ from omargate.main import (
     _latest_completed_check_run,
     _map_category_to_spec_sections,
 )
-from omargate.config import OmarGateConfig
 from omargate.models import GateStatus
 from omargate.utils import parse_iso8601
 

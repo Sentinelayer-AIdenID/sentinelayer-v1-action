@@ -1,6 +1,6 @@
 """Public fixtures construct credential-shaped payloads only at runtime."""
-from pathlib import Path
 import re
+from pathlib import Path
 
 
 def test_public_fixture_sources_have_no_literal_provider_keys_or_pem_markers():

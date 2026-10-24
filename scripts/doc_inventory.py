@@ -4,10 +4,9 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
 
 REQUIRED_PATHS = [
     Path("README.md"),
@@ -45,7 +44,7 @@ def _stat_entry(repo_root: Path, rel: Path) -> FileEntry | None:
     if not p.exists() or not p.is_file():
         return None
     st = p.stat()
-    modified = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+    modified = datetime.fromtimestamp(st.st_mtime, tz=UTC).isoformat()
     return FileEntry(path=rel.as_posix(), bytes=int(st.st_size), modified_utc=modified)
 
 
@@ -122,21 +121,21 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print("Documentation inventory")
-        print("")
+        print()
 
         print("Required")
         for e in present_required:
             print(f"- {e.path} ({_bytes_human(e.bytes)}, modified={e.modified_utc})")
         for p in missing_required:
             print(f"- {p} (missing)")
-        print("")
+        print()
 
         print("Recommended")
         for e in present_recommended:
             print(f"- {e.path} ({_bytes_human(e.bytes)}, modified={e.modified_utc})")
         for p in missing_recommended:
             print(f"- {p} (missing)")
-        print("")
+        print()
 
         print("All Markdown Files")
         for e in md_entries:

@@ -2,22 +2,22 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import json
 import os
-from pathlib import Path
 import tempfile
+from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 from omargate.analyze.llm.llm_client import LLMClient
 from omargate.analyze.orchestrator import AnalysisOrchestrator
-from omargate.analyze.review_cascade import LOW, MID, DEEP, response_model_matches
+from omargate.analyze.review_cascade import DEEP, LOW, MID, response_model_matches
 from omargate.analyze.review_costs import cost_ledger, estimate_usage
 from omargate.config import OmarGateConfig
-from omargate.logging import OmarLogger
-from omargate.mask_inputs import main as mask_inputs
-from omargate.main import _build_llm_evidence
 from omargate.gate import evaluate_gate
+from omargate.logging import OmarLogger
+from omargate.main import _build_llm_evidence
+from omargate.mask_inputs import main as mask_inputs
 from omargate.models import GateConfig
 from omargate.packaging import write_findings_jsonl, write_pack_summary
 
@@ -63,7 +63,7 @@ async def run(output: Path) -> bool:
     )
     report = {
         "schema": "omargate.synthetic-canary.v1", "revision": os.environ.get("GITHUB_SHA", "unknown"),
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": datetime.now(UTC).isoformat(),
         "scope": "synthetic routing/policy/generator stages only; no deployment, merge verdict or recall claim",
         "model_reference": config.intent_model_reference, "policy_reference": config.review_policy.reference,
         "capability_probes": [], "cases": [],
@@ -124,7 +124,7 @@ async def run(output: Path) -> bool:
                       "kind": "estimated_not_billed", "estimated_usd": None, "status": "usage_unknown"})
         report["failure_class"] = "synthetic_trial_incomplete"
         success = False
-    report.update(expectations_met=success, costs=cost_ledger(calls), completed_at=datetime.now(timezone.utc).isoformat())
+    report.update(expectations_met=success, costs=cost_ledger(calls), completed_at=datetime.now(UTC).isoformat())
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return success

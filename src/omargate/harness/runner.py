@@ -4,16 +4,17 @@ import asyncio
 import ipaddress
 import os
 import re
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Mapping
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
 from .detectors import ProjectFacts, detect_project_facts

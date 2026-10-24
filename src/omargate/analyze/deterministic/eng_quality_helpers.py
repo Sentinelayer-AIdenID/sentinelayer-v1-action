@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
 import io
 import re
 import tokenize
+from dataclasses import dataclass
+
 from .pattern_scanner import _truncate_snippet
 
 

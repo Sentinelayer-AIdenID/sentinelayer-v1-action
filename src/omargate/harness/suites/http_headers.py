@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
-import re
 
 from ...analyze.deterministic.pattern_scanner import Finding
 from ..detectors import iter_text_files, read_text_best_effort
 from ..runner import SecuritySuite
-
 
 _HEADER_MARKERS = (
     "content-security-policy",

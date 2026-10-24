@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-import os
 import html
+import os
 import sys
 import uuid
-from typing import Any, Optional
+from typing import Any
 
 from ..formatting import format_int, truncate
+from ..ingest.codebase_snapshot import (
+    build_codebase_synopsis,
+    render_codebase_snapshot_md,
+)
 from ..models import GateResult, GateStatus
-from ..ingest.codebase_snapshot import build_codebase_synopsis, render_codebase_snapshot_md
 from ..redaction import sanitize_public_error, sanitize_untrusted_markdown_scalar
 
 
@@ -100,8 +103,8 @@ def write_step_summary(
     run_id: str,
     version: str,
     *,
-    codebase_snapshot: Optional[dict] = None,
-    codebase_synopsis: Optional[str] = None,
+    codebase_snapshot: dict | None = None,
+    codebase_synopsis: str | None = None,
 ) -> None:
     """
     Print the report before the gate annotation and write the Actions summary.

@@ -1,7 +1,7 @@
 from omargate.package.fingerprint import (
-    normalize_snippet,
-    compute_fingerprint,
     add_fingerprints_to_findings,
+    compute_fingerprint,
+    normalize_snippet,
 )
 
 

@@ -7,17 +7,16 @@ interpret findings, estimate cost, or decide whether a gate passes.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
-from dataclasses import dataclass, field
 import json
 import math
 import re
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
 import httpx
-
 
 _ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 

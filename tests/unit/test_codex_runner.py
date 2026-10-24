@@ -153,11 +153,11 @@ async def test_codex_subprocess_receives_only_the_bounded_child_env(
     class FakeProc:
         returncode = 0
 
-        async def communicate(self, input: bytes | None = None):  # noqa: A002
+        async def communicate(self, input: bytes | None = None):
             assert input == b"audit prompt"
             return b"", b""
 
-    async def fake_create(*args, **kwargs):  # noqa: ANN001
+    async def fake_create(*args, **kwargs):
         captured.update(kwargs["env"])
         output_path = Path(args[args.index("--output-last-message") + 1])
         output_path.write_text('{"no_findings": true}', encoding="utf-8")
@@ -190,14 +190,14 @@ async def test_nonzero_exit_uses_json_error_without_prompt_content(
     class FakeProc:
         returncode = 1
 
-        async def communicate(self, input: bytes | None = None):  # noqa: A002
+        async def communicate(self, input: bytes | None = None):
             assert input == b"private prompt content"
             return (
                 b'{"type":"turn.failed","error":{"message":"unexpected status 403 Forbidden"}}',
                 b"user\nprivate prompt content",
             )
 
-    async def fake_create(*args, **kwargs):  # noqa: ANN001
+    async def fake_create(*args, **kwargs):
         assert "--json" in args
         return FakeProc()
 
@@ -220,14 +220,14 @@ async def test_timeout_handling(tmp_path: Path, monkeypatch) -> None:
         def __init__(self) -> None:
             self.returncode = None
 
-        async def communicate(self, input: bytes | None = None):  # noqa: A002
+        async def communicate(self, input: bytes | None = None):
             await asyncio.sleep(10)
             return b"", b""
 
         def kill(self) -> None:
             self.returncode = -9
 
-    async def fake_create(*args, **kwargs):  # noqa: ANN001
+    async def fake_create(*args, **kwargs):
         return FakeProc()
 
     monkeypatch.setattr("shutil.which", lambda _: "codex")

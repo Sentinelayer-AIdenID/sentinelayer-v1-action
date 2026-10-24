@@ -2,10 +2,10 @@ import json
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from policy_fixture import FAKE_POLICY_JSON
 
 from omargate.gate import evaluate_gate
 from omargate.models import GateConfig
-from policy_fixture import FAKE_POLICY_JSON
 
 
 def configure(monkeypatch, tmp_path):

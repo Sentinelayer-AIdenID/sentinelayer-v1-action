@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional, Tuple
-
 from ..github import GitHubClient
 
 
@@ -10,7 +8,7 @@ async def check_dedupe(
     head_sha: str,
     dedupe_key: str,
     check_name: str = "Omar Gate",
-) -> Tuple[bool, Optional[str]]:
+) -> tuple[bool, str | None]:
     """
     Remote check metadata is not an authenticated reusable gate receipt.
 

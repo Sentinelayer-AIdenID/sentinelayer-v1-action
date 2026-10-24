@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
-
 
 DEFAULT_MAX_CONTEXT_TOKENS = 80000
 
@@ -25,7 +23,7 @@ class PromptLoader:
             }
         return json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    def _select_prompt_entry(self, name: Optional[str], scan_mode: str) -> Optional[dict]:
+    def _select_prompt_entry(self, name: str | None, scan_mode: str) -> dict | None:
         prompts = self.manifest.get("prompts") or {}
         if not prompts:
             return None
@@ -51,7 +49,7 @@ class PromptLoader:
 
         return None
 
-    def get_prompt(self, name: Optional[str] = None, scan_mode: str = "pr-diff") -> str:
+    def get_prompt(self, name: str | None = None, scan_mode: str = "pr-diff") -> str:
         """
         Load prompt content by name.
 
@@ -72,7 +70,7 @@ class PromptLoader:
 
         return prompt_path.read_text(encoding="utf-8")
 
-    def get_max_context_tokens(self, name: Optional[str] = None) -> int:
+    def get_max_context_tokens(self, name: str | None = None) -> int:
         """Get max context tokens for a prompt."""
         prompts = self.manifest.get("prompts") or {}
         entry = None

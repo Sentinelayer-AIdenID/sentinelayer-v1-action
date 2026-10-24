@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -17,7 +17,7 @@ async def test_rate_limit_cannot_replay_success_from_another_audit_contract(
 ) -> None:
     from omargate import main as om
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     config = OmarGateConfig(
         run_harness=True,
         github_token="fixture-token",
@@ -214,7 +214,7 @@ async def test_even_current_key_check_metadata_cannot_skip_fresh_review(
 ) -> None:
     from omargate import main as om
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     config = OmarGateConfig(
         run_harness=True,
         github_token="fixture-token",
@@ -290,7 +290,7 @@ async def test_harness_off_rate_limit_cannot_mirror_or_allow_an_unverified_check
 ) -> None:
     from omargate import main as om
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     config = OmarGateConfig(
         run_harness=False,
         github_token="fixture-token",

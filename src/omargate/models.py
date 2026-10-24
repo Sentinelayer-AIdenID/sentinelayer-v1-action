@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal, Optional
+from typing import Literal
 
 Severity = Literal["P0", "P1", "P2", "P3", "P4"]
 SeverityGate = Literal["P0", "P1", "P2", "none"]
@@ -79,7 +79,7 @@ class GateResult:
     reason: str
     block_merge: bool
     counts: Counts
-    dedupe_key: Optional[str] = None
+    dedupe_key: str | None = None
 
 @dataclass
 class Finding:

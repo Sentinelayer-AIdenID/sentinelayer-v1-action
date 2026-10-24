@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -40,7 +39,7 @@ async def test_llm_client_retry_on_timeout() -> None:
     client = LLMClient(api_key="test", max_retries=2)
     response = _make_response("ok", 5, 2)
 
-    create_mock = AsyncMock(side_effect=[asyncio.TimeoutError(), response])
+    create_mock = AsyncMock(side_effect=[TimeoutError(), response])
     fake_client = SimpleNamespace(
         responses=SimpleNamespace(create=create_mock)
     )

@@ -1,8 +1,7 @@
-from policy_fixture import FAKE_POLICY_JSON
-
 import json
 
 import pytest
+from policy_fixture import FAKE_POLICY_JSON
 from pydantic import ValidationError
 
 from omargate.config import OmarGateConfig

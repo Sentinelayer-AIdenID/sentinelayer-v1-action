@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Tuple
-
 from ..config import OmarGateConfig
 from ..context import GitHubContext
 
@@ -9,7 +7,7 @@ from ..context import GitHubContext
 def check_fork_policy(
     ctx: GitHubContext,
     config: OmarGateConfig,
-) -> Tuple[bool, str, str]:
+) -> tuple[bool, str, str]:
     """
     Check fork policy.
 

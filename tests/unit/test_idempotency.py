@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -214,7 +214,7 @@ def test_current_main_contract_does_not_reuse_legacy_audit_key() -> None:
 
 
 def test_dependency_audit_freshness_epoch_uses_utc_day_boundary() -> None:
-    before_midnight = datetime(2026, 10, 18, 23, 59, 59, tzinfo=timezone.utc)
+    before_midnight = datetime(2026, 10, 18, 23, 59, 59, tzinfo=UTC)
     after_midnight = before_midnight + timedelta(seconds=1)
     ahead_of_utc = datetime(
         2026,

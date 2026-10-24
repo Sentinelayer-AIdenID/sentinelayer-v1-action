@@ -5,14 +5,14 @@ Lock validation is structural; GitHub enforces locked repository identity at run
 """
 from __future__ import annotations
 
-from pathlib import Path
 import re
+from pathlib import Path
 
 import yaml
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 from ...redaction import sanitize_public_error
-from .pattern_scanner import Finding, MAX_SCAN_BYTES, _truncate_snippet
+from .pattern_scanner import MAX_SCAN_BYTES, Finding, _truncate_snippet
 
 _EXPRESSION = re.compile(r"\$\{\{([\s\S]*?)\}\}")
 _CONTEXT_PATH = re.compile(r"(?<![\w'\"])\b(?:github|inputs)(?:\s*\.\s*\w+)+")

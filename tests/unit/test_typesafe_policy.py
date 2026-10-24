@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from policy_fixture import FAKE_POLICY
-
-from dataclasses import FrozenInstanceError, dataclass, replace
 import hashlib
 import json
 import math
-from types import MappingProxyType, ModuleType
-from typing import Any, Mapping
 import sys
+from collections.abc import Mapping
+from dataclasses import FrozenInstanceError, dataclass, replace
+from types import MappingProxyType, ModuleType
+from typing import Any
 
 import pytest
+from policy_fixture import FAKE_POLICY
 
 from omargate.analyze import typesafe_policy as policy_module
 from omargate.analyze.typesafe_client import is_unit_distribution

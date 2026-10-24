@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from bisect import bisect_right
-from typing import List, Tuple
-
 import math
 import re
+from bisect import bisect_right
 
 from .pattern_scanner import Finding, mask_secret_in_snippet
 
@@ -100,8 +98,8 @@ def _truncate_snippet(snippet: str, max_chars: int = MAX_SNIPPET_CHARS) -> str:
     return f"{snippet[: max_chars - 3]}..."
 
 
-def _build_line_starts(content: str) -> List[int]:
-    line_starts: List[int] = []
+def _build_line_starts(content: str) -> list[int]:
+    line_starts: list[int] = []
     offset = 0
     for line in content.splitlines(keepends=True):
         line_starts.append(offset)
@@ -111,11 +109,11 @@ def _build_line_starts(content: str) -> List[int]:
     return line_starts
 
 
-def _index_to_line(line_starts: List[int], idx: int) -> int:
+def _index_to_line(line_starts: list[int], idx: int) -> int:
     return bisect_right(line_starts, idx)
 
 
-def _snippet_from_lines(lines: List[str], line_start: int, line_end: int) -> str:
+def _snippet_from_lines(lines: list[str], line_start: int, line_end: int) -> str:
     if not lines:
         return ""
     start_idx = max(line_start - 1, 0)
@@ -123,7 +121,7 @@ def _snippet_from_lines(lines: List[str], line_start: int, line_end: int) -> str
     return "\n".join(lines[start_idx:end_idx])
 
 
-def _overlaps(span: Tuple[int, int], spans: List[Tuple[int, int]]) -> bool:
+def _overlaps(span: tuple[int, int], spans: list[tuple[int, int]]) -> bool:
     for other in spans:
         if span[0] < other[1] and other[0] < span[1]:
             return True
@@ -222,15 +220,15 @@ _LOCKFILE_NAMES = frozenset({
 })
 
 
-def scan_for_secrets(content: str, file_path: str) -> List[Finding]:
+def scan_for_secrets(content: str, file_path: str) -> list[Finding]:
     # Lockfiles contain only integrity hashes, not secrets.
     basename = file_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
     if basename in _LOCKFILE_NAMES:
         return []
     line_starts = _build_line_starts(content)
     lines = content.splitlines()
-    findings: List[Finding] = []
-    matched_spans: List[Tuple[int, int]] = []
+    findings: list[Finding] = []
+    matched_spans: list[tuple[int, int]] = []
 
     for pattern in _SECRET_PATTERNS:
         for match in pattern["regex"].finditer(content):

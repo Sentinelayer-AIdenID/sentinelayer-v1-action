@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
 import hashlib
 import time
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
 
 
 @dataclass
@@ -21,21 +21,21 @@ class TelemetryCollector:
 
     # Computed on init
     repo_hash: str = field(init=False)
-    start_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    start_time: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     # Stage timing
-    _stages: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    _stages: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     # LLM metrics
-    llm_provider: Optional[str] = None
-    model_used: Optional[str] = None
+    llm_provider: str | None = None
+    model_used: str | None = None
     model_fallback_used: bool = False
-    fallback_provider: Optional[str] = None
-    fallback_model: Optional[str] = None
+    fallback_provider: str | None = None
+    fallback_model: str | None = None
     tokens_in: int = 0
     tokens_out: int = 0
     estimated_cost_usd: float = 0.0
-    review_cost_ledger: Optional[Dict[str, Any]] = None
+    review_cost_ledger: dict[str, Any] | None = None
     llm_latency_ms: int = 0
 
     # Scan metrics
@@ -45,21 +45,21 @@ class TelemetryCollector:
     total_lines: int = 0
 
     # Finding counts
-    counts: Dict[str, int] = field(
+    counts: dict[str, int] = field(
         default_factory=lambda: {"P0": 0, "P1": 0, "P2": 0, "P3": 0, "total": 0}
     )
     deterministic_count: int = 0
     llm_count: int = 0
 
     # Gate result
-    gate_status: Optional[str] = None
-    gate_reason: Optional[str] = None
+    gate_status: str | None = None
+    gate_reason: str | None = None
 
     # Preflight outcomes
     dedupe_skipped: bool = False
     rate_limit_skipped: bool = False
     fork_blocked: bool = False
-    approval_state: Optional[str] = None
+    approval_state: str | None = None
 
     # Run exit (populated even on early returns)
     exit_code: int = 0
@@ -102,9 +102,9 @@ class TelemetryCollector:
         cost_usd: float,
         latency_ms: int,
         fallback_used: bool = False,
-        provider: Optional[str] = None,
-        fallback_provider: Optional[str] = None,
-        fallback_model: Optional[str] = None,
+        provider: str | None = None,
+        fallback_provider: str | None = None,
+        fallback_model: str | None = None,
     ) -> None:
         """Record LLM usage metrics."""
         if provider:
@@ -122,7 +122,7 @@ class TelemetryCollector:
 
     def record_findings(
         self,
-        counts: Dict[str, int],
+        counts: dict[str, int],
         deterministic_count: int,
         llm_count: int,
     ) -> None:
@@ -148,10 +148,10 @@ class TelemetryCollector:
 
     def total_duration_ms(self) -> int:
         """Total run duration."""
-        elapsed = datetime.now(timezone.utc) - self.start_time
+        elapsed = datetime.now(UTC) - self.start_time
         return int(elapsed.total_seconds() * 1000)
 
-    def stage_durations(self) -> Dict[str, int]:
+    def stage_durations(self) -> dict[str, int]:
         """Get all stage durations."""
         return {
             name: data.get("duration_ms", 0)

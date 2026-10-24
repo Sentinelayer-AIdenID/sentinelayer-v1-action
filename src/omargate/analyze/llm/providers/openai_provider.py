@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any
 
 from .base import LLMProvider, ProviderResponse
 
@@ -16,7 +17,7 @@ class _OpenAIUsage:
 class OpenAIProvider(LLMProvider):
     """OpenAI Responses API provider."""
 
-    def __init__(self, api_key: str, *, client_getter: Optional[Callable[[], Any]] = None, reasoning_effort: str | None = None) -> None:
+    def __init__(self, api_key: str, *, client_getter: Callable[[], Any] | None = None, reasoning_effort: str | None = None) -> None:
         self.api_key = api_key
         self._client_getter = client_getter
         self._client = None
