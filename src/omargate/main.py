@@ -949,6 +949,7 @@ async def async_main() -> int:
                             comment_tag=config.comment_tag,
                             llm_evidence=_build_llm_evidence(analysis, config),
                             review_routing=(analysis.llm_usage or {}).get("review_routing"),
+                            cascade_cost_envelope=config.review_routing == "intent-cascade-v1",
                         )
                         comment_url = gh.create_or_update_pr_comment(
                             ctx.pr_number,

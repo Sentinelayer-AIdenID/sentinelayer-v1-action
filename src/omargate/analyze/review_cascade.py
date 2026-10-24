@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 import hashlib
+import json
 from pathlib import PurePosixPath
 import re
 from typing import Any
@@ -30,6 +31,13 @@ class ReviewRoute:
 LOW = ReviewRoute("low", "gpt-6-luna", "max", "complete_low_risk")
 MID = ReviewRoute("mid", "gpt-6.1-sol", "xhigh", "uncertain_or_complex")
 DEEP = ReviewRoute("deep", "gpt-6-sol", "max", "critical_or_incomplete")
+
+
+def cascade_generator_system_prompt(base_prompt: str, policy: PrivateReviewPolicy) -> str:
+    """Use one prompt construction for review and its preflight cost envelope."""
+    dimensions = [criterion for _, criterion in policy.routing["domains"].values()]
+    return (base_prompt + "\n" + policy.generator_instructions + "\nReview dimensions: "
+            + json.dumps(dimensions) + "\nReport source defects; do not quote private configuration.")
 
 
 def response_model_matches(actual: str, expected: str) -> bool:

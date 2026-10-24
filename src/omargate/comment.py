@@ -312,7 +312,7 @@ def _codebase_snapshot_section(codebase_snapshot: Optional[dict]) -> str:
     return "\n".join(lines)
 
 def _cost_header(estimated_cost_value: str, actual_cost_usd: float | None,
-                 cost_ledger_complete: bool, llm_engine: str) -> str:
+                 cost_ledger_complete: bool, llm_engine: str, *, cascade: bool = False) -> str:
     """Build the cost portion of the report header line.
 
     Separates preflight estimate from usage-based cost so a reader can
@@ -321,18 +321,20 @@ def _cost_header(estimated_cost_value: str, actual_cost_usd: float | None,
     complete; otherwise it remains unknown (subtotal) because triage
     may have incurred unrecorded cost.
     """
-    parts: list[str] = [f" • **Cost (est.):** `{estimated_cost_value}`"]
+    forecast_label = "Cost (preflight forecast)" if cascade else "Cost (est.)"
+    usage_label = "Cost (usage estimate)" if cascade else "Cost (usage)"
+    parts: list[str] = [f" • **{forecast_label}:** `{estimated_cost_value}`"]
     if actual_cost_usd is not None:
-        parts.append(f" • **Cost (usage):** `{format_usd(actual_cost_usd)}`")
+        parts.append(f" • **{usage_label}:** `{format_usd(actual_cost_usd)}`")
         if not cost_ledger_complete:
             parts[-1] += " (subtotal)"
     elif llm_engine == "NOT_ATTEMPTED":
         if cost_ledger_complete:
-            parts.append(" • **Cost (usage):** none (no inference call)")
+            parts.append(f" • **{usage_label}:** none (no inference call)")
         else:
-            parts.append(" • **Cost (usage):** unknown (subtotal)")
+            parts.append(f" • **{usage_label}:** unknown (subtotal)")
     else:
-        parts.append(" • **Cost (usage):** unknown")
+        parts.append(f" • **{usage_label}:** unknown")
         if not cost_ledger_complete:
             parts[-1] += " (subtotal)"
     return "".join(parts)
@@ -371,6 +373,7 @@ def render_pr_comment(
     comment_tag: str = "",
     llm_evidence: Optional[dict] = None,
     review_routing: Optional[dict] = None,
+    cascade_cost_envelope: bool = False,
 ) -> str:
     """
     Render the PR comment for Omar Gate.
@@ -463,7 +466,8 @@ def render_pr_comment(
         f"**Duration:** `{duration_value}`"
         + (f" • **Files:** `{format_int(int(files_scanned))}`" if files_scanned is not None else "")
         + f" • **LLM:** `{llm_engine}` (`{llm_model}`)"
-        + _cost_header(estimated_cost_value, actual_cost_usd, cost_ledger_complete, llm_engine),
+        + _cost_header(estimated_cost_value, actual_cost_usd, cost_ledger_complete, llm_engine,
+                       cascade=cascade_cost_envelope),
         model_cost_section,
         review_chain_section,
         "",
