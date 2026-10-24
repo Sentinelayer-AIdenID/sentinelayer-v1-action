@@ -768,16 +768,19 @@ async def test_python_manifest_without_supported_pinned_input_fails_closed(
     assert finding is not None
     assert finding.id == "HARNESS-PIP-AUDIT-INCOMPLETE"
     assert finding.severity == "P0"
-    assert outcome.reason_code == ("unsafe_pip_input" if manifest == "requirements-prod.txt" else "unsupported_pip_input")
+    assert outcome.reason_code == (
+        "unsafe_pip_input" if manifest == "requirements-prod.txt"
+        else "missing_lockfile" if manifest.endswith(".in")
+        else "unsupported_pip_input"
+    )
     assert "PRIVATE_" not in json.dumps(asdict(finding), sort_keys=True)
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("filename", ("production.txt", "production.in"))
-async def test_requirements_directory_manifest_is_discovered_and_fails_closed(
-    filename: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_requirements_directory_in_manifest_is_discovered_and_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manifest = tmp_path / "requirements" / filename
+    manifest = tmp_path / "requirements" / "production.in"
     manifest.parent.mkdir()
     manifest.write_text("example==1.0.0\n", encoding="utf-8")
 
@@ -788,7 +791,7 @@ async def test_requirements_directory_manifest_is_discovered_and_fails_closed(
     finding, outcome = await DepAuditSuite(tech_stack=[])._pip_audit(tmp_path)
 
     assert finding is not None
-    assert outcome.reason_code == "unsupported_project_layout"
+    assert outcome.reason_code == "missing_lockfile"
 
 
 @pytest.mark.anyio
@@ -825,7 +828,10 @@ async def test_requirements_cannot_claim_coverage_for_another_python_manifest(
 
     assert called is False
     assert finding is not None
-    assert outcome.reason_code == "unsupported_pip_input"
+    assert outcome.reason_code == (
+        "missing_lockfile" if extra_manifest == "requirements.in"
+        else "unsupported_pip_input"
+    )
 
 
 @pytest.mark.anyio
@@ -1345,7 +1351,11 @@ async def test_nested_dependency_project_is_indeterminate_without_spawning(
 
     assert called is False
     assert finding is not None
-    assert outcome.reason_code == ("unsafe_manifest" if tool == "npm" else "unsupported_project_layout")
+    assert outcome.reason_code == {
+        "npm": "unsafe_manifest",
+        "pip": "unsupported_pip_input",
+        "cargo": "unsupported_project_layout",
+    }[tool]
     assert "PRIVATE_" not in json.dumps(asdict(finding), sort_keys=True)
 
 

@@ -6,7 +6,7 @@ import json
 import math
 import os
 import re
-import shutil
+import stat
 import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeGuard
 from urllib.parse import urlsplit
 
+from packaging.requirements import InvalidRequirement, Requirement
 from packaging.version import InvalidVersion, Version
 
 from ...analyze.deterministic.pattern_scanner import Finding, _truncate_snippet
@@ -63,6 +64,7 @@ _MAX_MANIFEST_DISCOVERY_ENTRIES = 20_000
 _MAX_MANIFEST_DISCOVERY_DEPTH = 12
 _PYTHON_MANIFESTS = (
     "requirements.txt",
+    "requirements.lock",
     "pyproject.toml",
     "Pipfile",
     "Pipfile.lock",
@@ -110,7 +112,7 @@ _PINNED_REQUIREMENT_RE = re.compile(
     r"==(?P<version>[A-Za-z0-9][A-Za-z0-9.!+_-]*)$"
 )
 _REQUIREMENTS_MANIFEST_RE = re.compile(
-    r"^requirements(?:[-_.][A-Za-z0-9_.-]+)?\.(?:txt|in)$",
+    r"^requirements(?:[-_.][A-Za-z0-9_.-]+)?\.(?:txt|in|lock)$",
     re.IGNORECASE,
 )
 
@@ -534,6 +536,43 @@ def _is_safe_project_file(root: Path, candidate: Path) -> bool:
         return False
 
 
+def _read_safe_project_bytes(root: Path, source: Path, *, max_bytes: int) -> bytes | None:
+    """Read at most the limit from the same ordinary file checked at open."""
+    if not _is_safe_project_file(root, source):
+        return None
+    try:
+        before = source.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(source, flags)
+        try:
+            with os.fdopen(fd, "rb") as opened:
+                fd = -1
+                attached = os.fstat(opened.fileno())
+                if (not stat.S_ISREG(attached.st_mode)
+                        or (attached.st_dev, attached.st_ino) != (before.st_dev, before.st_ino)
+                        or attached.st_size > max_bytes):
+                    return None
+                raw = opened.read(max_bytes + 1)
+                after = os.fstat(opened.fileno())
+                if (len(raw) > max_bytes or after.st_size > max_bytes
+                        or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+                        or after.st_mtime_ns != attached.st_mtime_ns):
+                    return None
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        path_after = source.lstat()
+        if (not _is_safe_project_file(root, source)
+                or (path_after.st_dev, path_after.st_ino) != (before.st_dev, before.st_ino)
+                or path_after.st_mtime_ns != before.st_mtime_ns):
+            return None
+        return raw
+    except (OSError, RuntimeError):
+        return None
+
+
 def _copy_safe_project_file(
     root: Path,
     source: Path,
@@ -541,27 +580,25 @@ def _copy_safe_project_file(
     *,
     max_bytes: int,
 ) -> bool:
-    if not _is_safe_project_file(root, source):
+    raw = _read_safe_project_bytes(root, source, max_bytes=max_bytes)
+    if raw is None:
         return False
     try:
-        if source.stat().st_size > max_bytes:
-            return False
-        shutil.copyfile(source, destination)
+        destination.write_bytes(raw)
     except (OSError, RuntimeError):
         return False
     return True
 
 
 def _load_pinned_requirements(
-    root: Path, requirements: Path
+    root: Path, requirements: Path, *, require_hashes: bool = False,
 ) -> frozenset[tuple[str, str]] | None:
-    if not _is_safe_project_file(root, requirements):
+    raw = _read_safe_project_bytes(root, requirements, max_bytes=_MAX_REQUIREMENTS_BYTES)
+    if raw is None:
         return None
     try:
-        if requirements.stat().st_size > _MAX_REQUIREMENTS_BYTES:
-            return None
-        content = requirements.read_text(encoding="utf-8", errors="strict")
-    except (OSError, UnicodeError):
+        content = raw.decode("utf-8", errors="strict")
+    except UnicodeError:
         return None
     dependencies: dict[str, str] = {}
     pending = ""
@@ -574,6 +611,8 @@ def _load_pinned_requirements(
             continue
         line, pending = pending + line, ""
         parts = line.split()
+        if require_hashes and len(parts) < 2:
+            return None
         if any(re.fullmatch(r"--hash=sha256:[a-fA-F0-9]{64}", flag) is None for flag in parts[1:]):
             return None
         line = parts[0]
@@ -593,42 +632,128 @@ def _load_pinned_requirements(
     return frozenset(dependencies.items())
 
 
+def _load_declared_requirements(
+    root: Path, requirements: Path,
+) -> dict[str, Requirement] | None:
+    """Read a bounded pip-compile input without URLs, includes, or markers."""
+    raw = _read_safe_project_bytes(root, requirements, max_bytes=_MAX_REQUIREMENTS_BYTES)
+    if raw is None:
+        return None
+    try:
+        lines = raw.decode("utf-8", errors="strict").splitlines()
+    except UnicodeError:
+        return None
+    declarations: dict[str, Requirement] = {}
+    for raw in lines:
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        try:
+            requirement = Requirement(line)
+        except InvalidRequirement:
+            return None
+        if requirement.url or requirement.marker:
+            return None
+        name = _canonical_package_name(requirement.name)
+        if name in declarations:
+            return None
+        declarations[name] = requirement
+    return declarations or None
+
+
 def _tool_only_pyproject(path: Path) -> bool:
     """Only known static-tool configuration is outside dependency declarations."""
+    raw = _read_safe_project_bytes(path.parent, path, max_bytes=_MAX_REQUIREMENTS_BYTES)
+    if raw is None:
+        return False
     try:
-        raw = path.read_bytes()
-        if len(raw) > _MAX_REQUIREMENTS_BYTES:
-            return False
         value = tomllib.loads(raw.decode("utf-8", errors="strict"))
-    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+    except (UnicodeError, tomllib.TOMLDecodeError):
         return False
     tools = value.get("tool")
     allowed = {"pytest", "ruff", "mypy", "black", "coverage", "isort", "bandit", "pyright", "pylint"}
     return set(value) == {"tool"} and isinstance(tools, dict) and bool(tools) and set(tools) <= allowed
 
 
+def _safe_python_manifest(root: Path, source: Path) -> bool:
+    """Bound nested inputs to ordinary files below the discovered checkout."""
+    try:
+        relative = source.relative_to(root)
+        if not relative.parts or not _is_within(source.resolve(strict=True), root):
+            return False
+        current = source.parent
+        while current != root:
+            if current.is_symlink() or (hasattr(current, "is_junction") and current.is_junction()):
+                return False
+            current = current.parent
+        return _is_safe_project_file(source.parent, source)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _python_manifest_fingerprint(root: Path, source: Path) -> str | None:
+    if not _safe_python_manifest(root, source):
+        return None
+    raw = _read_safe_project_bytes(source.parent, source, max_bytes=_MAX_REQUIREMENTS_BYTES)
+    return hashlib.sha256(raw).hexdigest() if raw is not None else None
+
+
+def _pinned_requirements_name(root: Path, source: Path) -> bool:
+    relative = source.relative_to(root)
+    return bool(
+        re.fullmatch(r"requirements(?:[-_.][A-Za-z0-9_.-]+)?\.(?:txt|lock)", source.name, re.IGNORECASE)
+        or (source.suffix.lower() in {".txt", ".lock"}
+            and any(part.lower() == "requirements" for part in relative.parts[:-1]))
+    )
+
+
 def _prepare_python_pins(root: Path, manifests: tuple[Path, ...], scratch: Path) -> tuple[frozenset[tuple[str, str]] | None, str | None]:
     """Snapshot and audit the union of declared pins; never install target code."""
     dependencies: dict[str, str] = {}
+    declared_inputs: dict[Path, dict[str, Requirement]] = {}
+    locks: dict[Path, dict[str, str]] = {}
     for index, source in enumerate(manifests):
-        if source.name != "pyproject.toml" and not re.fullmatch(r"requirements(?:[-.][A-Za-z0-9_.-]+)?\.txt", source.name):
+        if not _safe_python_manifest(root, source):
+            return None, "unsafe_pip_input"
+        is_input = source.suffix.lower() == ".in"
+        if source.name != "pyproject.toml" and not is_input and not _pinned_requirements_name(root, source):
             return None, "unsupported_pip_input"
         copied = scratch / f"source-{index}.txt"
-        if not _copy_safe_project_file(root, source, copied, max_bytes=_MAX_REQUIREMENTS_BYTES):
+        if not _copy_safe_project_file(source.parent, source, copied, max_bytes=_MAX_REQUIREMENTS_BYTES):
             return None, "unsafe_pip_input"
         if source.name == "pyproject.toml":
             if not _tool_only_pyproject(copied):
                 return None, "unsupported_pip_input"
             continue
-        parsed = _load_pinned_requirements(scratch, copied)
+        if is_input:
+            declared = _load_declared_requirements(scratch, copied)
+            if declared is None:
+                return None, "unsafe_pip_input"
+            declared_inputs[source] = declared
+            continue
+        parsed = _load_pinned_requirements(
+            scratch, copied, require_hashes=source.suffix.lower() == ".lock",
+        )
         if parsed is None:
             return None, "unsafe_pip_input"
+        if source.suffix.lower() == ".lock":
+            locks[source] = dict(parsed)
         for name, version in parsed:
             if name in dependencies and dependencies[name] != version:
                 return None, "unsupported_pip_input"
             dependencies[name] = version
+    for source, declared in declared_inputs.items():
+        lock = locks.get(source.with_suffix(".lock"))
+        if lock is None:
+            return None, "missing_lockfile"
+        for name, requirement in declared.items():
+            version = lock.get(name)
+            if version is None or not requirement.specifier.contains(Version(version), prereleases=True):
+                return None, "unsupported_pip_input"
     if not dependencies:
-        return None, "unsupported_pip_input"
+        # Only validated static tool configuration was discovered. There is
+        # no Python dependency graph and no package metadata to send outward.
+        return frozenset(), None
     (scratch / "requirements.txt").write_text(
         "".join(f"{name}=={version}\n" for name, version in sorted(dependencies.items())),
         encoding="utf-8",
@@ -658,7 +783,7 @@ def _manifest_ecosystems(path: Path, root: Path) -> tuple[AuditEcosystem, ...]:
         or _REQUIREMENTS_MANIFEST_RE.fullmatch(path.name) is not None
         or (path.name.startswith("pylock.") and len(path.name) > len("pylock."))
         or (
-            path.suffix.lower() in {".txt", ".in"}
+            path.suffix.lower() in {".txt", ".in", ".lock"}
             and any(part.lower() == "requirements" for part in relative.parts[:-1])
         )
     )
@@ -770,7 +895,7 @@ def _layout_outcome(
     paths = discovery.paths_for(ecosystem)
     if not paths:
         return DependencyAuditOutcome.not_applicable(ecosystem)
-    if any(path.parent != discovery.root for path in paths):
+    if ecosystem != "pip" and any(path.parent != discovery.root for path in paths):
         return DependencyAuditOutcome.indeterminate(
             ecosystem, "unsupported_project_layout"
         )
@@ -1600,21 +1725,38 @@ class DepAuditSuite(SecuritySuite):
             return _outcome_finding(outcome), outcome
         assert discovery.root is not None
         root = discovery.root
-        if _has_pip_routing_configuration(root):
+        pip_manifests = discovery.paths_for("pip")
+        if len(pip_manifests) > 32:
+            outcome = DependencyAuditOutcome.indeterminate("pip", "manifest_discovery_incomplete")
+            return _outcome_finding(outcome), outcome
+
+        routing_directories = {root}
+        for manifest in pip_manifests:
+            directory = manifest.parent
+            while directory != root:
+                routing_directories.add(directory)
+                directory = directory.parent
+        if any(_has_pip_routing_configuration(directory) for directory in routing_directories):
             outcome = DependencyAuditOutcome.indeterminate(
                 "pip", "unsupported_pip_input"
             )
             return _outcome_finding(outcome), outcome
-        pip_lockfiles = discovery.paths_for("pip")
-        pip_lock_rel: str | None = None
-        pip_lock_hash: str | None = None
-        if pip_lockfiles:
-            first_lock = pip_lockfiles[0]
-            pip_lock_rel = first_lock.relative_to(root).as_posix()
-            try:
-                pip_lock_hash = hashlib.sha256(first_lock.read_bytes()).hexdigest()
-            except (OSError, PermissionError):
-                pip_lock_hash = None
+
+        original_hashes = {
+            manifest: _python_manifest_fingerprint(root, manifest)
+            for manifest in pip_manifests
+        }
+        if any(value is None for value in original_hashes.values()):
+            outcome = DependencyAuditOutcome.indeterminate("pip", "unsafe_pip_input")
+            return _outcome_finding(outcome), outcome
+
+        receipt_source = next(
+            (manifest for manifest in pip_manifests
+             if _pinned_requirements_name(root, manifest)),
+            None,
+        )
+        pip_lock_rel = receipt_source.relative_to(root).as_posix() if receipt_source else None
+        pip_lock_hash = original_hashes[receipt_source] if receipt_source else None
 
         try:
             with _PrivateScratch(prefix="omargate-pip-audit-") as audit_scratch:
@@ -1627,7 +1769,7 @@ class DepAuditSuite(SecuritySuite):
                     )
                 else:
                     expected_dependencies, input_error = _prepare_python_pins(
-                        project_root, pip_lockfiles, audit_cwd,
+                        project_root, pip_manifests, audit_cwd,
                     )
                     audit_requirements = audit_cwd / "requirements.txt"
                     if expected_dependencies is None:
@@ -1635,13 +1777,18 @@ class DepAuditSuite(SecuritySuite):
                             "pip", input_error or "unsafe_pip_input",
                             lockfile_path=pip_lock_rel, lockfile_sha256=pip_lock_hash,
                         )
-                    elif pip_lock_hash is not None and hashlib.sha256(
-                        (audit_cwd / "source-0.txt").read_bytes()
-                    ).hexdigest() != pip_lock_hash:
+                    elif any(
+                        hashlib.sha256((audit_cwd / f"source-{index}.txt").read_bytes()).hexdigest()
+                        != original_hashes[manifest]
+                        or _python_manifest_fingerprint(root, manifest) != original_hashes[manifest]
+                        for index, manifest in enumerate(pip_manifests)
+                    ):
                         outcome = DependencyAuditOutcome.indeterminate(
                             "pip", "audit_input_changed",
                             lockfile_path=pip_lock_rel, lockfile_sha256=pip_lock_hash,
                         )
+                    elif not expected_dependencies:
+                        outcome = DependencyAuditOutcome.not_applicable("pip")
                     else:
                         command = [
                             "pip-audit",
@@ -1673,8 +1820,16 @@ class DepAuditSuite(SecuritySuite):
             raise
         except (OSError, RuntimeError):
             outcome = DependencyAuditOutcome.indeterminate("pip", "execution_error")
+        after = _discover_manifests(root)
+        if not after.complete or after.pip != pip_manifests:
+            outcome = DependencyAuditOutcome.indeterminate("pip", "manifest_discovery_incomplete")
+        elif any(
+            _python_manifest_fingerprint(root, manifest) != original_hashes[manifest]
+            for manifest in pip_manifests
+        ):
+            outcome = DependencyAuditOutcome.indeterminate("pip", "audit_input_changed")
         # Attach per-file receipt to audit outcomes that don't already have one
-        if outcome is not None and outcome.lockfile_path is None and pip_lock_rel is not None:
+        if outcome.applicable and outcome.lockfile_path is None and pip_lock_rel is not None:
             outcome = outcome.__class__(
                 outcome.ecosystem, outcome.applicable, outcome.state,
                 outcome.vulnerability_count, outcome.reason_code,

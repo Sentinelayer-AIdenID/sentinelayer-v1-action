@@ -70,3 +70,68 @@ def test_entropy_skips_identifier_assignment_pairs() -> None:
     content = "excerpt = _truncate_to_tokens(excerpt, max_tokens=_MAX_TOKENS)\n"
     findings = scan_for_secrets(content, "src/omargate/ingest/quick_learn.py")
     assert not any(f.pattern_id == "SEC-ENTROPY" for f in findings)
+
+
+def test_entropy_skips_numeric_function_argument_in_key_generation() -> None:
+    content = (
+        "private_key = rsa.generate_private_key("
+        "public_exponent=65537, key_size=2048)\n"
+    )
+    findings = scan_for_secrets(content, "apps/api/app/services/okta_security_events.py")
+    assert not any(f.pattern_id == "SEC-ENTROPY" for f in findings)
+
+
+def test_entropy_skips_jsx_attribute_name_before_expression() -> None:
+    content = (
+        "<AuthFlowReliabilityPanel\n"
+        "  runPasswordResetReliabilityAction={runPasswordResetReliabilityAction}\n"
+        "/>\n"
+    )
+    findings = scan_for_secrets(content, "apps/web/app/dashboard/page.tsx")
+    assert not any(f.pattern_id == "SEC-ENTROPY" for f in findings)
+
+
+def test_entropy_keeps_mixed_case_secret_values_with_base64_padding() -> None:
+    candidate = "Z9xQ1pLmN8vR2tYkS3wX=="
+    findings = scan_for_secrets(f'const apiKey = "{candidate}";\n', "config.ts")
+    assert any(
+        finding.pattern_id == "SEC-ENTROPY" and finding.severity == "P1"
+        for finding in findings
+    )
+
+
+def test_entropy_keeps_unquoted_mixed_case_secret_assignment() -> None:
+    candidate = "Z9xQ1pLmN8vR2tYkS3wX"
+    findings = scan_for_secrets(f"API_TOKEN={candidate}\n", ".env.example")
+    assert any(
+        finding.pattern_id == "SEC-ENTROPY" and finding.severity == "P1"
+        for finding in findings
+    )
+
+
+def test_entropy_scans_rhs_without_flagging_long_assignment_name() -> None:
+    candidate = "Z9xQ1pLmN8vR2tYkS3wX"
+    content = f"veryLongApiTokenName={candidate}\n"
+    findings = [
+        finding
+        for finding in scan_for_secrets(content, ".env.example")
+        if finding.pattern_id == "SEC-ENTROPY"
+    ]
+    assert len(findings) == 1
+    assert findings[0].severity == "P1"
+
+
+def test_entropy_skips_long_code_identifier_with_numeric_rhs() -> None:
+    content = "private_key = create(runPasswordResetReliabilityAction=65537)\n"
+    findings = scan_for_secrets(content, "config.ts")
+    assert not any(finding.pattern_id == "SEC-ENTROPY" for finding in findings)
+
+
+def test_entropy_keeps_literal_credential_inside_jsx_attribute() -> None:
+    candidate = "Z9xQ1pLmN8vR2tYkS3wX=="
+    content = f'<ConfigPanel token="{candidate}" />\n'
+    findings = scan_for_secrets(content, "config.tsx")
+    assert any(
+        finding.pattern_id == "SEC-ENTROPY" and finding.severity == "P1"
+        for finding in findings
+    )
