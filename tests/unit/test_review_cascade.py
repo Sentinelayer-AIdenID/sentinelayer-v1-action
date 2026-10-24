@@ -1,5 +1,6 @@
 from policy_fixture import FAKE_POLICY_JSON, FAKE_POLICY
 
+import hashlib
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -19,6 +20,7 @@ from omargate.config import OmarGateConfig
 from omargate.comment import _review_chain_section
 from omargate.logging import OmarLogger
 from omargate.analyze.typesafe_review import TypedReview, review_inventory as real_review_inventory
+from omargate.harness.suites.dep_audit import DependencyAuditEvidence, DependencyAuditOutcome
 
 pytestmark = pytest.mark.anyio
 
@@ -298,6 +300,182 @@ async def test_real_orchestrator_low_route_requires_generator_and_writes_separat
     sent = rate.call_args_list[0].kwargs["state"]
     assert sent["diff_head_lines_verified"] is True
     assert sent["candidate_context"][sent["candidates"][0]["candidate_id"]]["diff_hunks"]
+
+
+async def test_cascade_accepts_complete_patch_with_audited_npm_lock(configured, monkeypatch):
+    lockfile = configured.repo_root / "package-lock.json"
+    lockfile.write_text('{"lockfileVersion": 3, "marker": "audited-lock-only"}\n')
+    evidence = DependencyAuditEvidence(
+        outcomes=(DependencyAuditOutcome.clean("npm"),
+                  DependencyAuditOutcome.not_applicable("pip"),
+                  DependencyAuditOutcome.not_applicable("cargo")),
+        npm_projects=({
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": hashlib.sha256(lockfile.read_bytes()).hexdigest(),
+            "input_unchanged": True,
+            "outcome": DependencyAuditOutcome.clean("npm").to_dict(),
+        },),
+    ).to_dict()
+    rate = AsyncMock(return_value=triage())
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", rate)
+    configured._run_llm_analysis = AsyncMock(return_value=generator_result(LOW))
+    result = await configured._run_cascade_analysis(
+        ingest={"files": [{"path": "x.py"}]},
+        changed_files=["x.py", "package-lock.json"], scan_mode="pr-diff",
+        deterministic_findings=[], quick_learn=None, spec_context=None, run_dir=None,
+        dep_audit_evidence=evidence,
+        diff_content=(
+            "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+            "@@ -0,0 +1 @@\n+value = 1\n"
+            "diff --git a/package-lock.json b/package-lock.json\n"
+            "--- a/package-lock.json\n+++ b/package-lock.json\n"
+            "@@ -1 +1 @@\n"
+            '-{"lockfileVersion": 2}\n'
+            '+{"lockfileVersion": 3, "marker": "audited-lock-only"}\n'
+        ),
+    )
+    assert result.success, result.usage.get("policy_assessment")
+    rate.assert_awaited()
+    state = rate.call_args.kwargs["state"]
+    assert {row["file_path"] for row in state["candidates"]} == {"x.py"}
+    assert "audited-lock-only" not in json.dumps(state)
+
+
+@pytest.mark.parametrize("pad", [0, 110_000], ids=["ordinary", "over-100kb"])
+async def test_real_cascade_withholds_audited_lock_from_every_model(
+    configured, monkeypatch, generator_transport, pad,
+):
+    lockfile = configured.repo_root / "package-lock.json"
+    marker = "audited-lock-payload-stays-local"
+    lock = '{"lockfileVersion":3,"marker":"' + marker + '"' + ',"pad":"' + "Z" * pad + '"}\n'
+    lockfile.write_text(lock, encoding="utf-8")
+    evidence = DependencyAuditEvidence(
+        outcomes=(DependencyAuditOutcome.clean("npm"),
+                  DependencyAuditOutcome.not_applicable("pip"),
+                  DependencyAuditOutcome.not_applicable("cargo")),
+        npm_projects=({
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": hashlib.sha256(lockfile.read_bytes()).hexdigest(),
+            "input_unchanged": True,
+            "outcome": DependencyAuditOutcome.clean("npm").to_dict(),
+        },),
+    ).to_dict()
+    observed_states = []
+
+    async def rate(self, *, state, questions, model):
+        observed_states.append(json.dumps(state))
+        assert marker not in observed_states[-1]
+        return triage()
+
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", rate)
+    result = await configured._run_cascade_analysis(
+        ingest={"files": [{"path": "x.py"}, {"path": "package-lock.json"}]},
+        changed_files=["x.py", "package-lock.json"], scan_mode="pr-diff",
+        deterministic_findings=[], quick_learn=None, spec_context=None, run_dir=None,
+        dep_audit_evidence=evidence,
+        diff_content=(
+            "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+            "@@ -0,0 +1 @@\n+value = 1\n"
+            "diff --git a/package-lock.json b/package-lock.json\n"
+            "--- a/package-lock.json\n+++ b/package-lock.json\n"
+            "@@ -1 +1 @@\n-{}\n+" + lock
+        ),
+    )
+    assert result.success, result.failure_class
+    assert observed_states
+    assert generator_transport.await_count >= 1
+    assert all(marker not in call.kwargs["input"] for call in generator_transport.call_args_list)
+    assert "## File: x.py" in generator_transport.call_args.kwargs["input"]
+
+
+async def test_real_cascade_audit_only_never_calls_a_model(
+    configured, monkeypatch, generator_transport,
+):
+    lockfile = configured.repo_root / "package-lock.json"
+    lock = '{"lockfileVersion":3,"marker":"audit-only-private"}\n'
+    lockfile.write_text(lock, encoding="utf-8")
+    evidence = DependencyAuditEvidence(
+        outcomes=(DependencyAuditOutcome.clean("npm"),
+                  DependencyAuditOutcome.not_applicable("pip"),
+                  DependencyAuditOutcome.not_applicable("cargo")),
+        npm_projects=({
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": hashlib.sha256(lockfile.read_bytes()).hexdigest(),
+            "input_unchanged": True,
+            "outcome": DependencyAuditOutcome.clean("npm").to_dict(),
+        },),
+    ).to_dict()
+    rate = AsyncMock(side_effect=AssertionError("no model candidates exist"))
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", rate)
+    run_dir = configured.repo_root / "evidence"
+    result = await configured._run_cascade_analysis(
+        ingest={"files": [{"path": "package-lock.json"}]},
+        changed_files=["package-lock.json"], scan_mode="pr-diff",
+        deterministic_findings=[], quick_learn=None, spec_context=None, run_dir=run_dir,
+        dep_audit_evidence=evidence,
+        diff_content=(
+            "diff --git a/package-lock.json b/package-lock.json\n"
+            "--- a/package-lock.json\n+++ b/package-lock.json\n"
+            "@@ -1 +1 @@\n-{}\n+" + lock
+        ),
+    )
+    rate.assert_not_awaited()
+    generator_transport.assert_not_awaited()
+    assert not result.attempted
+    assert not result.success
+    assert result.failure_class == "cascade_audit_only_no_llm"
+    assert result.usage["review_routing"]["excluded_source_hashes"] == {
+        "package-lock.json": hashlib.sha256(lockfile.read_bytes()).hexdigest(),
+    }
+    receipt = json.loads((run_dir / "REVIEW_ROUTING.json").read_text(encoding="utf-8"))
+    assert receipt["routing"]["excluded_source_hashes"] == result.usage["review_routing"]["excluded_source_hashes"]
+    assert receipt["costs"]["calls"] == []
+
+
+async def test_real_source_policy_model_does_not_receive_audited_lock(
+    configured, monkeypatch, generator_transport,
+):
+    lockfile = configured.repo_root / "package-lock.json"
+    marker = "private-policy-model-lock-payload"
+    lockfile.write_text('{"marker":"' + marker + '"}\n', encoding="utf-8")
+    evidence = DependencyAuditEvidence(
+        outcomes=(DependencyAuditOutcome.clean("npm"),
+                  DependencyAuditOutcome.not_applicable("pip"),
+                  DependencyAuditOutcome.not_applicable("cargo")),
+        npm_projects=({
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": hashlib.sha256(lockfile.read_bytes()).hexdigest(),
+            "input_unchanged": True,
+            "outcome": DependencyAuditOutcome.clean("npm").to_dict(),
+        },),
+    ).to_dict()
+    observed_states = []
+
+    async def rate(self, *, state, questions, model):
+        observed_states.append(json.dumps(state))
+        assert marker not in observed_states[-1]
+        if "risk" in questions:
+            return triage()
+        raise RuntimeError("simulated policy transport failure after inspecting request")
+
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", rate)
+    monkeypatch.setattr("omargate.analyze.orchestrator.review_inventory", real_review_inventory)
+    await configured._run_cascade_analysis(
+        ingest={"files": [{"path": "x.py"}, {"path": "package-lock.json"}]},
+        changed_files=["x.py", "package-lock.json"], scan_mode="pr-diff",
+        deterministic_findings=[], quick_learn=None, spec_context=None, run_dir=None,
+        dep_audit_evidence=evidence,
+        diff_content=(
+            "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+            "@@ -0,0 +1 @@\n+value = 1\n"
+            "diff --git a/package-lock.json b/package-lock.json\n"
+            "--- a/package-lock.json\n+++ b/package-lock.json\n"
+            "@@ -1 +1 @@\n-{}\n+" + lockfile.read_text(encoding="utf-8")
+        ),
+    )
+    assert len(observed_states) == 2
+    assert generator_transport.await_count >= 1
+    assert all(marker not in call.kwargs["input"] for call in generator_transport.call_args_list)
 
 
 async def test_low_defect_escalates_and_later_clean_cannot_erase(configured, monkeypatch):

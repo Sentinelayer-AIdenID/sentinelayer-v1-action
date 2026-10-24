@@ -334,8 +334,6 @@ class ContextBuilder:
 
         if scan_mode == "pr-diff" and changed_files:
             for rel_path in changed_files:
-                if rel_path not in ingest_paths:
-                    continue
                 if rel_path not in priority:
                     priority.append(rel_path)
 

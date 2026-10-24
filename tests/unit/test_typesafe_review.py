@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-from omargate.intent_identity import intent_model_reference
-
-from dataclasses import replace
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from omargate.analyze.typesafe_client import ChoiceAnswer, TypeSafeResult
-from omargate.analyze.typesafe_state import build_typed_context
 from omargate.analyze.typesafe_review import (
     RatedFinding,
     ReviewDecision,
@@ -21,8 +18,10 @@ from omargate.analyze.typesafe_review import (
     review_inventory,
     verify_sources,
 )
+from omargate.analyze.typesafe_state import build_typed_context
+from omargate.harness.suites.dep_audit import DependencyAuditOutcome
+from omargate.intent_identity import intent_model_reference
 from omargate.redaction import sanitize_public_error
-
 
 MODEL = "model-under-test-1.13.0"
 
@@ -126,8 +125,8 @@ def test_inventory_covers_complete_files_in_stable_forty_line_spans(tmp_path: Pa
     )
 
 
-@pytest.mark.parametrize("kind", ["deleted", "binary", "invalid-utf8", "oversize", "unknown"])
-def test_inventory_refuses_unreadable_or_unrepresented_source(tmp_path: Path, kind: str):
+@pytest.mark.parametrize("kind", ["deleted", "binary", "invalid-utf8", "oversize"])
+def test_inventory_refuses_unreadable_or_unsupported_source(tmp_path: Path, kind: str):
     path = tmp_path / "source.py"
     if kind == "binary":
         path.write_bytes(b"first\x00second")
@@ -135,11 +134,9 @@ def test_inventory_refuses_unreadable_or_unrepresented_source(tmp_path: Path, ki
         path.write_bytes(b"\xff\xfe")
     elif kind == "oversize":
         path.write_bytes(b"x" * 1_000_001)
-    elif kind == "unknown":
-        path.write_bytes(b"present but absent from ingest\n")
-    known = [] if kind == "unknown" else [{"path": "source.py"}]
+    ingest_files = [{"path": "source.py"}]
     with pytest.raises(TypeSafeReviewIncomplete):
-        build_inventory(repo_root=tmp_path, ingest={"files": known}, changed_files=["source.py"],
+        build_inventory(repo_root=tmp_path, ingest={"files": ingest_files}, changed_files=["source.py"],
                         scan_mode="pr-diff", max_candidates=50)
 
 
@@ -680,3 +677,675 @@ async def test_policy_prose_reuses_existing_redactor_with_bound_source_and_verdi
     assert finding["snippet"] == candidate.evidence
     assert finding["model_source"] == intent_model_reference(MODEL)
     assert result.assessment["source_hashes"] == dict(inventory.source_hashes)
+
+# --- Tests added for fix: lockfile exclusion via dep_audit receipts (ticket 78efd938) ---
+
+def test_lockfile_excluded_with_dep_audit_coverage(tmp_path: Path):
+    """When dep_audit_evidence confirms coverage for a lockfile, it goes to
+    policy_excluded rather than the candidate list. The file is recognized
+    but not reviewed by the LLM — the dependency audit already covers it."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("answer = 42\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "package-lock.json"]
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": "b5c2a1d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+            "input_unchanged": True,
+            "outcome": {"ecosystem": "npm", "applicable": True, "state": "clean"},
+        }]},
+    }
+
+    # Patch _npm_lockfile_receipt to use our known hash for the test
+    import hashlib
+    real_hash = hashlib.sha256((tmp_path / "package-lock.json").read_bytes()).hexdigest()
+    dep_audit_evidence["npm_projects"]["audits"][0]["lockfile_sha256"] = real_hash
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "src/main.py" in paths
+    assert "package-lock.json" not in paths, "lockfile with dep_audit coverage must be excluded"
+    assert inventory.policy_excluded == (("package-lock.json", "dep_audit_coverage"),)
+
+
+@pytest.mark.parametrize("change", ["replace", "delete"])
+def test_excluded_lockfile_stays_byte_bound_after_inventory(tmp_path: Path, change: str):
+    (tmp_path / "source.py").write_text("answer = 2\n", encoding="utf-8")
+    lockfile = tmp_path / "package-lock.json"
+    lockfile.write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+    evidence = {
+        "enabled": True, "complete": True,
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": hashlib.sha256(lockfile.read_bytes()).hexdigest(),
+            "input_unchanged": True,
+            "outcome": {"ecosystem": "npm", "applicable": True, "state": "clean"},
+        }]},
+    }
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest={"files": [{"path": "source.py"}]},
+        changed_files=["source.py", "package-lock.json"],
+        scan_mode="pr-diff", max_candidates=50, dep_audit_evidence=evidence,
+    )
+    verify_sources(tmp_path, inventory)
+    if change == "replace":
+        lockfile.write_text('{"lockfileVersion": 4}\n', encoding="utf-8")
+    else:
+        lockfile.unlink()
+    with pytest.raises(TypeSafeReviewIncomplete):
+        verify_sources(tmp_path, inventory)
+
+
+def test_receipt_backed_large_npm_lock_is_excluded_and_byte_bound(tmp_path: Path):
+    lockfile = tmp_path / "package-lock.json"
+    lockfile.write_text('{"lockfileVersion":3,"pad":"' + "x" * 1_200_000 + '"}\n', encoding="utf-8")
+    evidence = {
+        "enabled": True, "complete": True,
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": hashlib.sha256(lockfile.read_bytes()).hexdigest(),
+            "input_unchanged": True,
+            "outcome": {"ecosystem": "npm", "applicable": True, "state": "clean"},
+        }]},
+    }
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest={"files": []}, changed_files=["package-lock.json"],
+        scan_mode="pr-diff", max_candidates=50, dep_audit_evidence=evidence,
+    )
+    assert inventory.candidates == ()
+    assert inventory.policy_excluded == (("package-lock.json", "dep_audit_coverage"),)
+    verify_sources(tmp_path, inventory)
+    context = build_typed_context(
+        repo_root=tmp_path, inventory=inventory, ingest={"files": []},
+        deterministic_findings=[],
+        diff_content=(
+            "diff --git a/package-lock.json b/package-lock.json\n"
+            "--- a/package-lock.json\n+++ b/package-lock.json\n"
+            "@@ -1 +1 @@\n-{}\n+" + lockfile.read_text(encoding="utf-8")
+        ),
+    )
+    assert context["candidate_context"] == {}
+    assert context["diff_head_lines_verified"] is True
+    lockfile.write_text('{"lockfileVersion":3,"pad":"' + "y" * 1_200_000 + '"}\n', encoding="utf-8")
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_changed_during_review"):
+        verify_sources(tmp_path, inventory)
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_budget_exceeded"):
+        build_inventory(
+            repo_root=tmp_path, ingest={"files": []}, changed_files=["package-lock.json"],
+            scan_mode="pr-diff", max_candidates=50,
+        )
+
+
+def test_lockfile_stays_candidate_without_dep_audit(tmp_path: Path):
+    """Without dep_audit_evidence, a lockfile stays as an ordinary candidate.
+    This is the fail-safe: no evidence means no exclusion."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("answer = 42\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "package-lock.json"]
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "package-lock.json" in paths, "lockfile without dep_audit must be a candidate"
+    assert "src/main.py" in paths
+    assert inventory.policy_excluded == ()
+
+
+def test_src_and_tests_reviewed_lockfile_excluded(tmp_path: Path):
+    """Regression for the ticket scenario: source and test files are reviewed,
+    lockfile is visibly excluded via dep_audit_coverage. Verifies the src +
+    tests + lockfile routing case and confirms policy_excluded is populated."""
+    import hashlib
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_main.py").write_text("def test_x(): assert True\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+
+    real_hash = hashlib.sha256((tmp_path / "package-lock.json").read_bytes()).hexdigest()
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "tests/test_main.py", "package-lock.json"]
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": real_hash,
+            "input_unchanged": True,
+            "outcome": {"ecosystem": "npm", "applicable": True, "state": "clean"},
+        }]},
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "src/main.py" in paths
+    assert "tests/test_main.py" in paths
+    assert "package-lock.json" not in paths, "audited lockfile must be excluded from candidates"
+    assert inventory.policy_excluded == (("package-lock.json", "dep_audit_coverage"),)
+
+
+def test_lockfile_without_applicable_audit_stays_candidate(tmp_path: Path):
+    """A dep_audit outcome marked not-applicable means the audit did not run
+    for that ecosystem; the lockfile must stay as a review candidate."""
+    (tmp_path / "Cargo.lock").write_text("# Cargo.lock\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text("fn main() {}\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/lib.rs"}]}
+    changed = ["src/lib.rs", "Cargo.lock"]
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "cargo", "applicable": False}],
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "Cargo.lock" in paths, "not-applicable audit must not exclude lockfile"
+    assert inventory.policy_excluded == ()
+
+
+def test_pylock_py_not_excluded(tmp_path: Path):
+    """src/pylock.py is ordinary source, not a lockfile. The prefix guard
+    requires len(name) > 8 for 'pylock.', so 'pylock.py' (8 chars) does
+    not match — it stays as a normal candidate."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "pylock.py").write_text("LOCK_VERSION = 1\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/pylock.py"}]}
+    changed = ["src/pylock.py"]
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "src/pylock.py" in paths
+    assert inventory.policy_excluded == ()
+
+
+def test_non_utf8_lockfile_refuses_before_exclusion(tmp_path: Path):
+    """A lockfile containing invalid UTF-8 (but no NUL byte) must raise
+    unsupported_source_encoding, not silently record it as policy-excluded,
+    even when dep_audit_evidence would otherwise cover it."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_bytes(b'{"valid": "json", "bad": "\xff"}')
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "package-lock.json"]
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+    }
+
+    with pytest.raises(TypeSafeReviewIncomplete, match="unsupported_source_encoding"):
+        build_inventory(
+            repo_root=tmp_path, ingest=ingest, changed_files=changed,
+            scan_mode="pr-diff", max_candidates=50,
+            dep_audit_evidence=dep_audit_evidence,
+        )
+
+
+@pytest.mark.anyio
+async def test_assessment_includes_policy_excluded_with_lockfile(tmp_path: Path):
+    """The assessment output includes policy_excluded entries with path and
+    reason so REVIEW_ROUTING.json can show 'covered by dependency audit'."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("answer = 42\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "package-lock.json"]
+    import hashlib
+    real_hash = hashlib.sha256((tmp_path / "package-lock.json").read_bytes()).hexdigest()
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": real_hash,
+            "input_unchanged": True,
+            "outcome": {"ecosystem": "npm", "applicable": True, "state": "clean"},
+        }]},
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    result = await review(tmp_path, inventory)
+    assert "policy_excluded" in result.assessment
+    assert len(result.assessment["policy_excluded"]) == 1
+    assert result.assessment["policy_excluded"][0] == {
+        "path": "package-lock.json", "reason": "dep_audit_coverage",
+    }
+    assert result.assessment["excluded_source_hashes"] == {"package-lock.json": real_hash}
+
+
+
+def test_pylock_pyi_stays_candidate_not_excluded_as_lockfile(tmp_path: Path):
+    """pylock.pyi is a Python stub file, not a lockfile. The pylock. prefix
+    guard must exclude .pyi as well as .py to keep stubs in the review."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "pylock.pyi").write_text("LOCK_VERSION: int = 1\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/pylock.pyi"}]}
+    changed = ["src/pylock.pyi"]
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "pip", "applicable": True, "state": "clean"}],
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "src/pylock.pyi" in paths
+    assert inventory.policy_excluded == ()
+
+
+def test_minified_file_included_as_text_when_utf8_valid_and_no_nul(tmp_path: Path):
+    """Generated/minified text files (e.g. .min.js) are valid UTF-8 source.
+    They must be included in the review inventory, not silently excluded.
+    Only lockfiles with verified dep_audit coverage are excluded."""
+    (tmp_path / "bundle.min.js").write_text("var x=1;var y=2;\n", encoding="utf-8")
+
+    ingest: dict = {"files": []}
+    changed = ["bundle.min.js"]
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "bundle.min.js" in paths, "minified text files must be review candidates"
+    assert inventory.policy_excluded == ()
+
+
+def test_nested_uncovered_lockfile_stays_candidate(tmp_path: Path):
+    """P1 regression: a nested package-lock.json not in npm_projects audits
+    must stay as a review candidate.  Only lockfiles with an exact path+sha256
+    match in the audit evidence are excluded."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "subproject").mkdir()
+    (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 2}\n', encoding="utf-8")
+    (tmp_path / "subproject" / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+
+    import hashlib
+    root_hash = hashlib.sha256((tmp_path / "package-lock.json").read_bytes()).hexdigest()
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "package-lock.json", "subproject/package-lock.json"]
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": root_hash,
+            "input_unchanged": True,
+            "outcome": {"ecosystem": "npm", "applicable": True, "state": "clean"},
+        }]},
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "src/main.py" in paths
+    assert "subproject/package-lock.json" in paths, "nested lockfile not in audit must stay candidate"
+    assert "package-lock.json" not in paths, "root lockfile with audit receipt must be excluded"
+    assert inventory.policy_excluded == (("package-lock.json", "dep_audit_coverage"),)
+
+
+def test_pnpm_yarn_poetry_lockfiles_stay_candidates(tmp_path: Path):
+    """pnpm-lock.yaml, yarn.lock, Pipfile.lock, poetry.lock, uv.lock, and
+    pdm.lock are not audited by dep_audit.py as lockfiles.  They must stay
+    as ordinary review candidates."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    for name in ("pnpm-lock.yaml", "yarn.lock", "Pipfile.lock", "poetry.lock", "uv.lock", "pdm.lock"):
+        (tmp_path / name).write_text("# lockfile\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/app.py"}]}
+    changed = ["src/app.py", "pnpm-lock.yaml", "yarn.lock", "Pipfile.lock", "poetry.lock", "uv.lock", "pdm.lock"]
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [
+            {"ecosystem": "npm", "applicable": True, "state": "clean"},
+            {"ecosystem": "pip", "applicable": True, "state": "clean"},
+            {"ecosystem": "cargo", "applicable": True, "state": "clean"},
+        ],
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    for name in ("pnpm-lock.yaml", "yarn.lock", "Pipfile.lock", "poetry.lock", "uv.lock", "pdm.lock"):
+        assert name in paths, f"{name} is not audited by dep_audit.py — must stay as candidate"
+    assert inventory.policy_excluded == ()
+
+
+def test_wrong_lockfile_hash_not_excluded(tmp_path: Path):
+    """A lockfile whose sha256 does not match any npm_projects entry
+    must stay as a review candidate, even if the path matches."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 4}\n', encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/main.py"}]}
+    changed = ["src/main.py", "package-lock.json"]
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "input_unchanged": True,
+            "outcome": {"ecosystem": "npm", "applicable": True, "state": "clean"},
+        }]},
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "package-lock.json" in paths, "mismatched hash must not exclude lockfile"
+    assert inventory.policy_excluded == ()
+
+
+@pytest.mark.parametrize("variant", [
+    "audit_disabled_string", "audit_complete_string", "input_changed",
+    "wrong_ecosystem", "not_applicable",
+])
+def test_npm_exclusion_requires_typed_unchanged_audit_receipt(tmp_path: Path, variant: str):
+    lockfile = tmp_path / "package-lock.json"
+    lockfile.write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+    audit = {
+        "lockfile_path": "package-lock.json",
+        "lockfile_sha256": hashlib.sha256(lockfile.read_bytes()).hexdigest(),
+        "input_unchanged": True,
+        "outcome": {"ecosystem": "npm", "applicable": True, "state": "clean"},
+    }
+    evidence = {"enabled": True, "complete": True, "npm_projects": {"audits": [audit]}}
+    if variant == "audit_disabled_string":
+        evidence["enabled"] = "false"
+    elif variant == "audit_complete_string":
+        evidence["complete"] = "false"
+    elif variant == "input_changed":
+        audit["input_unchanged"] = False
+    elif variant == "wrong_ecosystem":
+        audit["outcome"]["ecosystem"] = "pip"
+    else:
+        audit["outcome"]["applicable"] = False
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest={"files": []}, changed_files=["package-lock.json"],
+        scan_mode="pr-diff", max_candidates=50, dep_audit_evidence=evidence,
+    )
+    assert {candidate.file_path for candidate in inventory.candidates} == {"package-lock.json"}
+    assert inventory.policy_excluded == ()
+
+
+def test_audit_disabled_keeps_lockfile_as_candidate(tmp_path: Path):
+    """When dep_audit is disabled, lockfiles must stay as review candidates
+    even if outcomes exist."""
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+
+    ingest: dict = {"files": []}
+    changed = ["package-lock.json"]
+    dep_audit_evidence = {
+        "enabled": False,
+        "complete": True,
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "package-lock.json" in paths, "disabled audit must not exclude lockfile"
+    assert inventory.policy_excluded == ()
+
+
+def test_audit_incomplete_keeps_lockfile_as_candidate(tmp_path: Path):
+    """When dep_audit is not complete, lockfiles must stay as review candidates."""
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+
+    ingest: dict = {"files": []}
+    changed = ["package-lock.json"]
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": False,
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "package-lock.json" in paths, "incomplete audit must not exclude lockfile"
+    assert inventory.policy_excluded == ()
+
+
+def test_cargo_lockfile_without_per_file_receipt_stays_candidate(tmp_path: Path):
+    """An ecosystem outcome alone never proves coverage of a particular file."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text("fn main() {}\n", encoding="utf-8")
+    (tmp_path / "Cargo.lock").write_text("# Cargo.lock\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/lib.rs"}]}
+    changed = ["src/lib.rs", "Cargo.lock"]
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "cargo", "applicable": True, "state": "clean"}],
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "src/lib.rs" in paths
+    assert "Cargo.lock" in paths
+    assert inventory.policy_excluded == ()
+
+
+@pytest.mark.parametrize("ecosystem,relative,content", [
+    ("cargo", "Cargo.lock", "# Cargo.lock\n"),
+    ("pip", "pylock.toml", "[lock]\n"),
+])
+def test_cargo_pip_lock_receipt_excludes_only_exact_bound_file(
+    tmp_path: Path, ecosystem: str, relative: str, content: str,
+) -> None:
+    lock = tmp_path / relative
+    lock.write_text(content, encoding="utf-8")
+    receipt = DependencyAuditOutcome.clean(
+        ecosystem, lockfile_path=relative,
+        lockfile_sha256=hashlib.sha256(lock.read_bytes()).hexdigest(),
+    ).to_dict()
+    evidence = {"enabled": True, "complete": True, "outcomes": [receipt]}
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest={"files": []}, changed_files=[relative],
+        scan_mode="pr-diff", max_candidates=50, dep_audit_evidence=evidence,
+    )
+    assert inventory.candidates == ()
+    assert inventory.policy_excluded == ((relative, "dep_audit_coverage"),)
+    assert inventory.excluded_source_hashes == ((relative, receipt["lockfile_sha256"]),)
+    verify_sources(tmp_path, inventory)
+
+    lock.write_text(content + "changed\n", encoding="utf-8")
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_changed_during_review"):
+        verify_sources(tmp_path, inventory)
+
+
+@pytest.mark.parametrize("ecosystem,relative", [
+    ("cargo", "Cargo.lock"), ("pip", "pylock.toml"),
+])
+def test_cargo_pip_lock_receipt_with_wrong_hash_stays_candidate(
+    tmp_path: Path, ecosystem: str, relative: str,
+) -> None:
+    (tmp_path / relative).write_text("safe\n", encoding="utf-8")
+    evidence = {"enabled": True, "complete": True, "outcomes": [
+        DependencyAuditOutcome.clean(
+            ecosystem, lockfile_path=relative, lockfile_sha256="0" * 64,
+        ).to_dict(),
+    ]}
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest={"files": []}, changed_files=[relative],
+        scan_mode="pr-diff", max_candidates=50, dep_audit_evidence=evidence,
+    )
+    assert {candidate.file_path for candidate in inventory.candidates} == {relative}
+    assert inventory.policy_excluded == ()
+
+
+def test_nested_cargo_lockfile_stays_candidate(tmp_path: Path):
+    """A clean root cargo audit cannot cover an unaudited nested lockfile."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "subproject").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text("fn main() {}\n", encoding="utf-8")
+    (tmp_path / "Cargo.lock").write_text("# root Cargo.lock\n", encoding="utf-8")
+    (tmp_path / "subproject" / "Cargo.lock").write_text("# nested Cargo.lock\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/lib.rs"}]}
+    changed = ["src/lib.rs", "Cargo.lock", "subproject/Cargo.lock"]
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "cargo", "applicable": True, "state": "clean"}],
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "src/lib.rs" in paths
+    assert "Cargo.lock" in paths
+    assert "subproject/Cargo.lock" in paths
+    assert inventory.policy_excluded == ()
+
+
+def test_pylock_without_per_file_receipt_stays_candidate(tmp_path: Path):
+    """A requirements audit does not prove pylock.toml was audited."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "pylock.toml").write_text("[lock]\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/app.py"}]}
+    changed = ["src/app.py", "pylock.toml"]
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "pip", "applicable": True, "state": "clean"}],
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "src/app.py" in paths
+    assert "pylock.toml" in paths
+    assert inventory.policy_excluded == ()
+
+
+def test_pylock_missing_file_not_excluded(tmp_path: Path):
+    """A pylock.json in changed_files that does not exist on disk must not be
+    excluded — the file-existence check returns None, keeping it in inventory."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    # Do NOT create pylock.json — it is a deleted or renamed file
+
+    ingest = {"files": [{"path": "src/app.py"}]}
+    changed = ["src/app.py", "pylock.json"]
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "pip", "applicable": True, "state": "clean"}],
+    }
+
+    # build_inventory calls _source_path which will raise source_unavailable
+    # for a missing file — this is correct: deleted files must not silently
+    # become policy-excluded.
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_unavailable"):
+        build_inventory(
+            repo_root=tmp_path, ingest=ingest, changed_files=changed,
+            scan_mode="pr-diff", max_candidates=50,
+            dep_audit_evidence=dep_audit_evidence,
+        )
+
+
+def test_pylock_txt_not_classified_as_lockfile(tmp_path: Path):
+    """pylock.txt is not a valid pip lockfile format — it must stay as an
+    ordinary review candidate, never excluded by dep_audit_coverage."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "pylock.txt").write_text("some text\n", encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/app.py"}]}
+    changed = ["src/app.py", "pylock.txt"]
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "pip", "applicable": True, "state": "clean"}],
+    }
+
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest, changed_files=changed,
+        scan_mode="pr-diff", max_candidates=50,
+        dep_audit_evidence=dep_audit_evidence,
+    )
+    paths = {c.file_path for c in inventory.candidates}
+    assert "pylock.txt" in paths, "pylock.txt must stay as a candidate"
+    assert inventory.policy_excluded == ()

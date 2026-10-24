@@ -12,7 +12,7 @@ ApprovalMode = Literal["pr_label", "workflow_dispatch", "none"]
 ForkPolicy = Literal["block", "limited", "allow"]
 RateLimitFailMode = Literal["open", "closed"]
 LLMProviderType = Literal["openai", "anthropic", "google", "xai", "typesafe"]
-DEPENDENCY_AUDIT_SCHEMA_VERSION = "1.2"
+DEPENDENCY_AUDIT_SCHEMA_VERSION = "1.3"
 DEPENDENCY_AUDIT_COVERAGE_SCOPE = {
     "npm": "package_lock_registry_graph",
     "pip": "declared_direct_pins",
@@ -20,6 +20,7 @@ DEPENDENCY_AUDIT_COVERAGE_SCOPE = {
 }
 DEPENDENCY_AUDIT_INDETERMINATE_REASONS = frozenset(
     {
+        "audit_input_changed",
         "command_not_found",
         "decode_error",
         "empty_output",

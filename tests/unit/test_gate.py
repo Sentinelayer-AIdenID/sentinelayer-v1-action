@@ -153,6 +153,7 @@ def test_gate_dependency_audit_requirement_defaults_off() -> None:
 def test_dependency_audit_indeterminate_reason_contract_is_fixed() -> None:
     assert DEPENDENCY_AUDIT_INDETERMINATE_REASONS == frozenset(
         {
+            "audit_input_changed",
             "command_not_found",
             "decode_error",
             "empty_output",
@@ -183,7 +184,7 @@ def test_dependency_audit_indeterminate_reason_contract_is_fixed() -> None:
 
 
 def test_dependency_audit_coverage_contract_is_fixed() -> None:
-    assert DEPENDENCY_AUDIT_SCHEMA_VERSION == "1.2"
+    assert DEPENDENCY_AUDIT_SCHEMA_VERSION == "1.3"
     assert DEPENDENCY_AUDIT_COVERAGE_SCOPE == {
         "npm": "package_lock_registry_graph",
         "pip": "declared_direct_pins",
@@ -371,11 +372,68 @@ def test_gate_clean_dependency_audit_passes_disabled_severity(
     assert result.block_merge is False
 
 
+@pytest.mark.parametrize("ecosystem,lockfile", [
+    ("cargo", "Cargo.lock"),
+    ("pip", "pylock.toml"),
+])
+def test_gate_accepts_bound_cargo_pip_lock_receipt(
+    tmp_path: Path, ecosystem: str, lockfile: str,
+) -> None:
+    evidence = _valid_dependency_audit_evidence()
+    evidence["outcomes"] = [
+        DependencyAuditOutcome.clean("npm").to_dict(),
+        DependencyAuditOutcome.clean("pip", lockfile_path=lockfile,
+                                     lockfile_sha256="a" * 64).to_dict()
+        if ecosystem == "pip" else DependencyAuditOutcome.not_applicable("pip").to_dict(),
+        DependencyAuditOutcome.clean("cargo", lockfile_path=lockfile,
+                                     lockfile_sha256="a" * 64).to_dict()
+        if ecosystem == "cargo" else DependencyAuditOutcome.not_applicable("cargo").to_dict(),
+    ]
+    evidence["npm_projects"]["audits"][0]["outcome"] = evidence["outcomes"][0]
+    payload = _valid_summary(tmp_path, {"P0": 0, "P1": 0, "P2": 0, "P3": 0})
+    payload["dependency_audit_evidence"] = evidence
+    _write_summary(tmp_path, payload)
+
+    result = evaluate_gate(tmp_path, GateConfig(
+        severity_gate="none", require_dependency_audit_success=True,
+    ))
+    assert result.status == GateStatus.PASSED
+    assert result.block_merge is False
+
+
+@pytest.mark.parametrize("receipt_update", [
+    {"lockfile_sha256": None},
+    {"lockfile_sha256": "bad"},
+    {"lockfile_path": "../Cargo.lock"},
+    {"lockfile_path": "requirements.txt"},
+    {"unexpected": True},
+])
+def test_gate_rejects_malformed_cargo_lock_receipt(
+    tmp_path: Path, receipt_update: dict,
+) -> None:
+    evidence = _valid_dependency_audit_evidence()
+    receipt = DependencyAuditOutcome.clean(
+        "cargo", lockfile_path="Cargo.lock", lockfile_sha256="a" * 64,
+    ).to_dict()
+    receipt.update(receipt_update)
+    evidence["outcomes"][2] = receipt
+    payload = _valid_summary(tmp_path, {"P0": 0, "P1": 0, "P2": 0, "P3": 0})
+    payload["dependency_audit_evidence"] = evidence
+    _write_summary(tmp_path, payload)
+
+    result = evaluate_gate(tmp_path, GateConfig(
+        severity_gate="none", require_dependency_audit_success=True,
+    ))
+    assert result.status == GateStatus.ERROR
+    assert result.block_merge is True
+
+
 @pytest.mark.parametrize(
     "case",
     [
         "extra_top_level_field",
         "legacy_schema",
+        "prior_schema",
         "unsupported_schema",
         "missing_coverage_scope",
         "coverage_scope_not_object",
@@ -404,6 +462,8 @@ def test_gate_malformed_dependency_audit_evidence_fails_closed(
         evidence["unexpected"] = True
     elif case == "legacy_schema":
         evidence["schema_version"] = "1.0"
+    elif case == "prior_schema":
+        evidence["schema_version"] = "1.2"
     elif case == "unsupported_schema":
         evidence["schema_version"] = "2.0"
     elif case == "missing_coverage_scope":
