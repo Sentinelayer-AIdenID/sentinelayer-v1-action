@@ -301,9 +301,10 @@ def python_interpolated_sql_lines(content: str) -> set[int]:
         for child in ast.iter_child_nodes(parent)
     }
     sql_usage_names = _sql_usage_names_by_scope(tree, parents)
+    constants = _module_string_constants(tree)
     lines: set[int] = set()
     for node in ast.walk(tree):
-        template = _dynamic_string_template(node, parents)
+        template = _dynamic_string_template(node, parents, constants)
         if (
             template is not None
             and _looks_like_sql_statement(template)
@@ -323,33 +324,138 @@ def python_interpolated_sql_lines(content: str) -> set[int]:
     return lines
 
 
+def _module_string_constants(tree: ast.AST) -> dict[str, str]:
+    """Module-level names bound exactly once, at module level, to a string built only from literals.
+
+    A migration that splices fixed table, function or trigger names into DDL through module
+    constants is not dynamic SQL. A name counts only if NOTHING else in the file rebinds it
+    (assignment, deletion, augmented assignment, loop/with/except/match target, import,
+    def/class, global or nonlocal), and its value is a str literal or an f-string/`+`
+    concatenation of str literals and earlier such constants. Anything else (a call, an
+    attribute, a parameter, os.environ, a format spec or a conversion) stays dynamic.
+    """
+    bindings: dict[str, int] = {}
+
+    def bind(name: str) -> None:
+        bindings[name] = bindings.get(name, 0) + 1
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bind(node.id)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            for name in node.names:
+                bind(name)
+                bind(name)  # another scope declared it rebindable: never a constant
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bind(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bind((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bind(node.name)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            bind(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bind(node.rest)
+
+    constants: dict[str, str] = {}
+    body = tree.body if isinstance(tree, ast.Module) else []
+    for statement in body:
+        if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+            target, value = statement.targets[0], statement.value
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None and statement.simple:
+            target, value = statement.target, statement.value
+        else:
+            continue
+        if not isinstance(target, ast.Name) or bindings.get(target.id) != 1:
+            continue
+        resolved = _constant_string_value(value, constants)
+        if resolved is not None:
+            constants[target.id] = resolved
+    return constants
+
+
+def _constant_string_value(node: ast.AST, constants: dict[str, str]) -> str | None:
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.Name):
+        return constants.get(node.id)
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value.value)
+            elif (
+                isinstance(value, ast.FormattedValue)
+                and value.conversion == -1
+                and value.format_spec is None
+                and isinstance(value.value, ast.Name)
+                and value.value.id in constants
+            ):
+                parts.append(constants[value.value.id])
+            else:
+                return None
+        return "".join(parts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        # Flattened iteratively, like _concatenated_string_template: a 1,000-operand chain must not recurse.
+        operands: list[ast.expr] = []
+        pending: list[ast.expr] = [node]
+        while pending:
+            current = pending.pop()
+            if isinstance(current, ast.BinOp) and isinstance(current.op, ast.Add):
+                pending.append(current.right)
+                pending.append(current.left)
+            else:
+                operands.append(current)
+        pieces: list[str] = []
+        for operand in operands:
+            fixed = _constant_string_value(operand, constants)
+            if fixed is None:
+                return None
+            pieces.append(fixed)
+        return "".join(pieces)
+    return None
+
+
 def _dynamic_string_template(
     node: ast.AST,
     parents: dict[ast.AST, ast.AST],
+    constants: dict[str, str] | None = None,
 ) -> str | None:
+    constants = constants or {}
     if isinstance(node, ast.JoinedStr):
-        return _joined_string_template(node)
+        return _joined_string_template(node, constants)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         parent = parents.get(node)
         if isinstance(parent, ast.BinOp) and isinstance(parent.op, ast.Add):
             return None
-        return _concatenated_string_template(node)
+        return _concatenated_string_template(node, constants)
     return None
 
 
-def _joined_string_template(node: ast.JoinedStr) -> str | None:
+def _joined_string_template(node: ast.JoinedStr, constants: dict[str, str] | None = None) -> str | None:
+    constants = constants or {}
     if not any(isinstance(value, ast.FormattedValue) for value in node.values):
         return None
     parts: list[str] = []
+    dynamic = False
     for value in node.values:
         if isinstance(value, ast.Constant) and isinstance(value.value, str):
             parts.append(value.value)
         elif isinstance(value, ast.FormattedValue):
-            parts.append("{expr}")
-    return "".join(parts)
+            fixed = None
+            if value.conversion == -1 and value.format_spec is None:
+                fixed = _constant_string_value(value.value, constants)
+            if fixed is None:
+                dynamic = True
+                parts.append("{expr}")
+            else:
+                parts.append(fixed)
+    return "".join(parts) if dynamic else None
 
 
-def _concatenated_string_template(node: ast.BinOp) -> str | None:
+def _concatenated_string_template(node: ast.BinOp, constants: dict[str, str] | None = None) -> str | None:
+    constants = constants or {}
     operands: list[ast.expr] = []
     pending: list[ast.expr] = [node]
     while pending:
@@ -364,11 +470,12 @@ def _concatenated_string_template(node: ast.BinOp) -> str | None:
     has_dynamic = False
     parts: list[str] = []
     for operand in operands:
-        if isinstance(operand, ast.Constant) and isinstance(operand.value, str):
+        fixed = _constant_string_value(operand, constants)
+        if fixed is not None:
             has_string = True
-            parts.append(operand.value)
+            parts.append(fixed)
         elif isinstance(operand, ast.JoinedStr):
-            nested = _joined_string_template(operand)
+            nested = _joined_string_template(operand, constants)
             if nested is None:
                 return None
             has_string = True

@@ -622,3 +622,81 @@ def test_missing_request_id_rule_has_stack_specific_fix_plan() -> None:
     assert finding is not None
     assert "requestId" in finding.fix_plan
     assert "Express" in finding.fix_plan
+
+
+# EQ-009 and module-level string constants (sentinelayer-api migration 089, 2026-10-24). A migration that
+# splices FIXED table/function/trigger names into DDL through module constants is not dynamic SQL; anything
+# a caller, the environment or another scope can change must still be reported.
+def _eq009_lines(source: str, path: str = "alembic/versions/089_example.py") -> list[int]:
+    findings = EngQualityScanner(tech_stack=["Python", "FastAPI"]).scan({path: source})
+    return sorted(f.line_start for f in findings if f.pattern_id == "EQ-009")
+
+
+def test_eq009_module_constants_spliced_into_ddl_are_not_dynamic() -> None:
+    source = (
+        'SCHEDULE_TABLE = "session_admission_expiry_schedule"\n'
+        'IMMEDIATE_DUE_SQL = "TIMESTAMPTZ \'1970-01-01 00:00:00+00\'"\n'
+        'BACKFILL_SQL = f"""\n'
+        "INSERT INTO {SCHEDULE_TABLE} (session_id, next_due_at)\n"
+        "SELECT id, COALESCE(claim_deadline_at, {IMMEDIATE_DUE_SQL}) FROM session_admissions\n"
+        '"""\n'
+        'DELETE_SQL = "DELETE FROM " + SCHEDULE_TABLE + " WHERE next_due_at IS NULL"\n'
+    )
+    assert _eq009_lines(source) == []
+
+
+def test_eq009_constant_built_from_earlier_constants_is_not_dynamic() -> None:
+    source = (
+        'PREFIX = "sentinelayer"\n'
+        'TABLE = f"{PREFIX}_schedule"\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    assert _eq009_lines(source) == []
+
+
+def test_eq009_parameter_in_fstring_sql_is_still_reported() -> None:
+    source = (
+        'TABLE = "accounts"\n'
+        "def load(user_id):\n"
+        '    return f"SELECT * FROM {TABLE} WHERE id = {user_id}"\n'
+    )
+    assert _eq009_lines(source, "src/db.py") == [3]
+
+
+def test_eq009_parameter_concatenated_into_sql_is_still_reported() -> None:
+    source = (
+        "def load(user_id):\n"
+        '    return "DELETE FROM accounts WHERE id = " + user_id\n'
+    )
+    assert _eq009_lines(source, "src/db.py") == [2]
+
+
+def test_eq009_constant_rebound_elsewhere_is_not_trusted() -> None:
+    rebound_by_global = (
+        'TABLE = "accounts"\n'
+        "def retarget(name):\n"
+        "    global TABLE\n"
+        "    TABLE = name\n"
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    reassigned = (
+        'TABLE = "accounts"\n'
+        "TABLE = TABLE.upper()\n"
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    assert _eq009_lines(rebound_by_global) == [5]
+    assert _eq009_lines(reassigned) == [3]
+
+
+def test_eq009_non_literal_or_converted_constant_is_still_reported() -> None:
+    from_env = (
+        "import os\n"
+        'TABLE = os.environ["TABLE"]\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    converted = (
+        'TABLE = "accounts"\n'
+        'SQL = f"DELETE FROM {TABLE!r} WHERE id = 1"\n'
+    )
+    assert _eq009_lines(from_env) == [3]
+    assert _eq009_lines(converted) == [2]
