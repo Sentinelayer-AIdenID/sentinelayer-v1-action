@@ -1,0 +1,8 @@
+{
+  "name": "sentinelayer-pages-deploy-tooling",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "wrangler": "4.141.0"
+  }
+}

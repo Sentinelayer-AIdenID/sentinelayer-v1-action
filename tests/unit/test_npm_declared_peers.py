@@ -77,6 +77,7 @@ async def test_already_declared_peer_is_audited_and_cannot_hide_bad_results(tmp_
 @pytest.mark.parametrize("case", ["undeclared", "missing-record", "peer-record", "metadata", "bad-mapping", "bad-value"])
 async def test_unsupported_peer_coverage_refuses_before_audit(tmp_path, monkeypatch, case):
     _, lock = project(tmp_path)
+    lock["lockfileVersion"] = 2
     consumer = lock["packages"]["node_modules/consumer"]
     if case == "undeclared":
         consumer["peerDependencies"] = {"not-in-regular-graph": "^1.0.0"}

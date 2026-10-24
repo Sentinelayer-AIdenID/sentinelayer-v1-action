@@ -1,0 +1,264 @@
+{
+  "description": "Captured npm 11.11.0 Arborist graph reports with empty advisory state; no advisory lookup. Reproduce with replay_npm11_audit_reports.py.",
+  "cases": {
+    "root-optional-peer": {
+      "package": {
+        "name": "root-optional-peer-regression",
+        "version": "1.0.0",
+        "dependencies": {
+          "parent": "1.0.0"
+        },
+        "peerDependencies": {
+          "optional-peer": "^1.0.0"
+        },
+        "peerDependenciesMeta": {
+          "optional-peer": {
+            "optional": true
+          }
+        }
+      },
+      "lock": {
+        "name": "root-optional-peer-regression",
+        "version": "1.0.0",
+        "lockfileVersion": 3,
+        "packages": {
+          "": {
+            "name": "root-optional-peer-regression",
+            "version": "1.0.0",
+            "dependencies": {
+              "parent": "1.0.0"
+            },
+            "peerDependencies": {
+              "optional-peer": "^1.0.0"
+            },
+            "peerDependenciesMeta": {
+              "optional-peer": {
+                "optional": true
+              }
+            }
+          },
+          "node_modules/parent": {
+            "version": "1.0.0",
+            "resolved": "https://registry.npmjs.org/parent/-/parent-1.0.0.tgz"
+          },
+          "node_modules/optional-peer": {
+            "version": "1.0.0",
+            "resolved": "https://registry.npmjs.org/optional-peer/-/optional-peer-1.0.0.tgz",
+            "peer": true,
+            "optional": true
+          }
+        }
+      },
+      "expected_total": 2,
+      "expected_peers": 1,
+      "vulnerability_package": "optional-peer",
+      "captured": {
+        "npm_version": "11.11.0",
+        "report_source_sha256": "f19fe7ccabea2b225ee95694d984607865fe40f06e49bf503506cd6141df8884",
+        "inventory_count": 2,
+        "bulk_name_count": 2,
+        "optional_peer_edges": [
+          {
+            "from": "",
+            "to": "node_modules/optional-peer",
+            "type": "peerOptional",
+            "valid": true
+          }
+        ],
+        "report": {
+          "auditReportVersion": 2,
+          "vulnerabilities": {},
+          "metadata": {
+            "vulnerabilities": {
+              "info": 0,
+              "low": 0,
+              "moderate": 0,
+              "high": 0,
+              "critical": 0,
+              "total": 0
+            },
+            "dependencies": {
+              "prod": 2,
+              "dev": 0,
+              "optional": 1,
+              "peer": 1,
+              "peerOptional": 0,
+              "total": 2
+            }
+          }
+        }
+      }
+    },
+    "nested-optional-peer": {
+      "package": {
+        "name": "nested-optional-peer-regression",
+        "version": "1.0.0",
+        "dependencies": {
+          "parent": "1.0.0",
+          "optional-peer": "2.0.0"
+        }
+      },
+      "lock": {
+        "name": "nested-optional-peer-regression",
+        "version": "1.0.0",
+        "lockfileVersion": 3,
+        "packages": {
+          "": {
+            "name": "nested-optional-peer-regression",
+            "version": "1.0.0",
+            "dependencies": {
+              "parent": "1.0.0",
+              "optional-peer": "2.0.0"
+            }
+          },
+          "node_modules/parent": {
+            "version": "1.0.0",
+            "resolved": "https://registry.npmjs.org/parent/-/parent-1.0.0.tgz",
+            "dependencies": {
+              "consumer": "1.0.0"
+            }
+          },
+          "node_modules/optional-peer": {
+            "version": "2.0.0",
+            "resolved": "https://registry.npmjs.org/optional-peer/-/optional-peer-2.0.0.tgz"
+          },
+          "node_modules/parent/node_modules/consumer": {
+            "version": "1.0.0",
+            "resolved": "https://registry.npmjs.org/consumer/-/consumer-1.0.0.tgz",
+            "peerDependencies": {
+              "optional-peer": "^1.0.0"
+            },
+            "peerDependenciesMeta": {
+              "optional-peer": {
+                "optional": true
+              }
+            }
+          },
+          "node_modules/parent/node_modules/optional-peer": {
+            "version": "1.0.0",
+            "resolved": "https://registry.npmjs.org/optional-peer/-/optional-peer-1.0.0.tgz",
+            "peer": true,
+            "optional": true
+          }
+        }
+      },
+      "expected_total": 4,
+      "expected_peers": 1,
+      "vulnerability_package": "optional-peer",
+      "captured": {
+        "npm_version": "11.11.0",
+        "report_source_sha256": "f19fe7ccabea2b225ee95694d984607865fe40f06e49bf503506cd6141df8884",
+        "inventory_count": 4,
+        "bulk_name_count": 3,
+        "optional_peer_edges": [
+          {
+            "from": "",
+            "to": "node_modules/optional-peer",
+            "type": "prod",
+            "valid": true
+          },
+          {
+            "from": "node_modules/parent/node_modules/consumer",
+            "to": "node_modules/parent/node_modules/optional-peer",
+            "type": "peerOptional",
+            "valid": true
+          }
+        ],
+        "report": {
+          "auditReportVersion": 2,
+          "vulnerabilities": {},
+          "metadata": {
+            "vulnerabilities": {
+              "info": 0,
+              "low": 0,
+              "moderate": 0,
+              "high": 0,
+              "critical": 0,
+              "total": 0
+            },
+            "dependencies": {
+              "prod": 4,
+              "dev": 0,
+              "optional": 1,
+              "peer": 1,
+              "peerOptional": 0,
+              "total": 4
+            }
+          }
+        }
+      }
+    },
+    "sentinelayer-web-34cd5aa": {
+      "manifest_fixture": "package-sentinelayer-web-34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json",
+      "lock_fixture": "package-lock-sentinelayer-web-34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json",
+      "expected_total": 530,
+      "expected_peers": 9,
+      "vulnerability_package": "@testing-library/dom",
+      "captured": {
+        "npm_version": "11.11.0",
+        "report_source_sha256": "f19fe7ccabea2b225ee95694d984607865fe40f06e49bf503506cd6141df8884",
+        "inventory_count": 530,
+        "bulk_name_count": 510,
+        "optional_peer_edges": [],
+        "report": {
+          "auditReportVersion": 2,
+          "vulnerabilities": {},
+          "metadata": {
+            "vulnerabilities": {
+              "info": 0,
+              "low": 0,
+              "moderate": 0,
+              "high": 0,
+              "critical": 0,
+              "total": 0
+            },
+            "dependencies": {
+              "prod": 198,
+              "dev": 332,
+              "optional": 53,
+              "peer": 9,
+              "peerOptional": 0,
+              "total": 530
+            }
+          }
+        }
+      }
+    },
+    "pages-tooling-34cd5aa": {
+      "manifest_fixture": "package-pages-tooling-34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json",
+      "lock_fixture": "package-lock-pages-tooling-34cd5aa93fbbff9076fcc4f5a8df9646070d2370.json",
+      "expected_total": 91,
+      "expected_peers": 0,
+      "vulnerability_package": "wrangler",
+      "captured": {
+        "npm_version": "11.11.0",
+        "report_source_sha256": "f19fe7ccabea2b225ee95694d984607865fe40f06e49bf503506cd6141df8884",
+        "inventory_count": 91,
+        "bulk_name_count": 91,
+        "optional_peer_edges": [],
+        "report": {
+          "auditReportVersion": 2,
+          "vulnerabilities": {},
+          "metadata": {
+            "vulnerabilities": {
+              "info": 0,
+              "low": 0,
+              "moderate": 0,
+              "high": 0,
+              "critical": 0,
+              "total": 0
+            },
+            "dependencies": {
+              "prod": 32,
+              "dev": 0,
+              "optional": 60,
+              "peer": 0,
+              "peerOptional": 0,
+              "total": 91
+            }
+          }
+        }
+      }
+    }
+  }
+}
