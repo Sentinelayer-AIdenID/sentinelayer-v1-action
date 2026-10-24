@@ -429,6 +429,108 @@ def test_httpx_module_case_matching_preserves_existing_behavior() -> None:
     ]
 
 
+def _n_plus_one_lines(source: str) -> list[int]:
+    scanner = EngQualityScanner(tech_stack=["FastAPI", "Python"])
+    findings = scanner.scan({"src/service.py": source})
+    return [f.line_start for f in findings if f.pattern_id == "EQ-007"]
+
+
+def test_n_plus_one_still_flags_awaits_inside_the_loop_body() -> None:
+    # Deep in the body, after a blank line and a nested block, and inside a
+    # nested loop: every per-item await is still a finding, reported at the
+    # outer for-line exactly as before.
+    source = (
+        "async def f(ids, db):\n"
+        "    for item_id in ids:\n"
+        "        if item_id:\n"
+        "            label = str(item_id)\n"
+        "\n"
+        "            await db.execute(\"SELECT 1\", {\"id\": label})\n"
+        "    return None\n"
+        "\n"
+        "async def g(groups, session):\n"
+        "    for group in groups:\n"
+        "        for member in group:\n"
+        "            await session.get(member)\n"
+    )
+    assert _n_plus_one_lines(source) == [2, 10]
+
+
+def test_n_plus_one_ignores_an_await_after_the_loop_ends() -> None:
+    # One query, an in-memory loop, then ONE commit after the loop: not N+1.
+    source = (
+        "async def list_rows(self):\n"
+        "    rows = (await self.db.scalars(stmt)).all()\n"
+        "    for row in rows:\n"
+        "        self._expire_if_due(row, now)\n"
+        "    result = {\"rows\": [view(r) for r in rows]}\n"
+        "    await self.db.commit()\n"
+        "    return result\n"
+    )
+    assert _n_plus_one_lines(source) == []
+
+
+def test_n_plus_one_ignores_a_batched_query_grouped_in_memory() -> None:
+    source = (
+        "async def list_links(self, links):\n"
+        "    by_link = {link.id: [] for link in links}\n"
+        "    if links:\n"
+        "        rows = await self.db.scalars(select(Claim).where(Claim.link_id.in_(list(by_link))))\n"
+        "        for claim in rows:\n"
+        "            by_link[claim.link_id].append(claim)\n"
+        "    metadata = []\n"
+        "    for link in links:\n"
+        "        metadata.append(len(by_link[link.id]))\n"
+        "    await self.db.commit()\n"
+        "    return metadata\n"
+    )
+    assert _n_plus_one_lines(source) == []
+
+
+# (source, EQ-007 lines). All valid Python. Reviewer probe cases, 2026-09-30.
+_LOOP_BODY_CASES = [
+    # Comments, continuations and string contents never end a Python suite.
+    ("async def f(ids, db):\n    for item in ids:\n# comment\n        await db.execute(item)\n", [2]),
+    ("async def f(ids, db):\n    for item in ids:\n    # comment\n        await db.execute(item)\n", [2]),
+    ("async def f(ids, db):\n    for item in ids:\n        statement = (\n\"SELECT 1\"\n        )\n        await db.execute(statement)\n", [2]),
+    ("async def f(ids, db):\n    for item in ids:\n        statement = \"\"\"SELECT\n1\n\"\"\"\n        await db.execute(statement)\n", [2]),
+    ("async def f(ids, db):\n    for item in ids:\n        await db.execute(\n            item\n        )\n", [2]),
+    ("async def f(ids, db):\n    for item in ids:\n\n        if item:\n            await db.execute(item)\n", [2]),
+    ("async def f(ids, db):\n    for item in ids:\n        await db.execute(item)\n", [2]),
+    # Text that only looks like a loop is not one, in any case, and never crashes the scan.
+    ('"""Pseudocode:\nFOR item in ids:\n    await db.execute(item)\n"""\n', []),
+    ('"""Pseudocode:\nFor item in ids:\n    await db.execute(item)\n"""\n', []),
+    # ...even beside a real loop elsewhere in the same file: only the real loop is reported.
+    ('"""Pseudocode:\nFOR item in ids:\n    await db.execute(item)\n"""\nasync def f(ids, db):\n    for item in ids:\n        await db.execute(item)\n', [6]),
+    # One await after the loop ends is not a per-item call, and neither is the else suite,
+    # which runs once.
+    ("async def f(ids, db):\n    for item in ids:\n        str(item)\n    await db.commit()\n", []),
+    ("async def f(ids, db):\n    for item in ids:\n        str(item)\n    else:\n        await db.commit()\n", []),
+    # Unchanged window: an await more than 800 chars into the body stays unreported, as before.
+    ("async def f(ids, db):\n    for item in ids:\n" + "        pad = 1  # " + "x" * 800 + "\n        await db.execute(item)\n", []),
+    # Unchanged pre-existing miss: the DB name is not on the await's own line.
+    ("async def f(ids, db):\n    for item in ids:\n        await (\n            db.execute(item)\n        )\n", []),
+]
+
+
+def test_n_plus_one_loop_bodies_come_from_the_parser_not_indentation() -> None:
+    for source, expected in _LOOP_BODY_CASES:
+        compile(source, "<fixture>", "exec")  # valid Python; compiled, never run
+        assert _n_plus_one_lines(source) == expected, source
+
+
+def test_n_plus_one_on_unparsable_source_keeps_the_legacy_matcher() -> None:
+    # A syntax error must neither crash the scan nor hide what the old rule reported.
+    source = "async def f(ids, db):\n    for item in ids:\n        str(item)\n    await db.commit()\n    )\n"
+    try:
+        compile(source, "<fixture>", "exec")
+    except SyntaxError:
+        pass
+    else:
+        raise AssertionError("fixture must be invalid Python")
+    assert _n_plus_one_lines(source) == [2]
+
+
 def test_workflow_secret_labels_not_flagged_as_hardcoded_secrets() -> None:
     files = {
         ".github/workflows/security-review.yml": (
@@ -520,3 +622,182 @@ def test_missing_request_id_rule_has_stack_specific_fix_plan() -> None:
     assert finding is not None
     assert "requestId" in finding.fix_plan
     assert "Express" in finding.fix_plan
+
+
+# EQ-009 and module-level string constants (sentinelayer-api migration 089, 2026-10-24). A migration that
+# splices FIXED table/function/trigger names into DDL through module constants is not dynamic SQL; anything
+# a caller, the environment or another scope can change must still be reported.
+def _eq009_lines(source: str, path: str = "alembic/versions/089_example.py") -> list[int]:
+    findings = EngQualityScanner(tech_stack=["Python", "FastAPI"]).scan({path: source})
+    return sorted(f.line_start for f in findings if f.pattern_id == "EQ-009")
+
+
+def test_eq009_module_constants_spliced_into_ddl_are_not_dynamic() -> None:
+    source = (
+        'SCHEDULE_TABLE = "session_admission_expiry_schedule"\n'
+        'IMMEDIATE_DUE_SQL = "TIMESTAMPTZ \'1970-01-01 00:00:00+00\'"\n'
+        'BACKFILL_SQL = f"""\n'
+        "INSERT INTO {SCHEDULE_TABLE} (session_id, next_due_at)\n"
+        "SELECT id, COALESCE(claim_deadline_at, {IMMEDIATE_DUE_SQL}) FROM session_admissions\n"
+        '"""\n'
+        'DELETE_SQL = "DELETE FROM " + SCHEDULE_TABLE + " WHERE next_due_at IS NULL"\n'
+    )
+    assert _eq009_lines(source) == []
+
+
+def test_eq009_constant_built_from_earlier_constants_is_not_dynamic() -> None:
+    source = (
+        'PREFIX = "sentinelayer"\n'
+        'TABLE = f"{PREFIX}_schedule"\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    assert _eq009_lines(source) == []
+
+
+def test_eq009_parameter_in_fstring_sql_is_still_reported() -> None:
+    source = (
+        'TABLE = "accounts"\n'
+        "def load(user_id):\n"
+        '    return f"SELECT * FROM {TABLE} WHERE id = {user_id}"\n'
+    )
+    assert _eq009_lines(source, "src/db.py") == [3]
+
+
+def test_eq009_parameter_concatenated_into_sql_is_still_reported() -> None:
+    source = (
+        "def load(user_id):\n"
+        '    return "DELETE FROM accounts WHERE id = " + user_id\n'
+    )
+    assert _eq009_lines(source, "src/db.py") == [2]
+
+
+def test_eq009_constant_rebound_elsewhere_is_not_trusted() -> None:
+    rebound_by_global = (
+        'TABLE = "accounts"\n'
+        "def retarget(name):\n"
+        "    global TABLE\n"
+        "    TABLE = name\n"
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    reassigned = (
+        'TABLE = "accounts"\n'
+        "TABLE = TABLE.upper()\n"
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    assert _eq009_lines(rebound_by_global) == [5]
+    assert _eq009_lines(reassigned) == [3]
+
+
+def test_eq009_non_literal_or_converted_constant_is_still_reported() -> None:
+    from_env = (
+        "import os\n"
+        'TABLE = os.environ["TABLE"]\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    converted = (
+        'TABLE = "accounts"\n'
+        'SQL = f"DELETE FROM {TABLE!r} WHERE id = 1"\n'
+    )
+    assert _eq009_lines(from_env) == [3]
+    assert _eq009_lines(converted) == [2]
+
+
+def test_eq009_parameter_shadowing_a_module_constant_is_still_reported() -> None:
+    shadowed_by_parameter = (
+        'TABLE = "accounts"\n'
+        "def load(TABLE):\n"
+        '    return f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    shadowed_by_lambda = (
+        'TABLE = "accounts"\n'
+        'build = lambda TABLE: f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    shadowed_by_kwonly = (
+        'TABLE = "accounts"\n'
+        "def load(*, TABLE):\n"
+        '    return "DELETE FROM " + TABLE + " WHERE id = 1"\n'
+    )
+    assert _eq009_lines(shadowed_by_parameter, "src/db.py") == [3]
+    assert _eq009_lines(shadowed_by_lambda, "src/db.py") == [2]
+    assert _eq009_lines(shadowed_by_kwonly, "src/db.py") == [3]
+
+
+def test_eq009_constants_are_trusted_only_at_module_level_without_wildcard_imports() -> None:
+    wildcard = (
+        'TABLE = "accounts"\n'
+        "from dynamic_tables import *\n"
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    closure = (
+        'TABLE = "accounts"\n'
+        "def outer(TABLE):\n"
+        "    def load():\n"
+        '        return f"DELETE FROM {TABLE} WHERE id = 1"\n'
+        "    return load\n"
+    )
+    inside_function = (
+        'TABLE = "accounts"\n'
+        "def load():\n"
+        '    return f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    assert _eq009_lines(wildcard) == [3]
+    assert _eq009_lines(closure, "src/db.py") == [4]
+    assert _eq009_lines(inside_function, "src/db.py") == [3]
+
+
+def test_eq009_dynamic_namespace_writes_and_class_bodies_disable_constant_trust() -> None:
+    globals_write = (
+        'TABLE = "accounts"\n'
+        'globals()["TABLE"] = input()\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    exec_write = (
+        'TABLE = "accounts"\n'
+        'exec("TABLE = input()")\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    module_dict_write = (
+        "import sys\n"
+        'TABLE = "accounts"\n'
+        'sys.modules[__name__].__dict__["TABLE"] = input()\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    class_body = (
+        'TABLE = "accounts"\n'
+        "class Queries:\n"
+        '    SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    assert _eq009_lines(globals_write) == [3]
+    assert _eq009_lines(exec_write) == [3]
+    assert _eq009_lines(module_dict_write) == [4]
+    assert _eq009_lines(class_body) == [3]
+
+
+def test_eq009_aliased_namespace_capabilities_disable_constant_trust() -> None:
+    via_module = (
+        "import builtins\n"
+        'TABLE = "accounts"\n'
+        'builtins.globals()["TABLE"] = input()\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    via_alias = (
+        'TABLE = "accounts"\n'
+        "g = globals\n"
+        'g()["TABLE"] = input()\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    via_import_alias = (
+        "from builtins import globals as g\n"
+        'TABLE = "accounts"\n'
+        'g()["TABLE"] = input()\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    via_getattr = (
+        'TABLE = "accounts"\n'
+        'getattr(__builtins__, "glob" + "als")()["TABLE"] = input()\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    assert _eq009_lines(via_module) == [4]
+    assert _eq009_lines(via_alias) == [4]
+    assert _eq009_lines(via_import_alias) == [4]
+    assert _eq009_lines(via_getattr) == [3]
