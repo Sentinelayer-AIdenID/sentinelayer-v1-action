@@ -700,3 +700,46 @@ def test_eq009_non_literal_or_converted_constant_is_still_reported() -> None:
     )
     assert _eq009_lines(from_env) == [3]
     assert _eq009_lines(converted) == [2]
+
+
+def test_eq009_parameter_shadowing_a_module_constant_is_still_reported() -> None:
+    shadowed_by_parameter = (
+        'TABLE = "accounts"\n'
+        "def load(TABLE):\n"
+        '    return f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    shadowed_by_lambda = (
+        'TABLE = "accounts"\n'
+        'build = lambda TABLE: f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    shadowed_by_kwonly = (
+        'TABLE = "accounts"\n'
+        "def load(*, TABLE):\n"
+        '    return "DELETE FROM " + TABLE + " WHERE id = 1"\n'
+    )
+    assert _eq009_lines(shadowed_by_parameter, "src/db.py") == [3]
+    assert _eq009_lines(shadowed_by_lambda, "src/db.py") == [2]
+    assert _eq009_lines(shadowed_by_kwonly, "src/db.py") == [3]
+
+
+def test_eq009_constants_are_trusted_only_at_module_level_without_wildcard_imports() -> None:
+    wildcard = (
+        'TABLE = "accounts"\n'
+        "from dynamic_tables import *\n"
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    closure = (
+        'TABLE = "accounts"\n'
+        "def outer(TABLE):\n"
+        "    def load():\n"
+        '        return f"DELETE FROM {TABLE} WHERE id = 1"\n'
+        "    return load\n"
+    )
+    inside_function = (
+        'TABLE = "accounts"\n'
+        "def load():\n"
+        '    return f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    assert _eq009_lines(wildcard) == [3]
+    assert _eq009_lines(closure, "src/db.py") == [4]
+    assert _eq009_lines(inside_function, "src/db.py") == [3]

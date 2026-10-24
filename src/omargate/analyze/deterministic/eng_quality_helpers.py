@@ -304,7 +304,14 @@ def python_interpolated_sql_lines(content: str) -> set[int]:
     constants = _module_string_constants(tree)
     lines: set[int] = set()
     for node in ast.walk(tree):
-        template = _dynamic_string_template(node, parents, constants)
+        # Constants are trusted only in module-level expressions (a migration's DDL strings). Inside a
+        # function or lambda, closures, nonlocal, exec and call-time globals() writes are out of reach
+        # of a static binding count, so the old behaviour (every placeholder dynamic) stays.
+        scoped = None
+        if constants and isinstance(node, (ast.JoinedStr, ast.BinOp)):
+            if isinstance(_enclosing_scope(node, parents), ast.Module):
+                scoped = constants
+        template = _dynamic_string_template(node, parents, scoped)
         if (
             template is not None
             and _looks_like_sql_statement(template)
@@ -330,10 +337,15 @@ def _module_string_constants(tree: ast.AST) -> dict[str, str]:
     A migration that splices fixed table, function or trigger names into DDL through module
     constants is not dynamic SQL. A name counts only if NOTHING else in the file rebinds it
     (assignment, deletion, augmented assignment, loop/with/except/match target, import,
-    def/class, global or nonlocal), and its value is a str literal or an f-string/`+`
+    def/class, function or lambda parameter, global or nonlocal), and its value is a str literal or an f-string/`+`
     concatenation of str literals and earlier such constants. Anything else (a call, an
     attribute, a parameter, os.environ, a format spec or a conversion) stays dynamic.
     """
+    if any(
+        isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names)
+        for node in ast.walk(tree)
+    ):
+        return {}  # a wildcard import can rebind any module name
     bindings: dict[str, int] = {}
 
     def bind(name: str) -> None:
@@ -342,6 +354,8 @@ def _module_string_constants(tree: ast.AST) -> dict[str, str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             bind(node.id)
+        elif isinstance(node, ast.arg):
+            bind(node.arg)  # a parameter (def or lambda, any kind) shadows the module name with caller data
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             for name in node.names:
                 bind(name)
