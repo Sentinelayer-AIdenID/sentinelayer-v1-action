@@ -15,7 +15,7 @@ from omargate.analyze.typesafe_review import (
     build_inventory,
     review_inventory,
 )
-from omargate.analyze.typesafe_state import build_typed_context
+from omargate.analyze.typesafe_state import build_context_and_review_diff, build_typed_context
 
 
 @pytest.fixture(autouse=True)
@@ -191,6 +191,20 @@ def test_audited_npm_lockfile_patch_is_bound_but_withheld_from_model(tmp_path: P
     assert set(context["candidate_context"]) == {inventory.candidates[0].candidate_id}
     assert "lock-bytes-must-stay-out" not in json.dumps(context)
     assert context["diff_head_lines_verified"] is True
+    _, review_diff = build_context_and_review_diff(
+        repo_root=tmp_path, inventory=inventory, ingest=ingest,
+        diff_content=diff, deterministic_findings=[],
+    )
+    assert review_diff == patch("source.py", "answer = 1\n", source)
+    assert "lock-bytes-must-stay-out" not in review_diff
+
+    source_header = "diff --git a/source.py b/source.py"
+    lock_header = "diff --git a/package-lock.json b/package-lock.json"
+    crossed = diff.replace(source_header, "__HEADER__").replace(
+        lock_header, source_header,
+    ).replace("__HEADER__", lock_header)
+    with pytest.raises(TypeSafeReviewIncomplete, match="unsupported_typed_diff_path"):
+        context_for(tmp_path, inventory, ingest, crossed)
 
     with pytest.raises(TypeSafeReviewIncomplete, match="incomplete_typed_diff_file_coverage"):
         context_for(tmp_path, inventory, ingest, patch("source.py", "answer = 1\n", source))
@@ -206,6 +220,13 @@ def test_missing_or_utf8_oversize_diff_is_explicitly_incomplete(tmp_path: Path, 
     inventory, ingest = inventory_for(tmp_path, {"source.py": "new\n"})
     with pytest.raises(TypeSafeReviewIncomplete):
         context_for(tmp_path, inventory, ingest, diff)
+
+
+def test_large_unaudited_source_diff_keeps_original_budget(tmp_path: Path) -> None:
+    source = "x" * 110_000 + "\n"
+    inventory, ingest = inventory_for(tmp_path, {"source.py": source})
+    with pytest.raises(TypeSafeReviewIncomplete, match="typed_diff_unavailable_or_oversize"):
+        context_for(tmp_path, inventory, ingest, patch("source.py", "old\n", source))
 
 
 @pytest.mark.parametrize("body", [

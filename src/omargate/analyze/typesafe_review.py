@@ -253,7 +253,7 @@ def verify_sources(repo_root: Path, inventory: ReviewInventory) -> None:
     excluded_hashes = dict(inventory.excluded_source_hashes)
     if (
         inventory.scan_mode != "pr-diff"
-        or not expected_hashes
+        or not (expected_hashes or excluded_hashes)
         or len(expected_hashes) != len(inventory.source_hashes)
         or len(excluded_hashes) != len(inventory.excluded_source_hashes)
         or len(inventory.policy_excluded) != len(excluded_hashes)

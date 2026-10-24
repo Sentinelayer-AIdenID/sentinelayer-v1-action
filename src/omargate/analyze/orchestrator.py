@@ -55,7 +55,7 @@ from .typesafe_review import (
     review_inventory,
     verify_sources,
 )
-from .typesafe_state import build_typed_context
+from .typesafe_state import build_context_and_review_diff, build_typed_context
 from .source_scope import SourceScope, build_source_scope, verify_scope_partition, verify_source_scope
 from .scope_context import plan_scope_requests, validate_scope_coverage
 from .typesafe_writer import explain_review, WRITER_MODEL
@@ -1097,6 +1097,8 @@ class AnalysisOrchestrator:
         source_verified = False
         source_failure_reason = None
         triage_status = "source_scope_incomplete"
+        review_diff = diff_content
+        reviewed_files = changed_files
         def verify(inventory):
             if _source_scope is None:
                 verify_sources(self.repo_root, inventory)
@@ -1113,13 +1115,53 @@ class AnalysisOrchestrator:
                 raise TypeSafeReviewIncomplete("redacted_source")
             # Routing needs verified change context, not just isolated current
             # functions. Reuse the same bounded source/diff binding as policy.
-            state.update(_typed_context if _typed_context is not None else build_typed_context(
-                repo_root=self.repo_root, inventory=inventory, ingest=ingest,
-                diff_content=diff_content, deterministic_findings=deterministic_findings,
-            ))
+            if _source_scope is None:
+                bound_context, review_diff = build_context_and_review_diff(
+                    repo_root=self.repo_root, inventory=inventory, ingest=ingest,
+                    diff_content=diff_content, deterministic_findings=deterministic_findings,
+                )
+                reviewed_files = list(dict(inventory.source_hashes))
+                state.update(bound_context)
+            else:
+                state.update(_typed_context if _typed_context is not None else build_typed_context(
+                    repo_root=self.repo_root, inventory=inventory, ingest=ingest,
+                    diff_content=diff_content, deterministic_findings=deterministic_findings,
+                ))
             if any(hunk.get("source_redacted") for context in state["candidate_context"].values()
                    for hunk in context.get("diff_hunks", [])):
                 raise TypeSafeReviewIncomplete("redacted_source")
+            verify(inventory)
+            if _source_scope is None and not inventory.candidates:
+                if (_inventory is not None or not inventory.policy_excluded
+                        or set(changed_files or []) != dict(inventory.excluded_source_hashes).keys()):
+                    raise TypeSafeReviewIncomplete("incomplete_source_inventory")
+                # The source-bound audit covers every changed file, but there is
+                # no code for a model to review. The current gate requires live
+                # LLM evidence, so report that contract gap without a fake call.
+                assessment = {"complete": False, "status": "not_applicable",
+                              "reason_code": "no_review_candidates",
+                              "policy_excluded": [{"file_path": path, "reason": reason}
+                                                  for path, reason in inventory.policy_excluded],
+                              "excluded_source_hashes": dict(inventory.excluded_source_hashes)}
+                usage = {"cost_ledger": cost_ledger([]),
+                         "review_routing": {"routes": [], "triage_status": "audit_only",
+                                            "source_hashes": {},
+                                            "excluded_source_hashes": dict(inventory.excluded_source_hashes)},
+                         "policy_assessment": assessment}
+                if run_dir is not None:
+                    try:
+                        run_dir.mkdir(parents=True, exist_ok=True)
+                        (run_dir / "REVIEW_ROUTING.json").write_text(json.dumps({
+                            "routing": usage["review_routing"], "costs": usage["cost_ledger"],
+                            "policy_assessment": assessment,
+                        }, indent=2, allow_nan=False), encoding="utf-8")
+                    except OSError:
+                        return LLMAnalysisResult([], False, usage,
+                            "Audited dependency evidence could not be written", attempted=False,
+                            failure_class="cascade_evidence_write_failed")
+                return LLMAnalysisResult([], False, usage,
+                    "Only audited dependency lockfiles changed; no model review was attempted",
+                    attempted=False, failure_class="cascade_audit_only_no_llm")
             source_verified = True
             questions = triage_questions(self.config.review_policy)
             if len(json.dumps({"state": state, "questions": questions}).encode("utf-8")) > MAX_STATE_BYTES:
@@ -1172,8 +1214,8 @@ class AnalysisOrchestrator:
                 result = await self._run_llm_analysis(
                     ingest=ingest, deterministic_findings=deterministic_findings,
                     quick_learn=quick_learn, spec_context=spec_context,
-                    scan_mode=scan_mode, diff_content=diff_content,
-                    changed_files=changed_files, review_route=route,
+                    scan_mode=scan_mode, diff_content=review_diff,
+                    changed_files=reviewed_files, review_route=route,
                     **({"source_context": _generator_context} if _generator_context is not None else {}),
                 )
                 if inventory is not None:
@@ -1249,7 +1291,8 @@ class AnalysisOrchestrator:
                                        "answers": {(f"dimension-{list(self.config.review_policy.routing['domains']).index(key[4:]) + 1}" if key.startswith("gap_") else key):
                                                    value.as_dict() if hasattr(value, "as_dict") else value
                                                    for key, value in triage.answers.items()} if triage else {},
-                                       "source_hashes": dict(inventory.source_hashes) if inventory else {}}
+                                       "source_hashes": dict(inventory.source_hashes) if inventory else {},
+                                       "excluded_source_hashes": dict(inventory.excluded_source_hashes) if inventory else {}}
             usage["policy_assessment"] = policy_assessment
             usage["excellence"] = excellence_coverage(self.config.review_policy, triage.answers if triage else None)
             result.usage = usage
