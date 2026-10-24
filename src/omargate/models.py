@@ -20,6 +20,7 @@ DEPENDENCY_AUDIT_COVERAGE_SCOPE = {
 }
 DEPENDENCY_AUDIT_INDETERMINATE_REASONS = frozenset(
     {
+        "audit_input_changed",
         "command_not_found",
         "decode_error",
         "empty_output",

@@ -153,6 +153,7 @@ def test_gate_dependency_audit_requirement_defaults_off() -> None:
 def test_dependency_audit_indeterminate_reason_contract_is_fixed() -> None:
     assert DEPENDENCY_AUDIT_INDETERMINATE_REASONS == frozenset(
         {
+            "audit_input_changed",
             "command_not_found",
             "decode_error",
             "empty_output",

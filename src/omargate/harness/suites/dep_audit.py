@@ -1447,6 +1447,13 @@ class DepAuditSuite(SecuritySuite):
                             "pip", input_error or "unsafe_pip_input",
                             lockfile_path=pip_lock_rel, lockfile_sha256=pip_lock_hash,
                         )
+                    elif pip_lock_hash is not None and hashlib.sha256(
+                        (audit_cwd / "source-0.txt").read_bytes()
+                    ).hexdigest() != pip_lock_hash:
+                        outcome = DependencyAuditOutcome.indeterminate(
+                            "pip", "audit_input_changed",
+                            lockfile_path=pip_lock_rel, lockfile_sha256=pip_lock_hash,
+                        )
                     else:
                         command = [
                             "pip-audit",
@@ -1532,35 +1539,41 @@ class DepAuditSuite(SecuritySuite):
                     )
                 else:
                     audit_lockfile = audit_cwd / "Cargo.lock"
-                    expected_dependency_count = _load_cargo_dependency_count(
-                        audit_cwd, audit_lockfile
-                    )
-                    if expected_dependency_count is None:
+                    if hashlib.sha256(audit_lockfile.read_bytes()).hexdigest() != lockfile_hash:
                         outcome = DependencyAuditOutcome.indeterminate(
-                            "cargo", "unsafe_lockfile",
+                            "cargo", "audit_input_changed",
                             lockfile_path=lockfile_rel, lockfile_sha256=lockfile_hash,
                         )
                     else:
-                        outcome, cleanup_proven = await self._run_audit_command(
-                            ecosystem="cargo",
-                            args=[
-                                "cargo-audit",
-                                "audit",
-                                "--file",
-                                str(audit_lockfile),
-                                "--json",
-                            ],
-                            cwd=audit_cwd,
-                            project_root=project_root,
-                            parser=partial(
-                                _parse_cargo_vulnerability_count,
-                                expected_dependency_count=(
-                                    expected_dependency_count
-                                ),
-                            ),
+                        expected_dependency_count = _load_cargo_dependency_count(
+                            audit_cwd, audit_lockfile
                         )
-                        if not cleanup_proven:
-                            audit_scratch.retain()
+                        if expected_dependency_count is None:
+                            outcome = DependencyAuditOutcome.indeterminate(
+                                "cargo", "unsafe_lockfile",
+                                lockfile_path=lockfile_rel, lockfile_sha256=lockfile_hash,
+                            )
+                        else:
+                            outcome, cleanup_proven = await self._run_audit_command(
+                                ecosystem="cargo",
+                                args=[
+                                    "cargo-audit",
+                                    "audit",
+                                    "--file",
+                                    str(audit_lockfile),
+                                    "--json",
+                                ],
+                                cwd=audit_cwd,
+                                project_root=project_root,
+                                parser=partial(
+                                    _parse_cargo_vulnerability_count,
+                                    expected_dependency_count=(
+                                        expected_dependency_count
+                                    ),
+                                ),
+                            )
+                            if not cleanup_proven:
+                                audit_scratch.retain()
         except asyncio.CancelledError:
             raise
         except (OSError, RuntimeError):

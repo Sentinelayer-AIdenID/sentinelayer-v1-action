@@ -1556,6 +1556,49 @@ async def test_cargo_audit_uses_copied_lockfile_outside_project_without_mutation
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("tool", ("pip", "cargo"))
+async def test_audit_receipt_rejects_lock_changed_during_snapshot(
+    tool: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _prepare_project(tmp_path, tool)
+    lock = tmp_path / ("Cargo.lock" if tool == "cargo" else "requirements.txt")
+    committed_bytes = lock.read_bytes()
+    committed_hash = hashlib.sha256(committed_bytes).hexdigest()
+    copy_project_file = dep_audit._copy_safe_project_file
+    audit_calls = 0
+    injected = False
+
+    def _copy_after_transient_change(
+        root: Path, source: Path, destination: Path, *, max_bytes: int
+    ) -> bool:
+        nonlocal injected
+        if source == lock and not injected:
+            injected = True
+            source.write_bytes(committed_bytes + b"# changed before audit copy\n")
+            try:
+                return copy_project_file(root, source, destination, max_bytes=max_bytes)
+            finally:
+                source.write_bytes(committed_bytes)
+        return copy_project_file(root, source, destination, max_bytes=max_bytes)
+
+    async def _clean_audit(*_args: object, **_kwargs: object) -> CommandResult:
+        nonlocal audit_calls
+        audit_calls += 1
+        return _result(returncode=0, stdout=_clean_stdout(tool))
+
+    monkeypatch.setattr(dep_audit, "_copy_safe_project_file", _copy_after_transient_change)
+    monkeypatch.setattr(dep_audit, "run_command", _clean_audit)
+    _, outcome = await getattr(DepAuditSuite(tech_stack=[]), f"_{tool}_audit")(tmp_path)
+
+    assert injected
+    assert lock.read_bytes() == committed_bytes
+    assert outcome.state == "indeterminate"
+    assert outcome.reason_code == "audit_input_changed"
+    assert outcome.lockfile_sha256 in (None, committed_hash)
+    assert audit_calls == 0
+
+
+@pytest.mark.anyio
 async def test_all_nonapplicable_ecosystems_emit_complete_exact_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

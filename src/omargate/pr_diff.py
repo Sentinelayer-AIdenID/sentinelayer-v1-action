@@ -11,6 +11,9 @@ from .analyze.typesafe_state import MAX_BOUND_DIFF_BYTES
 
 
 _SHA = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}\Z")
+_HUNK_HEADING = re.compile(
+    r"(@@ -[0-9]+(?:,[0-9]+)? \+[0-9]+(?:,[0-9]+)? @@)[^\r\n]*(\r?\n)?\Z"
+)
 FETCH_DEPTH = 128
 GIT_TIMEOUT_SECONDS = 45
 
@@ -86,10 +89,19 @@ def _bounded_diff(repo_root: Path, merge_base: str, head_sha: str, max_bytes: in
 
 
 def _without_index_lines(diff: str) -> str:
-    # GitHub abbreviates blob IDs; local --full-index does not. All section,
-    # mode, path, hunk, and content lines still have to agree byte-for-byte.
-    return "".join(row for row in diff.splitlines(keepends=True)
-                   if not row.startswith("index "))
+    # GitHub abbreviates blob IDs and may label a hunk with a different nearby
+    # symbol than local git. Preserve the complete numeric hunk ranges, mode,
+    # path and content lines while dropping only these display-only labels.
+    rows: list[str] = []
+    for row in diff.splitlines(keepends=True):
+        if row.startswith("index "):
+            continue
+        if row.startswith("@@ "):
+            heading = _HUNK_HEADING.fullmatch(row)
+            if heading is not None:
+                row = heading.group(1) + (heading.group(2) or "")
+        rows.append(row)
+    return "".join(rows)
 
 
 def attest_pr_diff(
