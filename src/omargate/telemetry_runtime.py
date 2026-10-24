@@ -398,9 +398,13 @@ def _estimate_cost(
     if config.review_routing == "intent-cascade-v1":
         # The line-count heuristic below excludes the typed stages and may
         # choose a model that is cheaper than the eventual escalation route.
-        # A whole-source scan can have multiple partitions, so its preflight
-        # cost is unknown until those partitions are built.
-        if not ctx.pr_number or config.scan_mode != "pr-diff":
+        # Whole-source partitions are built later, but their aggregate
+        # estimated spend is already capped by max_review_estimate_usd.
+        # Use that ceiling for approval; an unknown partition count must not
+        # make the default scheduled/deep scan require a nonexistent PR label.
+        if config.scan_mode in {"deep", "nightly"}:
+            return config.max_review_estimate_usd
+        if not ctx.pr_number:
             return None
         from .analyze.llm.prompt_loader import PromptLoader
         from .analyze.review_cascade import cascade_generator_system_prompt

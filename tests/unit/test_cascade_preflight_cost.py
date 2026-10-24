@@ -11,7 +11,8 @@ from omargate.preflight.cost import check_cost_approval
 from omargate import telemetry_runtime
 
 
-def _config(*, routing="intent-cascade-v1", profile="typesafe-input-20261020", threshold=0.01):
+def _config(*, routing="intent-cascade-v1", profile="typesafe-input-20261020", threshold=0.01,
+            whole_source_ceiling=5.00):
     policy = SimpleNamespace(
         routing={"domains": {"security": [100, "Review security implications"]}},
         generator_instructions="Review verified source before deciding.",
@@ -24,6 +25,7 @@ def _config(*, routing="intent-cascade-v1", profile="typesafe-input-20261020", t
         intent_price_profile=profile,
         review_policy=policy,
         require_cost_confirmation=threshold,
+        max_review_estimate_usd=whole_source_ceiling,
         approval_mode="pr_label",
         approval_label="sentinelayer:approved",
     )
@@ -72,6 +74,53 @@ def test_unconfigured_cascade_price_requires_approval_instead_of_zero_cost(monke
 
     approved, status = asyncio.run(check_cost_approval(forecast, config, _context(), GitHub()))
     assert (approved, status) == (False, "label_missing")
+
+
+@pytest.mark.parametrize("scan_mode,event_name", [
+    ("nightly", "schedule"), ("deep", "workflow_dispatch"),
+])
+def test_default_whole_source_cascade_can_run_without_a_pr(scan_mode, event_name):
+    config = _config(threshold=5.00)
+    config.scan_mode = scan_mode
+    ctx = SimpleNamespace(pr_number=None, event_name=event_name)
+    forecast = telemetry_runtime._estimate_cost(ctx=ctx, gh=object(), config=config)
+    assert forecast == 5.00
+    assert asyncio.run(check_cost_approval(forecast, config, ctx, object())) == (
+        True, "below_threshold")
+
+
+def test_whole_source_cascade_above_threshold_requires_explicit_approval():
+    config = _config(threshold=0.01)
+    config.scan_mode = "nightly"
+    ctx = SimpleNamespace(pr_number=None, event_name="schedule")
+    forecast = telemetry_runtime._estimate_cost(ctx=ctx, gh=object(), config=config)
+    assert forecast == 5.00
+    assert asyncio.run(check_cost_approval(forecast, config, ctx, object())) == (
+        False, "label_missing_pr")
+
+    config.approval_mode = "workflow_dispatch"
+    ctx.event_name = "workflow_dispatch"
+    assert asyncio.run(check_cost_approval(forecast, config, ctx, object())) == (
+        True, "workflow_dispatch")
+
+
+def test_whole_source_ceiling_above_default_confirmation_still_requires_approval():
+    config = _config(threshold=5.00, whole_source_ceiling=10.00)
+    config.scan_mode = "deep"
+    ctx = SimpleNamespace(pr_number=None, event_name="schedule")
+    forecast = telemetry_runtime._estimate_cost(ctx=ctx, gh=object(), config=config)
+    assert forecast == 10.00
+    assert asyncio.run(check_cost_approval(forecast, config, ctx, object())) == (
+        False, "label_missing_pr")
+
+
+def test_pr_diff_without_a_pr_still_requires_approval_when_cost_is_unknown():
+    config = _config(profile="", threshold=0.01)
+    ctx = SimpleNamespace(pr_number=None, event_name="workflow_dispatch")
+    forecast = telemetry_runtime._estimate_cost(ctx=ctx, gh=object(), config=config)
+    assert forecast is None
+    assert asyncio.run(check_cost_approval(forecast, config, ctx, object())) == (
+        False, "label_missing_pr")
 
 
 def test_cascade_comment_distinguishes_approval_forecast_from_usage_estimate():
