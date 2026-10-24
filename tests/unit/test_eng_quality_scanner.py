@@ -743,3 +743,31 @@ def test_eq009_constants_are_trusted_only_at_module_level_without_wildcard_impor
     assert _eq009_lines(wildcard) == [3]
     assert _eq009_lines(closure, "src/db.py") == [4]
     assert _eq009_lines(inside_function, "src/db.py") == [3]
+
+
+def test_eq009_dynamic_namespace_writes_and_class_bodies_disable_constant_trust() -> None:
+    globals_write = (
+        'TABLE = "accounts"\n'
+        'globals()["TABLE"] = input()\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    exec_write = (
+        'TABLE = "accounts"\n'
+        'exec("TABLE = input()")\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    module_dict_write = (
+        "import sys\n"
+        'TABLE = "accounts"\n'
+        'sys.modules[__name__].__dict__["TABLE"] = input()\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    class_body = (
+        'TABLE = "accounts"\n'
+        "class Queries:\n"
+        '    SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    assert _eq009_lines(globals_write) == [3]
+    assert _eq009_lines(exec_write) == [3]
+    assert _eq009_lines(module_dict_write) == [4]
+    assert _eq009_lines(class_body) == [3]

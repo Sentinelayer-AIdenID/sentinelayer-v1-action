@@ -308,9 +308,8 @@ def python_interpolated_sql_lines(content: str) -> set[int]:
         # function or lambda, closures, nonlocal, exec and call-time globals() writes are out of reach
         # of a static binding count, so the old behaviour (every placeholder dynamic) stays.
         scoped = None
-        if constants and isinstance(node, (ast.JoinedStr, ast.BinOp)):
-            if isinstance(_enclosing_scope(node, parents), ast.Module):
-                scoped = constants
+        if constants and isinstance(node, (ast.JoinedStr, ast.BinOp)) and _at_module_top_level(node, parents):
+            scoped = constants
         template = _dynamic_string_template(node, parents, scoped)
         if (
             template is not None
@@ -341,11 +340,8 @@ def _module_string_constants(tree: ast.AST) -> dict[str, str]:
     concatenation of str literals and earlier such constants. Anything else (a call, an
     attribute, a parameter, os.environ, a format spec or a conversion) stays dynamic.
     """
-    if any(
-        isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names)
-        for node in ast.walk(tree)
-    ):
-        return {}  # a wildcard import can rebind any module name
+    if any(_rebinds_names_dynamically(node) for node in ast.walk(tree)):
+        return {}  # a wildcard import or a namespace write can rebind any module name
     bindings: dict[str, int] = {}
 
     def bind(name: str) -> None:
@@ -387,6 +383,29 @@ def _module_string_constants(tree: ast.AST) -> dict[str, str]:
         if resolved is not None:
             constants[target.id] = resolved
     return constants
+
+
+_DYNAMIC_NAMESPACE_CALLS = frozenset({"globals", "locals", "vars", "exec", "eval", "setattr", "delattr", "__import__"})
+
+
+def _rebinds_names_dynamically(node: ast.AST) -> bool:
+    """A wildcard import, or any call/attribute that can write a module namespace at run time."""
+    if isinstance(node, ast.ImportFrom):
+        return any(alias.name == "*" for alias in node.names)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        return node.func.id in _DYNAMIC_NAMESPACE_CALLS
+    if isinstance(node, ast.Attribute):
+        return node.attr in {"__dict__", "modules"}  # obj.__dict__[...] / sys.modules[__name__]
+    return False
+
+
+def _at_module_top_level(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
+    current = parents.get(node)
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            return False
+        current = parents.get(current)
+    return True
 
 
 def _constant_string_value(node: ast.AST, constants: dict[str, str]) -> str | None:
