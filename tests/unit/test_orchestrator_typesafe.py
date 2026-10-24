@@ -5,6 +5,7 @@ from policy_fixture import FAKE_POLICY_JSON
 from omargate.intent_identity import intent_model_reference
 
 import copy
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -257,7 +258,7 @@ async def test_orchestrator_converts_harness_exception_to_exact_failure_evidence
     evidence = result.dependency_audit_evidence
 
     assert evidence is not None
-    assert evidence["schema_version"] == "1.2"
+    assert evidence["schema_version"] == "1.3"
     assert evidence["coverage_scope"] == {
         "npm": "package_lock_registry_graph",
         "pip": "declared_direct_pins",
@@ -372,6 +373,40 @@ async def test_allowed_fallback_uses_codex_first_and_keeps_actual_returned_prove
     assert result.llm_usage["fallback_chain"] == f"typesafe/{intent_model_reference(PIN)} -> openai/{GENERATOR}"
     assert synopsis == []
     assert_deterministic_retained(result)
+
+
+@pytest.mark.anyio
+async def test_legacy_typesafe_fallback_withholds_audited_lock_bytes(tmp_path, monkeypatch):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch, run_harness=True)
+    marker = "audited-lock-private-marker"
+    lockfile = tmp_path / "package-lock.json"
+    lockfile.write_text('{"lockfileVersion":3,"marker":"' + marker + '"}\n', encoding="utf-8")
+    evidence = {
+        "enabled": True, "complete": True,
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": hashlib.sha256(lockfile.read_bytes()).hexdigest(),
+            "input_unchanged": True,
+            "outcome": {"ecosystem": "npm", "applicable": True, "state": "clean"},
+        }]},
+    }
+
+    class FixtureHarness:
+        async def run_with_evidence(self):
+            return SimpleNamespace(findings=[], dependency_audit_evidence=evidence)
+
+    monkeypatch.setattr(module, "HarnessRunner", lambda **_kwargs: FixtureHarness())
+    typed, cli, api = stages(instance, monkeypatch, typed=outcome(success=False))
+    result = await instance.run(
+        scan_mode="pr-diff", changed_files=["source.py", "package-lock.json"],
+        diff_content=(DIFF + "diff --git a/package-lock.json b/package-lock.json\n"
+                      "--- a/package-lock.json\n+++ b/package-lock.json\n"
+                      "@@ -1 +1 @@\n-{}\n+" + lockfile.read_text(encoding="utf-8")),
+    )
+    assert typed.await_count == 1
+    assert cli.await_count == api.await_count == 0
+    assert not result.llm_success
+    assert any("audited lockfile" in warning.lower() for warning in result.warnings)
 
 
 @pytest.mark.anyio
@@ -1850,3 +1885,83 @@ async def test_completed_typed_p0_survives_writer_failure_without_a_new_decision
         {"warnings": result.warnings, "usage": result.llm_usage}
     )
     assert source_marker not in capsys.readouterr().err
+
+
+@pytest.mark.anyio
+async def test_pr_with_tests_and_lockfile_reaches_client_and_routes_exclusion(tmp_path, monkeypatch):
+    """Orchestrator regression for the original ticket: a PR with source + tests
+    + a dep-audit-covered lockfile must attempt the typed client, include the
+    test file as a candidate, and record the lockfile in the assessment's
+    policy_excluded.  Fails before the fix: source_outside_inventory on tests."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_main.py").write_text("def test_x(): assert True\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+
+    ingest = {"files": [{"path": "src/main.py"}], "stats": {"total_files": 1, "in_scope_files": 1}}
+    monkeypatch.setattr(module, "run_ingest", lambda *_args, **_kwargs: copy.deepcopy(ingest))
+
+    instance, _, _ = orchestrator(tmp_path, monkeypatch, fallback=False, run_harness=False)
+    client = FixtureClient()
+    monkeypatch.setattr(module, "TypeSafeClient", lambda *args, **kwargs: client)
+    monkeypatch.setattr(module, "load_policy", lambda *_args: FixturePolicy())
+
+    import hashlib
+    real_hash = hashlib.sha256((tmp_path / "package-lock.json").read_bytes()).hexdigest()
+    dep_audit_evidence = {
+        "enabled": True,
+        "complete": True,
+        "outcomes": [{"ecosystem": "npm", "applicable": True, "state": "clean"}],
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": real_hash,
+            "input_unchanged": True,
+            "outcome": {"ecosystem": "npm", "applicable": True, "state": "clean"},
+        }]},
+    }
+
+    result = await instance._run_typesafe_analysis(
+        ingest=ingest,
+        changed_files=["src/main.py", "tests/test_main.py", "package-lock.json"],
+        scan_mode="pr-diff",
+        deterministic_findings=[finding()],
+        dep_audit_evidence=dep_audit_evidence,
+        diff_content=(
+            "diff --git a/src/main.py b/src/main.py\n"
+            "--- a/src/main.py\n"
+            "+++ b/src/main.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+x = 1\n"
+            "diff --git a/tests/test_main.py b/tests/test_main.py\n"
+            "--- /dev/null\n"
+            "+++ b/tests/test_main.py\n"
+            "@@ -0,0 +1 @@\n"
+            "+def test_x(): assert True\n"
+            "diff --git a/package-lock.json b/package-lock.json\n"
+            "--- a/package-lock.json\n"
+            "+++ b/package-lock.json\n"
+            "@@ -1 +1 @@\n"
+            '-{"lockfileVersion": 2}\n'
+            '+{"lockfileVersion": 3}\n'
+        ),
+    )
+
+    assert result.attempted, "typed client must be called"
+    assert client.attempted, "FixtureClient.attempted must be True"
+    assert len(client.calls) >= 1, "client.rate must have been called"
+
+    assessment = (result.usage or {}).get("typesafe_assessment", {})
+    excluded = assessment.get("policy_excluded", [])
+    assert len(excluded) == 1, f"expected 1 policy_excluded entry, got {len(excluded)}"
+    assert excluded[0]["path"] == "package-lock.json"
+    assert excluded[0]["reason"] == "dep_audit_coverage"
+    assert assessment["excluded_source_hashes"] == {"package-lock.json": real_hash}
+
+    candidate_paths = {
+        c["file_path"] for c in assessment.get("candidates", [])
+    }
+    assert "src/main.py" in candidate_paths
+    assert "tests/test_main.py" in candidate_paths
+    assert "package-lock.json" not in candidate_paths

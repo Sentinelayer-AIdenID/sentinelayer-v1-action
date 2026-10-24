@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from dataclasses import asdict
@@ -9,7 +10,6 @@ from typing import Any
 import pytest
 
 from omargate.harness.runner import CommandResult, CommandStatus
-from omargate.models import DEPENDENCY_AUDIT_SCHEMA_VERSION
 from omargate.harness.suites import dep_audit
 from omargate.harness.suites.dep_audit import (
     DepAuditSuite,
@@ -18,7 +18,7 @@ from omargate.harness.suites.dep_audit import (
     _parse_pip_vulnerability_count,
     disabled_dependency_audit_evidence,
 )
-
+from omargate.models import DEPENDENCY_AUDIT_SCHEMA_VERSION
 
 _TOOLS = ("npm", "pip", "cargo")
 _INCOMPLETE_IDS = {
@@ -444,13 +444,21 @@ async def test_dependency_audit_valid_clean_result_emits_clean_evidence(
     )
 
     assert finding is None
-    assert outcome.to_dict() == {
-        "ecosystem": tool,
-        "applicable": True,
-        "state": "clean",
-        "vulnerability_count": 0,
-        "reason_code": None,
-    }
+    outcome_dict = outcome.to_dict()
+    assert outcome_dict["ecosystem"] == tool
+    assert outcome_dict["applicable"] is True
+    assert outcome_dict["state"] == "clean"
+    assert outcome_dict["vulnerability_count"] == 0
+    assert outcome_dict["reason_code"] is None
+    if tool in {"cargo", "pip"}:
+        lockfile = "Cargo.lock" if tool == "cargo" else "requirements.txt"
+        assert outcome_dict["lockfile_path"] == lockfile
+        assert outcome_dict["lockfile_sha256"] == hashlib.sha256(
+            (tmp_path / lockfile).read_bytes()
+        ).hexdigest()
+    else:
+        assert "lockfile_path" not in outcome_dict
+        assert "lockfile_sha256" not in outcome_dict
     assert len(calls) == 1
 
 
@@ -649,13 +657,12 @@ async def test_unproved_audit_emits_fixed_p0_and_indeterminate_evidence(
     assert finding.file_path == f".sentinelayer/harness/{tool}-audit"
     assert finding.snippet == ""
     assert finding.message.endswith(f"({reason})")
-    assert outcome.to_dict() == {
-        "ecosystem": tool,
-        "applicable": True,
-        "state": "indeterminate",
-        "vulnerability_count": None,
-        "reason_code": reason,
-    }
+    outcome_dict = outcome.to_dict()
+    assert outcome_dict["ecosystem"] == tool
+    assert outcome_dict["applicable"] is True
+    assert outcome_dict["state"] == "indeterminate"
+    assert outcome_dict["vulnerability_count"] is None
+    assert outcome_dict["reason_code"] == reason
     assert len(calls) == 1
     published = json.dumps(
         {"finding": asdict(finding), "outcome": outcome.to_dict()},

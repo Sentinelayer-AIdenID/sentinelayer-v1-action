@@ -6,24 +6,145 @@ missing policy and uncertain decisions are explicit generator-fallback reasons.
 """
 from __future__ import annotations
 
-from ..intent_identity import intent_model_reference, redact_intent_pin
-
-from dataclasses import dataclass
 import hashlib
 import json
 import math
-from pathlib import Path, PurePosixPath
+import os
 import re
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
+from ..intent_identity import intent_model_reference, redact_intent_pin
 from ..redaction import redact_secret_source, sanitize_public_error
-from .typesafe_client import TypeSafeClient, TypeSafeError, ChoiceAnswer, validate_answers
-
+from .typesafe_client import (
+    ChoiceAnswer,
+    TypeSafeClient,
+    TypeSafeError,
+    validate_answers,
+)
 
 MAX_FILE_BYTES = 1_000_000
+MAX_AUDITED_LOCK_BYTES = 10 * 1024 * 1024
 MAX_STATE_BYTES = 24_000
 LINES_PER_CANDIDATE = 40
 
+
+
+# Only files the dependency audit can bind with a per-file receipt may leave
+# model context. Other dependency files remain review candidates.
+_NPM_AUDIT_LOCKFILES = frozenset({"package-lock.json", "npm-shrinkwrap.json"})
+_COMMIT_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
+
+
+def _is_dep_audit_lockfile(relative: str) -> bool:
+    name = relative.rsplit("/", 1)[-1]
+    return (name in _NPM_AUDIT_LOCKFILES or name == "Cargo.lock" or (
+        name.startswith("pylock.") and len(name) > len("pylock.")
+        and not name.endswith((".py", ".pyi", ".txt"))
+    ))
+
+
+def _git_source(repo_root: Path, *args: str) -> bytes:
+    try:
+        result = subprocess.run(
+            ["git", *args], cwd=repo_root, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=15, check=False,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise TypeSafeReviewIncomplete("source_commit_unavailable") from None
+    if result.returncode:
+        raise TypeSafeReviewIncomplete("source_commit_unavailable")
+    return result.stdout
+
+
+def _verify_head(repo_root: Path, expected_head_sha: str) -> None:
+    if not _COMMIT_SHA.fullmatch(expected_head_sha):
+        raise TypeSafeReviewIncomplete("source_commit_unavailable")
+    actual = _git_source(repo_root, "rev-parse", "--verify", "HEAD").strip()
+    if actual.lower() != expected_head_sha.lower().encode("ascii"):
+        raise TypeSafeReviewIncomplete("source_commit_mismatch")
+
+
+def _verify_head_blob(
+    repo_root: Path, expected_head_sha: str, relative: str,
+    raw: bytes, max_bytes: int,
+) -> None:
+    # Compare the checked-out bytes with the exact committed blob. A clean
+    # hunk alone cannot prove that lines outside the hunk came from this PR.
+    spec = f"{expected_head_sha}:{relative}"
+    size_raw = _git_source(repo_root, "cat-file", "-s", spec).strip()
+    if not size_raw.isdigit() or int(size_raw) > max_bytes:
+        raise TypeSafeReviewIncomplete("source_commit_mismatch")
+    committed = _git_source(repo_root, "cat-file", "blob", spec)
+    if len(committed) != int(size_raw) or _digest(committed) != _digest(raw):
+        raise TypeSafeReviewIncomplete("source_commit_mismatch")
+
+
+def _lockfile_coverage_receipt(
+    relative: str, dep_audit_evidence: dict | None, source_sha256: str,
+) -> str | None:
+    """Return 'dep_audit_coverage' only when the audit was enabled, complete,
+    and contains a verified receipt for this exact lockfile.
+    None means the file stays in the review inventory (fail safe)."""
+    if not isinstance(dep_audit_evidence, dict):
+        return None
+    if dep_audit_evidence.get("enabled") is not True:
+        return None
+    if dep_audit_evidence.get("complete") is not True:
+        return None
+    name = relative.rsplit("/", 1)[-1]
+    if name in _NPM_AUDIT_LOCKFILES:
+        return _npm_lockfile_receipt(relative, dep_audit_evidence, source_sha256)
+    if name == "Cargo.lock":
+        return _outcome_lockfile_receipt(relative, dep_audit_evidence, source_sha256, "cargo")
+    if _is_dep_audit_lockfile(relative):
+        return _outcome_lockfile_receipt(relative, dep_audit_evidence, source_sha256, "pip")
+    return None
+
+
+def _npm_lockfile_receipt(relative: str, evidence: dict, source_sha256: str) -> str | None:
+    """Verify the exact npm lockfile and completed, unchanged project audit."""
+    npm_projects = evidence.get("npm_projects", {})
+    audits = npm_projects.get("audits", ()) if isinstance(npm_projects, dict) else ()
+    if not isinstance(audits, (list, tuple)):
+        return None
+    for entry in audits:
+        if not isinstance(entry, dict):
+            continue
+        entry_path = entry.get("lockfile_path")
+        entry_hash = entry.get("lockfile_sha256")
+        if entry_path == relative and entry_hash == source_sha256:
+            outcome = entry.get("outcome", {})
+            if (entry.get("input_unchanged") is True
+                    and isinstance(outcome, dict)
+                    and outcome.get("ecosystem") == "npm"
+                    and outcome.get("applicable") is True
+                    and outcome.get("state") in ("clean", "vulnerable")):
+                return "dep_audit_coverage"
+    return None
+
+
+def _outcome_lockfile_receipt(
+    relative: str, evidence: dict, source_sha256: str, ecosystem: str,
+) -> str | None:
+    """Bind a Cargo/pip exclusion to one successful per-file audit outcome."""
+    outcomes = evidence.get("outcomes")
+    if not isinstance(outcomes, (list, tuple)):
+        return None
+    matching = [row for row in outcomes if isinstance(row, dict)
+                and row.get("ecosystem") == ecosystem]
+    if len(matching) != 1:
+        return None
+    outcome = matching[0]
+    if (outcome.get("applicable") is True
+            and outcome.get("state") in ("clean", "vulnerable")
+            and outcome.get("lockfile_path") == relative
+            and outcome.get("lockfile_sha256") == source_sha256):
+        return "dep_audit_coverage"
+    return None
 
 class TypeSafeReviewIncomplete(ValueError):
     """A bounded reason, safe to retain without source or credential bodies."""
@@ -75,6 +196,9 @@ class ReviewInventory:
     candidates: tuple[ReviewCandidate, ...]
     source_hashes: tuple[tuple[str, str], ...]
     scan_mode: str
+    policy_excluded: tuple[tuple[str, str], ...] = ()
+    excluded_source_hashes: tuple[tuple[str, str], ...] = ()
+    expected_head_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -141,6 +265,8 @@ def _source_path(repo_root: Path, relative: str) -> Path:
 def build_inventory(
     *, repo_root: Path, ingest: dict, changed_files: list[str] | None,
     scan_mode: str, max_candidates: int,
+    dep_audit_evidence: dict | None = None,
+    expected_head_sha: str | None = None,
 ) -> ReviewInventory:
     """Cover complete changed source files, without silently truncating a scope.
 
@@ -154,26 +280,39 @@ def build_inventory(
         raise TypeSafeReviewIncomplete("unsupported_source_path")
     if type(max_candidates) is not int or not 1 <= max_candidates <= 200:
         raise TypeSafeReviewIncomplete("invalid_candidate_budget")
-    known = {row.get("path") for row in ingest.get("files", []) if isinstance(row, dict)}
+    if expected_head_sha is not None:
+        _verify_head(repo_root, expected_head_sha)
     candidates: list[ReviewCandidate] = []
     hashes: list[tuple[str, str]] = []
+    excluded: list[tuple[str, str]] = []
+    excluded_hashes: list[tuple[str, str]] = []
     for relative in sorted(set(changed_files)):
-        if relative not in known:
-            raise TypeSafeReviewIncomplete("source_outside_inventory")
         path = _source_path(repo_root, relative)
-        if path.stat().st_size > MAX_FILE_BYTES:
+        is_auditable_lock = _is_dep_audit_lockfile(relative)
+        file_limit = MAX_AUDITED_LOCK_BYTES if is_auditable_lock else MAX_FILE_BYTES
+        if path.stat().st_size > file_limit:
             raise TypeSafeReviewIncomplete("source_budget_exceeded")
         raw = path.read_bytes()
-        if len(raw) > MAX_FILE_BYTES or b"\0" in raw:
+        if len(raw) > file_limit or b"\0" in raw:
             raise TypeSafeReviewIncomplete("unsupported_source_bytes")
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             raise TypeSafeReviewIncomplete("unsupported_source_encoding") from None
+        source_hash = _digest(raw)
+        if expected_head_sha is not None:
+            _verify_head_blob(repo_root, expected_head_sha, relative, raw, file_limit)
+        if is_auditable_lock:
+            receipt = _lockfile_coverage_receipt(relative, dep_audit_evidence, source_hash)
+            if receipt is not None:
+                excluded.append((relative, receipt))
+                excluded_hashes.append((relative, source_hash))
+                continue
+        if len(raw) > MAX_FILE_BYTES:
+            raise TypeSafeReviewIncomplete("source_budget_exceeded")
         lines = text.splitlines(keepends=True)
         if not lines:
             raise TypeSafeReviewIncomplete("empty_source_scope")
-        source_hash = _digest(raw)
         hashes.append((relative, source_hash))
         for offset in range(0, len(lines), LINES_PER_CANDIDATE):
             end = min(offset + LINES_PER_CANDIDATE, len(lines))
@@ -188,18 +327,36 @@ def build_inventory(
             ))
             if len(candidates) > max_candidates:
                 raise TypeSafeReviewIncomplete("candidate_budget_exceeded")
-    return ReviewInventory(tuple(candidates), tuple(hashes), scan_mode)
+    return ReviewInventory(tuple(candidates), tuple(hashes), scan_mode,
+                           tuple(excluded), tuple(excluded_hashes), expected_head_sha)
 
 
 def verify_sources(repo_root: Path, inventory: ReviewInventory) -> None:
+    if inventory.expected_head_sha is not None:
+        _verify_head(repo_root, inventory.expected_head_sha)
     expected_hashes = dict(inventory.source_hashes)
+    excluded_hashes = dict(inventory.excluded_source_hashes)
     if (
         inventory.scan_mode != "pr-diff"
-        or not expected_hashes
+        or not (expected_hashes or excluded_hashes)
         or len(expected_hashes) != len(inventory.source_hashes)
+        or len(excluded_hashes) != len(inventory.excluded_source_hashes)
+        or len(inventory.policy_excluded) != len(excluded_hashes)
+        or set(excluded_hashes) != {path for path, _ in inventory.policy_excluded}
+        or set(expected_hashes) & set(excluded_hashes)
         or {candidate.file_path for candidate in inventory.candidates} != set(expected_hashes)
     ):
         raise TypeSafeReviewIncomplete("incomplete_source_inventory")
+    for relative, expected in inventory.excluded_source_hashes:
+        path = _source_path(repo_root, relative)
+        if path.stat().st_size > MAX_AUDITED_LOCK_BYTES:
+            raise TypeSafeReviewIncomplete("source_changed_during_review")
+        raw = path.read_bytes()
+        if len(raw) > MAX_AUDITED_LOCK_BYTES or _digest(raw) != expected:
+            raise TypeSafeReviewIncomplete("source_changed_during_review")
+        if inventory.expected_head_sha is not None:
+            _verify_head_blob(repo_root, inventory.expected_head_sha, relative, raw,
+                              MAX_AUDITED_LOCK_BYTES)
     for relative, expected in inventory.source_hashes:
         path = _source_path(repo_root, relative)
         if path.stat().st_size > MAX_FILE_BYTES:
@@ -207,6 +364,9 @@ def verify_sources(repo_root: Path, inventory: ReviewInventory) -> None:
         raw = path.read_bytes()
         if len(raw) > MAX_FILE_BYTES or _digest(raw) != expected:
             raise TypeSafeReviewIncomplete("source_changed_during_review")
+        if inventory.expected_head_sha is not None:
+            _verify_head_blob(repo_root, inventory.expected_head_sha, relative, raw,
+                              MAX_FILE_BYTES)
         try:
             lines = raw.decode("utf-8").splitlines(keepends=True)
         except UnicodeDecodeError:
@@ -385,6 +545,11 @@ async def review_inventory(
         "provider": "typesafe", "model": intent_model_reference(response.model),
         "policy_id": policy.policy_id, "calibration_id": policy.calibration_id,
         "source_hashes": dict(inventory.source_hashes),
+        "excluded_source_hashes": dict(inventory.excluded_source_hashes),
+        "policy_excluded": [
+            {"path": path, "reason": reason}
+            for path, reason in inventory.policy_excluded
+        ],
         "candidates": [{
             "candidate_id": candidate.candidate_id,
             "file_path": candidate.file_path,

@@ -30,6 +30,7 @@ _DEPENDENCY_AUDIT_OUTCOME_KEYS = frozenset(
         "reason_code",
     }
 )
+_DEPENDENCY_AUDIT_LOCK_RECEIPT_KEYS = frozenset({"lockfile_path", "lockfile_sha256"})
 _DEPENDENCY_AUDIT_FINDING_IDS = {
     "npm": "HARNESS-NPM-AUDIT",
     "pip": "HARNESS-PIP-AUDIT",
@@ -249,9 +250,13 @@ def _validate_dependency_audit_evidence(
     states: dict[str, Optional[str]] = {}
     vulnerable_outcomes = 0
     for outcome in outcomes:
+        fields = set(outcome) if isinstance(outcome, dict) else set()
         if (
             not isinstance(outcome, dict)
-            or set(outcome) != _DEPENDENCY_AUDIT_OUTCOME_KEYS
+            or fields not in (
+                _DEPENDENCY_AUDIT_OUTCOME_KEYS,
+                _DEPENDENCY_AUDIT_OUTCOME_KEYS | _DEPENDENCY_AUDIT_LOCK_RECEIPT_KEYS,
+            )
         ):
             return (
                 False,
@@ -272,9 +277,29 @@ def _validate_dependency_audit_evidence(
             )
         seen.add(ecosystem)
 
+        if _DEPENDENCY_AUDIT_LOCK_RECEIPT_KEYS <= fields:
+            lock_path = outcome["lockfile_path"]
+            lock_hash = outcome["lockfile_sha256"]
+            if (
+                ecosystem not in {"cargo", "pip"}
+                or not isinstance(lock_path, str)
+                or not lock_path
+                or "\\" in lock_path
+                or ":" in lock_path
+                or "\0" in lock_path
+                or PurePosixPath(lock_path).is_absolute()
+                or any(part in {"", ".", ".."} for part in lock_path.split("/"))
+                or (ecosystem == "cargo" and lock_path != "Cargo.lock")
+                or not isinstance(lock_hash, str)
+                or re.fullmatch(r"[a-f0-9]{64}", lock_hash) is None
+            ):
+                return False, "FAIL-CLOSED: dependency audit lock receipt is invalid.", 0
+
         applicable = outcome.get("applicable")
         if not isinstance(applicable, bool):
             return False, "FAIL-CLOSED: dependency audit applicability is invalid.", 0
+        if not applicable and _DEPENDENCY_AUDIT_LOCK_RECEIPT_KEYS <= fields:
+            return False, "FAIL-CLOSED: non-applicable dependency audit has a lock receipt.", 0
         state = outcome.get("state")
         vulnerability_count = outcome.get("vulnerability_count")
         reason_code = outcome.get("reason_code")

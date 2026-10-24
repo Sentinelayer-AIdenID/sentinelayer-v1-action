@@ -48,6 +48,7 @@ from .review_cascade import DEEP, MID, ReviewRoute, choose_route, excellence_cov
 from .review_costs import CASCADE_MAX_OUTPUT_TOKENS, cost_ledger, estimate_usage, partition_cost_reservation
 from .deterministic.workflow_scanner import scan_workflow_files
 from .typesafe_review import (
+    _is_dep_audit_lockfile,
     TypedReview,
     TypeSafeReviewIncomplete,
     build_inventory,
@@ -55,7 +56,7 @@ from .typesafe_review import (
     review_inventory,
     verify_sources,
 )
-from .typesafe_state import build_typed_context
+from .typesafe_state import build_context_and_review_diff, build_typed_context
 from .source_scope import SourceScope, build_source_scope, verify_scope_partition, verify_source_scope
 from .scope_context import plan_scope_requests, validate_scope_coverage
 from .typesafe_writer import explain_review, WRITER_MODEL
@@ -522,11 +523,13 @@ class AnalysisOrchestrator:
         logger: OmarLogger,
         repo_root: Path,
         allow_llm: bool = True,
+        expected_head_sha: str | None = None,
     ) -> None:
         self.config = config
         self.logger = logger
         self.repo_root = repo_root
         self.allow_llm = allow_llm
+        self.expected_head_sha = expected_head_sha
         self._quick_learn: Optional[QuickLearnSummary] = None
 
         patterns_dir = Path(__file__).parent / "deterministic" / "patterns"
@@ -796,6 +799,7 @@ class AnalysisOrchestrator:
                 deterministic_findings=det_findings + harness_findings,
                 quick_learn=quick_learn, spec_context=spec_context,
                 diff_content=diff_content, run_dir=run_dir,
+                dep_audit_evidence=dependency_audit_evidence,
             )
             verified_scope = result.source_scope
             record_llm_result(result)
@@ -810,6 +814,7 @@ class AnalysisOrchestrator:
                     deterministic_findings=det_findings,
                     run_dir=run_dir,
                     diff_content=diff_content,
+                    dep_audit_evidence=dependency_audit_evidence,
                 )
                 record_llm_result(typed_result)
                 if typed_result.warning:
@@ -818,6 +823,25 @@ class AnalysisOrchestrator:
         run_generator = not cascade and (self.config.llm_provider != "typesafe" or (
             not llm_success and self.config.typesafe_fallback
         ))
+        if run_generator and self.config.llm_provider == "typesafe" and scan_mode == "pr-diff":
+            assessment = (typed_result.usage or {}).get("typesafe_assessment", {}) if typed_result else {}
+            exclusions = assessment.get("policy_excluded") if isinstance(assessment, dict) else None
+            audited_lock_excluded = isinstance(exclusions, list) and any(
+                isinstance(row, dict) and row.get("reason") == "dep_audit_coverage"
+                for row in exclusions
+            )
+            coverage_unknown = (
+                exclusions is None and isinstance(dependency_audit_evidence, dict)
+                and dependency_audit_evidence.get("enabled") is True
+                and dependency_audit_evidence.get("complete") is True
+                and any(isinstance(path, str) and _is_dep_audit_lockfile(path)
+                        for path in changed_files or [])
+            )
+            if audited_lock_excluded or coverage_unknown:
+                # Legacy fallback builds a whole-file context and cannot retain
+                # an audited-lock exclusion. Keep the typed result as a hold.
+                run_generator = False
+                warnings.append("Generator fallback withheld for audited lockfile source")
         if run_generator and self.allow_llm and self.config.use_codex:
             generator_result_recorded = True
             with self.logger.stage("deep_scan"):
@@ -1074,6 +1098,7 @@ class AnalysisOrchestrator:
         deterministic_findings: List[dict], quick_learn: Optional[QuickLearnSummary],
         spec_context: Optional[dict], diff_content: Optional[str],
         run_dir: Optional[Path],
+        dep_audit_evidence: Optional[dict] = None,
         _source_scope=None, _inventory=None, _typed_context=None,
         _generator_context=None,
     ) -> LLMAnalysisResult:
@@ -1094,6 +1119,8 @@ class AnalysisOrchestrator:
         source_verified = False
         source_failure_reason = None
         triage_status = "source_scope_incomplete"
+        review_diff = diff_content
+        reviewed_files = changed_files
         def verify(inventory):
             if _source_scope is None:
                 verify_sources(self.repo_root, inventory)
@@ -1103,19 +1130,61 @@ class AnalysisOrchestrator:
             inventory = _inventory if _inventory is not None else build_inventory(
                 repo_root=self.repo_root, ingest=ingest, changed_files=changed_files,
                 scan_mode=scan_mode, max_candidates=self.config.typesafe_max_candidates,
+                dep_audit_evidence=dep_audit_evidence,
+                expected_head_sha=self.expected_head_sha,
             )
             state = {"candidates": [candidate.state() for candidate in inventory.candidates]}
             if any(candidate["evidence_redacted"] for candidate in state["candidates"]):
                 raise TypeSafeReviewIncomplete("redacted_source")
             # Routing needs verified change context, not just isolated current
             # functions. Reuse the same bounded source/diff binding as policy.
-            state.update(_typed_context if _typed_context is not None else build_typed_context(
-                repo_root=self.repo_root, inventory=inventory, ingest=ingest,
-                diff_content=diff_content, deterministic_findings=deterministic_findings,
-            ))
+            if _source_scope is None:
+                bound_context, review_diff = build_context_and_review_diff(
+                    repo_root=self.repo_root, inventory=inventory, ingest=ingest,
+                    diff_content=diff_content, deterministic_findings=deterministic_findings,
+                )
+                reviewed_files = list(dict(inventory.source_hashes))
+                state.update(bound_context)
+            else:
+                state.update(_typed_context if _typed_context is not None else build_typed_context(
+                    repo_root=self.repo_root, inventory=inventory, ingest=ingest,
+                    diff_content=diff_content, deterministic_findings=deterministic_findings,
+                ))
             if any(hunk.get("source_redacted") for context in state["candidate_context"].values()
                    for hunk in context.get("diff_hunks", [])):
                 raise TypeSafeReviewIncomplete("redacted_source")
+            verify(inventory)
+            if _source_scope is None and not inventory.candidates:
+                if (_inventory is not None or not inventory.policy_excluded
+                        or set(changed_files or []) != dict(inventory.excluded_source_hashes).keys()):
+                    raise TypeSafeReviewIncomplete("incomplete_source_inventory")
+                # The source-bound audit covers every changed file, but there is
+                # no code for a model to review. The current gate requires live
+                # LLM evidence, so report that contract gap without a fake call.
+                assessment = {"complete": False, "status": "not_applicable",
+                              "reason_code": "no_review_candidates",
+                              "policy_excluded": [{"file_path": path, "reason": reason}
+                                                  for path, reason in inventory.policy_excluded],
+                              "excluded_source_hashes": dict(inventory.excluded_source_hashes)}
+                usage = {"cost_ledger": cost_ledger([]),
+                         "review_routing": {"routes": [], "triage_status": "audit_only",
+                                            "source_hashes": {},
+                                            "excluded_source_hashes": dict(inventory.excluded_source_hashes)},
+                         "policy_assessment": assessment}
+                if run_dir is not None:
+                    try:
+                        run_dir.mkdir(parents=True, exist_ok=True)
+                        (run_dir / "REVIEW_ROUTING.json").write_text(json.dumps({
+                            "routing": usage["review_routing"], "costs": usage["cost_ledger"],
+                            "policy_assessment": assessment,
+                        }, indent=2, allow_nan=False), encoding="utf-8")
+                    except OSError:
+                        return LLMAnalysisResult([], False, usage,
+                            "Audited dependency evidence could not be written", attempted=False,
+                            failure_class="cascade_evidence_write_failed")
+                return LLMAnalysisResult([], False, usage,
+                    "Only audited dependency lockfiles changed; no model review was attempted",
+                    attempted=False, failure_class="cascade_audit_only_no_llm")
             source_verified = True
             questions = triage_questions(self.config.review_policy)
             if len(json.dumps({"state": state, "questions": questions}).encode("utf-8")) > MAX_STATE_BYTES:
@@ -1168,8 +1237,8 @@ class AnalysisOrchestrator:
                 result = await self._run_llm_analysis(
                     ingest=ingest, deterministic_findings=deterministic_findings,
                     quick_learn=quick_learn, spec_context=spec_context,
-                    scan_mode=scan_mode, diff_content=diff_content,
-                    changed_files=changed_files, review_route=route,
+                    scan_mode=scan_mode, diff_content=review_diff,
+                    changed_files=reviewed_files, review_route=route,
                     **({"source_context": _generator_context} if _generator_context is not None else {}),
                 )
                 if inventory is not None:
@@ -1248,7 +1317,8 @@ class AnalysisOrchestrator:
                                        "answers": {(f"dimension-{list(self.config.review_policy.routing['domains']).index(key[4:]) + 1}" if key.startswith("gap_") else key):
                                                    value.as_dict() if hasattr(value, "as_dict") else value
                                                    for key, value in triage.answers.items()} if triage else {},
-                                       "source_hashes": dict(inventory.source_hashes) if inventory else {}}
+                                       "source_hashes": dict(inventory.source_hashes) if inventory else {},
+                                       "excluded_source_hashes": dict(inventory.excluded_source_hashes) if inventory else {}}
             usage["policy_assessment"] = policy_assessment
             usage["excellence"] = excellence_coverage(self.config.review_policy, triage.answers if triage else None)
             result.usage = usage
@@ -1418,8 +1488,8 @@ class AnalysisOrchestrator:
             verify()
             # Retain decisions and source bindings without prompt/rubric text or
             # copied source context, so operators can explain incomplete reviews.
-            for name in ("source_hashes", "candidates", "question_candidates", "answers",
-                         "decision_reason", "unresolved_candidates"):
+            for name in ("source_hashes", "excluded_source_hashes", "candidates", "question_candidates", "answers",
+                         "decision_reason", "unresolved_candidates", "policy_excluded"):
                 if name in review.assessment:
                     assessment[name] = review.assessment[name]
             assessment.update(complete=review.assessment.get("complete") is True,
@@ -1442,6 +1512,7 @@ class AnalysisOrchestrator:
         self, *, ingest: dict, changed_files: Optional[List[str]], scan_mode: str,
         deterministic_findings: List[dict], run_dir: Optional[Path] = None,
         diff_content: Optional[str] = None,
+        dep_audit_evidence: Optional[dict] = None,
     ) -> LLMAnalysisResult:
         attempted = False
         client = None
@@ -1455,7 +1526,13 @@ class AnalysisOrchestrator:
             inventory = build_inventory(
                 repo_root=self.repo_root, ingest=ingest, changed_files=changed_files,
                 scan_mode=scan_mode, max_candidates=self.config.typesafe_max_candidates,
+                dep_audit_evidence=dep_audit_evidence,
+                expected_head_sha=self.expected_head_sha,
             )
+            metadata["policy_excluded"] = [
+                {"path": path, "reason": reason} for path, reason in inventory.policy_excluded
+            ]
+            metadata["excluded_source_hashes"] = dict(inventory.excluded_source_hashes)
             policy = load_policy(self.config.intent_policy.get_secret_value())
             context = build_typed_context(
                 repo_root=self.repo_root, inventory=inventory, ingest=ingest,

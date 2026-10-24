@@ -6,26 +6,46 @@ from pathlib import Path
 import re
 
 from ..redaction import redact_secret_source, sanitize_public_error
-from .typesafe_review import ReviewInventory, TypeSafeReviewIncomplete
+from .typesafe_review import MAX_AUDITED_LOCK_BYTES, ReviewInventory, TypeSafeReviewIncomplete
 
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _DIFF_METADATA = re.compile(r"(?:index [a-fA-F0-9]{4,64}\.\.[a-fA-F0-9]{4,64}(?: [0-7]{6})?|(?:old|new|new file|deleted file) mode [0-7]{6})")
+MAX_REVIEW_DIFF_BYTES = 100_000
+MAX_BOUND_DIFF_BYTES = MAX_AUDITED_LOCK_BYTES
 
 
 def build_typed_context(
     *, repo_root: Path, inventory: ReviewInventory, diff_content: str | None,
     ingest: dict, deterministic_findings: list[dict],
 ) -> dict:
+    context, _ = build_context_and_review_diff(
+        repo_root=repo_root, inventory=inventory, diff_content=diff_content,
+        ingest=ingest, deterministic_findings=deterministic_findings,
+    )
+    return context
+
+
+def build_context_and_review_diff(
+    *, repo_root: Path, inventory: ReviewInventory, diff_content: str | None,
+    ingest: dict, deterministic_findings: list[dict],
+) -> tuple[dict, str]:
     """Reject unsupported/partial diffs; never silently clip the review state.
 
     Added/context lines are checked against the current file. Removed lines are
     patch context only: they are not claimed as verified head-source quotations.
+    The complete patch is bounded and checked locally; only non-audited records
+    may enter the generator context, under the original review-diff budget.
     """
-    if not diff_content or len(diff_content.encode("utf-8")) > 100_000:
+    if not diff_content or len(diff_content.encode("utf-8")) > MAX_BOUND_DIFF_BYTES:
         raise TypeSafeReviewIncomplete("typed_diff_unavailable_or_oversize")
     expected = dict(inventory.source_hashes)
+    excluded = dict(inventory.excluded_source_hashes)
+    if set(expected) & set(excluded):
+        raise TypeSafeReviewIncomplete("incomplete_source_inventory")
+    expected.update(excluded)
     headers = {f"diff --git a/{path} b/{path}" for path in expected}
+    header_paths = {f"diff --git a/{path} b/{path}": path for path in expected}
     headers.update("--- a/" + path for path in expected)
     headers.update("+++ b/" + path for path in expected)
     headers.add("--- /dev/null")
@@ -34,13 +54,29 @@ def build_typed_context(
     current = None
     index = 0
     touched = set()
+    declared = set()
+    git_headers = set()
+    review_sections = []
+    section_start = None
+    section_path = None
     while index < len(lines):
         line = lines[index]
         if line.startswith(("rename from ", "rename to ", "copy from ", "copy to ",
                             "GIT binary patch", "Binary files ")):
             raise TypeSafeReviewIncomplete("unsupported_typed_diff_path")
         if line.startswith("diff --git "):
+            if line not in headers:
+                raise TypeSafeReviewIncomplete("unsupported_typed_diff_path")
+            if line in git_headers:
+                raise TypeSafeReviewIncomplete("duplicate_typed_diff_record")
+            if section_start is not None and section_path not in excluded:
+                review_sections.extend(lines[section_start:index])
+            section_start = index
+            section_path = header_paths[line]
+            git_headers.add(line)
             current = None
+        if line.startswith("--- ") and line not in {"--- /dev/null", f"--- a/{section_path}"}:
+            raise TypeSafeReviewIncomplete("unsupported_typed_diff_path")
         if line.startswith("+++ "):
             path = line[4:]
             # Quoted paths, binary patches, deletion-only and renames are not
@@ -48,6 +84,11 @@ def build_typed_context(
             if not path.startswith("b/") or path[2:] not in expected:
                 raise TypeSafeReviewIncomplete("unsupported_typed_diff_path")
             current = path[2:]
+            if current != section_path:
+                raise TypeSafeReviewIncomplete("unsupported_typed_diff_path")
+            if current in declared:
+                raise TypeSafeReviewIncomplete("duplicate_typed_diff_record")
+            declared.add(current)
         match = _HUNK.match(line)
         if not match:
             # Generator context includes the complete original patch. Arbitrary
@@ -98,6 +139,10 @@ def build_typed_context(
         if old_seen != old_count or new_seen != new_count:
             raise TypeSafeReviewIncomplete("incomplete_typed_diff_hunk")
         touched.add(current)
+        if current in excluded:
+            # Verify the complete patch record, but do not send audited lock
+            # bytes (including removed lines) to the model.
+            continue
         text = "\n".join(hunk)
         # Patch '+'/'-' markers are not identifier bytes. Inspect the source
         # payload so a removed '-SECRET_KEY=...' cannot evade the field scanner.
@@ -115,6 +160,13 @@ def build_typed_context(
         })
     if touched != set(expected):
         raise TypeSafeReviewIncomplete("incomplete_typed_diff_file_coverage")
+    if git_headers != set(header_paths):
+        raise TypeSafeReviewIncomplete("incomplete_typed_diff_file_coverage")
+    if section_start is not None and section_path not in excluded:
+        review_sections.extend(lines[section_start:])
+    review_diff = "\n".join(review_sections) + ("\n" if review_sections else "")
+    if len(review_diff.encode("utf-8")) > MAX_REVIEW_DIFF_BYTES:
+        raise TypeSafeReviewIncomplete("typed_diff_unavailable_or_oversize")
     metadata = {row.get("path"): row for row in ingest.get("files", []) if isinstance(row, dict)}
     candidates = {}
     for candidate in inventory.candidates:
@@ -152,4 +204,4 @@ def build_typed_context(
             "deterministic_scanner_hits": hits,
         }
     return {"candidate_context": candidates, "diff_head_lines_verified": True,
-            "removed_lines_verified": False}
+            "removed_lines_verified": False}, review_diff
