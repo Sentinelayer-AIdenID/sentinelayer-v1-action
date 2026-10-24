@@ -318,24 +318,24 @@ Any vulnerability reported by npm is vulnerable evidence. Enabling the harness
 authorizes npm audit to send the validated copied lock graph (package names and
 versions) to that public npm registry endpoint.
 
-Python coverage is deliberately narrower: a root `requirements.txt` must contain a
-nonempty set of exact `name==version` pins, no other Python dependency manifest may
-be present, and pip-audit's result must contain that exact normalized name/version
-set. This covers the declared direct pins only, not their transitive dependency
-closure. Enabling the harness authorizes pip-audit to send those pinned names and
-versions to its public vulnerability service. Repositories with pip routing
-configuration—including alternate indexes or `find-links` sources—are unsupported
-and fail before that metadata can be sent.
-Other Python inputs—including `pyproject.toml`, `Pipfile.lock`, Poetry, uv, PDM,
-`pylock.*`, alternate `requirements-*.txt`, and `requirements/*.txt`—make the
-direct-pin claim indeterminate rather than being silently ignored. The same applies
-to `requirements*.in` and `requirements/*.in` source manifests.
+Python coverage is deliberately narrower. Bounded discovery accepts root or nested
+`requirements*.txt` and `requirements/*.txt` files containing exact `name==version`
+pins. A `requirements*.in` input is accepted with a same-stem `.lock` file whose
+pins have SHA-256 hash entries; each declared direct name must be present at a
+version satisfying its input specifier. Static tool-only `pyproject.toml` files may
+coexist. The harness snapshots the pins outside the checkout and requires
+pip-audit's result to contain exactly those normalized names and versions. This
+covers the listed pins, not their transitive dependency closure or extras; hash
+entries are checked for syntax, not against downloaded artifacts. Enabling the
+harness authorizes pip-audit to send those names and versions to its public
+vulnerability service. Unsupported Python manifests and pip routing configuration
+(including alternate indexes or `find-links`) fail closed before metadata is sent.
 
 Rust projects require a valid `Cargo.lock`; cargo-audit's reported dependency count
 must match it. A separately provisioned, version-pinned `cargo-audit` executable is
 required because this action intentionally does not install it.
 
-Machine evidence uses schema `1.1` and binds the exact coverage scopes
+Machine evidence uses schema `1.3` and binds the exact coverage scopes
 `package_lock_registry_graph`, `declared_direct_pins`, and `cargo_lock_packages` for
 npm, pip, and Cargo respectively. Consumers reject a missing or altered scope map.
 

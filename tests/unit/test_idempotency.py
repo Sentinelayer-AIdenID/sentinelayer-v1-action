@@ -114,11 +114,11 @@ def test_dependency_audit_contract_and_harness_mode_are_bound() -> None:
     assert enabled != prior_contract
 
 
-def test_npm_workspace_boundary_rotates_both_contract_tokens() -> None:
-    assert DEPENDENCY_AUDIT_CONTRACT_VERSION == "dependency-audit-evidence-v1.2:workspace-root:complete-discovery:root-declared-peer-edges:isolated-npm-config"
+def test_nested_pip_boundary_rotates_both_contract_tokens() -> None:
+    assert DEPENDENCY_AUDIT_CONTRACT_VERSION == "dependency-audit-evidence-v1.3:workspace-root:complete-discovery:root-declared-peer-edges:isolated-npm-config:nested-pip-direct-pins"
     assert (
         ACTION_IDEMPOTENCY_VERSION
-        == "4:dependency-audit-v1.2:complete-discovery:workspace-root:private-policy:review-config:verified-model:root-declared-peer-edges:isolated-npm-config:verified-scope-findings:failed-call-provenance:route-attempt-provenance"
+        == "4:dependency-audit-v1.3:complete-discovery:workspace-root:private-policy:review-config:verified-model:root-declared-peer-edges:isolated-npm-config:verified-scope-findings:failed-call-provenance:route-attempt-provenance:nested-pip-direct-pins:entropy-candidate-boundaries"
     )
 
     common = {
@@ -152,6 +152,16 @@ def test_npm_workspace_boundary_rotates_both_contract_tokens() -> None:
     for action, audit in [(old_action, old_audit), (old_action, DEPENDENCY_AUDIT_CONTRACT_VERSION),
                           (ACTION_IDEMPOTENCY_VERSION, old_audit)]:
         assert current != compute_idempotency_key(action_major_version=action, audit_contract_version=audit, **common)
+    previous_action = "4:dependency-audit-v1.2:complete-discovery:workspace-root:private-policy:review-config:verified-model:root-declared-peer-edges:isolated-npm-config:verified-scope-findings:failed-call-provenance:route-attempt-provenance"
+    previous_audit = "dependency-audit-evidence-v1.2:workspace-root:complete-discovery:root-declared-peer-edges:isolated-npm-config"
+    for action, audit in [
+        (previous_action, previous_audit),
+        (previous_action, DEPENDENCY_AUDIT_CONTRACT_VERSION),
+        (ACTION_IDEMPOTENCY_VERSION, previous_audit),
+    ]:
+        assert current != compute_idempotency_key(
+            action_major_version=action, audit_contract_version=audit, **common,
+        )
 
 
 def test_pip_audit_ignore_ids_are_canonicalized_for_idempotency() -> None:
