@@ -71,9 +71,10 @@ def test_review_chain_not_attempted_sanitized_660() -> None:
                     "tier": "deep",
                     "model": "gpt-6-sol",
                     "effort": "max",
+                    "attempted": False,
                     "success": False,
                     "reported_model": "",
-                    "identity_matches": False,
+                    "identity_matches": None,
                 }
             ],
         },
@@ -142,7 +143,7 @@ def test_review_chain_complete() -> None:
 # ── ATTEMPTED-FAILED ─────────────────────────────────────────────────
 
 def test_review_chain_attempted_failed() -> None:
-    """Call attempted but provider failure, identity mismatched."""
+    """A failed call without a returned model has no identity to compare."""
     kwargs = _base_kwargs()
     kwargs.update(
         llm_engine="openai",
@@ -162,9 +163,10 @@ def test_review_chain_attempted_failed() -> None:
                     "tier": "primary",
                     "model": "gpt-5.3-codex",
                     "effort": "medium",
+                    "attempted": True,
                     "success": False,
                     "reported_model": "",
-                    "identity_matches": False,
+                    "identity_matches": None,
                 }
             ],
         },
@@ -174,9 +176,9 @@ def test_review_chain_attempted_failed() -> None:
     assert "`openai` (`unknown`)" in body
     assert "**Cost (usage):** unknown (subtotal)" in body
     assert "### Review chain" in body
-    assert "     - Attempted: yes, returned `unknown`" in body
+    assert "     - Attempted: yes, no model returned" in body
     assert "**failed**" in body
-    assert "     - Identity: mismatched" in body
+    assert "     - Identity: unavailable (no model returned)" in body
     assert "- **Failure class:** `provider_failure`" in body
     assert "- **Attempted:** True" in body
     assert "- **Success:** False" in body
@@ -363,3 +365,23 @@ def test_review_chain_multi_route_per_route_attempted() -> None:
     # Route 2 should say attempted: no
     # Count occurrences of "Attempted: no" — should be exactly 1 (for route 2)
     assert body.count("     - Attempted: no") == 1
+
+
+def test_legacy_route_without_attempt_bit_does_not_borrow_aggregate_attempt() -> None:
+    kwargs = _base_kwargs()
+    kwargs.update(
+        llm_engine="openai",
+        llm_model="gpt-6-sol",
+        llm_evidence={"attempted": True, "success": True},
+        review_routing={"routes": [
+            {"tier": "low", "model": "gpt-6-luna", "effort": "max",
+             "success": False, "reported_model": "", "identity_matches": False},
+            {"tier": "deep", "model": "gpt-6-sol", "effort": "max",
+             "attempted": True, "success": True, "reported_model": "gpt-6-sol",
+             "identity_matches": True},
+        ]},
+    )
+    body = render_pr_comment(**kwargs)
+    first_route = body.split("  1. ")[1].split("  2. ")[0]
+    assert "Attempted: unknown (missing per-route evidence)" in first_route
+    assert "Attempted: yes" not in first_route

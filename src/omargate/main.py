@@ -66,7 +66,7 @@ from .utils import ensure_writable_dir, json_dumps
 ACTION_VERSION = "1.3.11"
 # Rotate this whenever a security-control contract changes so dedupe cannot
 # mirror a successful check produced under weaker semantics on the same head.
-ACTION_IDEMPOTENCY_VERSION = "4:dependency-audit-v1.2:complete-discovery:workspace-root:private-policy:review-config:verified-model:root-declared-peer-edges:isolated-npm-config:verified-scope-findings:failed-call-provenance"
+ACTION_IDEMPOTENCY_VERSION = "4:dependency-audit-v1.2:complete-discovery:workspace-root:private-policy:review-config:verified-model:root-declared-peer-edges:isolated-npm-config:verified-scope-findings:failed-call-provenance:route-attempt-provenance"
 DEPENDENCY_AUDIT_CONTRACT_VERSION = "dependency-audit-evidence-v1.2:workspace-root:complete-discovery:root-declared-peer-edges:isolated-npm-config"
 CHECK_NAME_BASE = "Omar Gate"
 __all__ = [
@@ -135,23 +135,15 @@ def _llm_display_identity(analysis, **kwargs) -> tuple[str, str]:
     model = str(usage.get("model") or "").strip() or "unknown"
     return engine, model
 
-def _provider_key_present(config) -> bool:
-    """Return True when the configured LLM provider has a non-empty API key."""
-    try:
-        provider = config.llm_provider
-        if provider == "openai":
-            return bool(config.openai_api_key.get_secret_value().strip())
-        if provider == "typesafe":
-            return bool(config.typesafe_api_key.get_secret_value().strip())
-        if provider == "anthropic":
-            return bool(config.anthropic_api_key.get_secret_value().strip())
-        if provider == "google":
-            return bool(config.google_api_key.get_secret_value().strip())
-        if provider == "xai":
-            return bool(config.xai_api_key.get_secret_value().strip())
+def _llm_enabled_for_display(orchestrator: AnalysisOrchestrator) -> bool:
+    """Use the configured routes, including Codex and managed proxy, for display."""
+    if not orchestrator.allow_llm:
         return False
-    except Exception:
-        return False
+    return bool(
+        orchestrator.config.use_codex
+        or orchestrator.config.llm_provider == "typesafe"
+        or orchestrator._should_run_llm()
+    )
 
 
 def _llm_display_cost(analysis) -> tuple[Optional[float], bool]:
@@ -910,7 +902,7 @@ async def async_main() -> int:
                     try:
                         llm_engine_used, llm_model_used = _llm_display_identity(
                             analysis,
-                            llm_enabled=_provider_key_present(config),
+                            llm_enabled=_llm_enabled_for_display(orchestrator),
                             routing=(analysis.llm_usage or {}).get("review_routing"),
                         )
 

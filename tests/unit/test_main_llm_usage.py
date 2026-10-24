@@ -7,9 +7,12 @@ from types import SimpleNamespace
 import pytest
 
 from omargate.config import OmarGateConfig
+from omargate.analyze.orchestrator import AnalysisOrchestrator
+from omargate.logging import OmarLogger
 from omargate.main import (
     _build_llm_evidence,
     _llm_display_cost,
+    _llm_enabled_for_display,
     _llm_display_identity,
     _llm_fallback_used,
 )
@@ -302,3 +305,27 @@ def test_disabled_llm_returns_disabled_state() -> None:
         llm_failure_class=None,
     )
     assert _llm_display_identity(analysis, llm_enabled=False) == ("disabled", "n/a")
+
+
+def test_managed_only_route_is_enabled_in_published_identity(tmp_path) -> None:
+    config = OmarGateConfig(
+        llm_provider="openai", sentinelayer_token="fixture-managed-token", use_codex=False,
+    )
+    orchestrator = AnalysisOrchestrator(config, OmarLogger("managed-display-test"), tmp_path)
+    assert config.use_managed_llm_proxy()
+    assert orchestrator._should_run_llm()
+    assert _llm_enabled_for_display(orchestrator)
+
+    refused = SimpleNamespace(
+        llm_usage=None, llm_attempted=False, llm_success=False,
+        llm_failure_class="preflight_refused",
+    )
+    assert _llm_display_identity(refused, llm_enabled=_llm_enabled_for_display(orchestrator)) == (
+        "NOT_ATTEMPTED", "preflight_refused",
+    )
+
+    orchestrator.allow_llm = False
+    assert not _llm_enabled_for_display(orchestrator)
+    assert _llm_display_identity(refused, llm_enabled=_llm_enabled_for_display(orchestrator)) == (
+        "disabled", "n/a",
+    )

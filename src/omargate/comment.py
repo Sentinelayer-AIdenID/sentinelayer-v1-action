@@ -240,32 +240,34 @@ def _review_chain_section(llm_evidence, review_routing, llm_engine, llm_model):
             effort = r.get("effort", "?")
             success = r.get("success")
             reported = r.get("reported_model", "")
-            has_reported = isinstance(reported, str) and reported != ""
+            has_reported = isinstance(reported, str) and reported not in {"", "unknown"}
             identity_matches = r.get("identity_matches")
-            # Per-route attempt evidence first, then cascade-wide, then route signals
+            # An aggregate attempt bit cannot identify which route made a call.
             route_attempted = r.get("attempted")
-            if route_attempted is not None:
-                attempted = bool(route_attempted)
+            if isinstance(route_attempted, bool):
+                attempted = route_attempted
+            elif success is True or has_reported or identity_matches is True:
+                attempted = True
             else:
-                ev_attempted = evidence.get("attempted")
-                if ev_attempted is not None:
-                    attempted = bool(ev_attempted)
-                else:
-                    attempted = has_reported or identity_matches is True
+                attempted = None
             lines.append("  " + str(i + 1) + ". `" + tier + "` \u2192 `" + req_model + "` / `" + effort + "`")
-            if attempted:
+            if attempted is True:
                 status_mark = "passed" if success else "failed"
-                returned_display = reported if has_reported else "unknown"
-                lines.append("     - Attempted: yes, returned `" + returned_display + "` \u2014 **" + status_mark + "**")
+                returned_display = "returned `" + reported + "`" if has_reported else "no model returned"
+                lines.append("     - Attempted: yes, " + returned_display + " \u2014 **" + status_mark + "**")
                 # Show identity verification
-                if identity_matches is True:
+                if not has_reported:
+                    lines.append("     - Identity: unavailable (no model returned)")
+                elif identity_matches is True:
                     lines.append("     - Identity: verified")
                 elif identity_matches is False:
                     lines.append("     - Identity: mismatched")
                 else:
                     lines.append("     - Identity: unknown")
-            else:
+            elif attempted is False:
                 lines.append("     - Attempted: no")
+            else:
+                lines.append("     - Attempted: unknown (missing per-route evidence)")
     else:
         if llm_engine == "NOT_ATTEMPTED":
             lines.append("- **Route:** not attempted (`" + llm_model + "`)")

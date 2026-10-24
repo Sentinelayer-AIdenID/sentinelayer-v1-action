@@ -16,6 +16,7 @@ from omargate.analyze.typesafe_client import ChoiceAnswer, TypeSafeResult
 from omargate.analyze.orchestrator import AnalysisOrchestrator, LLMAnalysisResult
 from omargate.analyze.llm.providers.openai_provider import OpenAIProvider
 from omargate.config import OmarGateConfig
+from omargate.comment import _review_chain_section
 from omargate.logging import OmarLogger
 from omargate.analyze.typesafe_review import TypedReview, review_inventory as real_review_inventory
 
@@ -251,7 +252,8 @@ async def test_unattempted_generator_refusal_has_no_fake_model_mismatch_or_cost(
     assert result.failure_class == "cascade_source_privacy_incomplete"
     assert not result.attempted
     assert all(row["provider"] == "typesafe" for row in result.usage["cost_ledger"]["calls"])
-    assert result.usage["review_routing"]["routes"][0]["identity_matches"] is False
+    route = result.usage["review_routing"]["routes"][0]
+    assert route["attempted"] is False and route["identity_matches"] is None
 
 
 async def run_review(orchestrator, *, scan_mode="pr-diff", run_dir=None):
@@ -293,6 +295,40 @@ async def test_low_defect_escalates_and_later_clean_cannot_erase(configured, mon
     assert len(result.usage["cost_ledger"]["calls"]) == 4
     assert result.findings[0]["review_model"] == LOW.model
     assert result.findings[0]["review_tier"] == "low"
+
+
+@pytest.mark.parametrize("first_attempted", [False, True])
+async def test_mixed_cascade_routes_render_their_own_attempt_evidence(
+    configured, monkeypatch, first_attempted,
+):
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate",
+                        AsyncMock(return_value=triage()))
+    refusal = LLMAnalysisResult([], False, None, None, attempted=False,
+                                failure_class="cascade_context_incomplete")
+    outcomes = ([generator_result(LOW, success=False), refusal] if first_attempted
+                else [refusal, generator_result(DEEP)])
+    configured._run_llm_analysis = AsyncMock(side_effect=outcomes)
+
+    result = await run_review(configured)
+    routing = result.usage["review_routing"]
+    assert [row["attempted"] for row in routing["routes"]] == [
+        first_attempted, not first_attempted,
+    ]
+    assert result.attempted is True  # an earlier paid attempt survives a later refusal
+    stages = [row["stage"] for row in result.usage["cost_ledger"]["calls"]]
+    assert ("generator-low" in stages) is first_attempted
+    assert ("generator-deep" in stages) is not first_attempted
+
+    rendered = _review_chain_section(
+        {"attempted": result.attempted, "success": result.success},
+        routing, "openai", "unknown",
+    )
+    first_route = rendered.split("  1. ")[1].split("  2. ")[0]
+    second_route = rendered.split("  2. ")[1].split("- **Attempted:**")[0]
+    assert ("- Attempted: yes" in first_route) is first_attempted
+    assert ("- Attempted: no" in first_route) is not first_attempted
+    assert ("- Attempted: yes" in second_route) is not first_attempted
+    assert ("- Attempted: no" in second_route) is first_attempted
 
 
 async def test_missing_whole_scope_refuses_before_any_paid_request(configured, monkeypatch):
@@ -503,14 +539,39 @@ async def test_provider_exception_has_no_returned_model_or_zero_usage(configured
     route = result.usage["review_routing"]["routes"][-1]
     assert not result.success and result.attempted
     assert result.failure_class == "provider_failure"  # never relabelled as a policy gap
-    assert (route["tier"], route["reported_model"], route["identity_matches"], route["success"]) == ("deep", "unknown", False, False)
+    assert (route["tier"], route["attempted"], route["reported_model"],
+            route["identity_matches"], route["success"]) == ("deep", True, "", None, False)
     assert result.usage["model"] == "unknown"
+    rendered = _review_chain_section({"attempted": result.attempted},
+                                     result.usage["review_routing"], "openai", "unknown")
+    assert "Attempted: yes, no model returned" in rendered
+    assert "Identity: unavailable (no model returned)" in rendered
     assert (result.usage["tokens_in"], result.usage["tokens_out"], result.usage["cost_usd"]) == (None, None, None)
     generator_row = result.usage["cost_ledger"]["calls"][-1]
     assert generator_row["stage"] == "generator-deep" and generator_row["estimated_usd"] is None
     assert result.usage["cost_ledger"]["estimated_total_usd"] is None
     assert result.usage["policy_assessment"]["status"] == ("complete" if policy == "complete" else "incomplete")
     assert "resolution" not in result.usage["policy_assessment"]
+
+
+async def test_wrong_returned_model_is_visible_as_unverified_evidence(configured, monkeypatch):
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate",
+                        AsyncMock(return_value=triage(sensitive=1)))
+    response = generator_result(DEEP)
+    response.usage["model"] = MID.model
+    configured._run_llm_analysis = AsyncMock(return_value=response)
+
+    result = await run_review(configured)
+    route = result.usage["review_routing"]["routes"][-1]
+    assert not result.success and result.failure_class == "cascade_model_mismatch"
+    assert route["attempted"] is True
+    assert route["model"] == DEEP.model
+    assert route["reported_model"] == MID.model
+    assert route["identity_matches"] is False
+    rendered = _review_chain_section({"attempted": result.attempted},
+                                     result.usage["review_routing"], "openai", "unknown")
+    assert "returned `" + MID.model + "`" in rendered
+    assert "Identity: mismatched" in rendered
 
 
 async def test_private_policy_p4_is_preserved_without_forcing_expensive_review(configured, monkeypatch):
