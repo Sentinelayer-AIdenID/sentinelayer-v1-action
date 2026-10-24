@@ -75,7 +75,10 @@ _SECRET_PATTERNS = [
     },
 ]
 
-_ENTROPY_CANDIDATE_RE = re.compile(r"[A-Za-z0-9+/=_-]{20,}")
+# '=' belongs to a token only as optional base64 padding. Keeping it inside
+# the body joins source assignments (name=value) into fake high-entropy tokens
+# and can hide the actual unquoted value behind an identifier shortcut.
+_ENTROPY_CANDIDATE_RE = re.compile(r"[A-Za-z0-9+/_-]{20,}={0,2}")
 
 
 def calculate_entropy(s: str) -> float:
@@ -185,6 +188,35 @@ def _looks_like_non_secret_identifier(candidate: str) -> bool:
     return False
 
 
+def _is_unquoted_assignment_name(content: str, match: re.Match[str]) -> bool:
+    """Keep scanning the RHS instead of treating ``identifier=`` as a token."""
+    candidate = match.group(0)
+    next_char = content[match.end() : match.end() + 1]
+    return bool(
+        candidate.endswith("=")
+        and _IDENTIFIER_TOKEN_RE.fullmatch(candidate[:-1])
+        and next_char
+        and (next_char.isalnum() or next_char in "_$")
+    )
+
+
+def _is_jsx_expression_attribute(content: str, file_path: str, match: re.Match[str]) -> bool:
+    """Skip the name of a JSX prop bound to an expression, not its value."""
+    if not file_path.lower().endswith((".jsx", ".tsx")):
+        return False
+    candidate = match.group(0)
+    if (
+        not candidate.endswith("=")
+        or not _IDENTIFIER_TOKEN_RE.fullmatch(candidate[:-1])
+        or content[match.end() : match.end() + 1] != "{"
+    ):
+        return False
+    tag_start = content.rfind("<", 0, match.start())
+    if tag_start <= content.rfind(">", 0, match.start()):
+        return False
+    return bool(re.match(r"<[A-Za-z][A-Za-z0-9_.:-]*\b", content[tag_start:]))
+
+
 def _likely_secret_context(source_line: str, candidate: str) -> bool:
     if _has_known_secret_prefix(candidate):
         return True
@@ -273,6 +305,10 @@ def scan_for_secrets(content: str, file_path: str) -> List[Finding]:
             continue
         # Skip common code identifiers (camelCase, snake_case, etc.)
         if _looks_like_non_secret_identifier(candidate):
+            continue
+        if _is_unquoted_assignment_name(content, match):
+            continue
+        if _is_jsx_expression_attribute(content, file_path, match):
             continue
         # Skip candidates on comment lines
         line_start = _index_to_line(line_starts, match.start())
