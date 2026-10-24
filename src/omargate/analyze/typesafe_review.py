@@ -29,135 +29,48 @@ LINES_PER_CANDIDATE = 40
 
 
 
-# Lockfile names covered by the dependency audit suite (dep_audit.py).
-# Each entry is either a literal filename or a (prefix, min_length) tuple.
-# Only lockfile formats dep_audit.py actually audits are listed here.
-# A file matching these is only excluded when a verified receipt from the
-# same run confirms the exact file was audited; never a blanket ignore.
-_DEP_AUDIT_LOCKFILES: tuple[str | tuple[str, int], ...] = (
-    "package-lock.json",
-    "npm-shrinkwrap.json",
-    "Cargo.lock",
-    ("pylock.", 7),
-)
-
-def _is_dep_audit_lockfile(path: str) -> bool:
-    name = path.rsplit("/", 1)[-1]
-    for entry in _DEP_AUDIT_LOCKFILES:
-        if isinstance(entry, tuple):
-            prefix, min_len = entry
-            if name.startswith(prefix) and len(name) > min_len:
-                if prefix == "pylock." and (name.endswith(".py") or name.endswith(".pyi") or name.endswith(".txt")):
-                    continue
-                return True
-        elif name == entry:
-            return True
-    return False
+# dep_audit currently emits per-file path/hash receipts only for npm locks.
+# Cargo and pip outcomes are ecosystem-wide, so their files remain candidates.
+_DEP_AUDIT_LOCKFILES = frozenset({"package-lock.json", "npm-shrinkwrap.json"})
 
 
 def _lockfile_coverage_receipt(
-    relative: str, dep_audit_evidence: dict | None,
-    absolute_path: Path | None = None,
+    relative: str, dep_audit_evidence: dict | None, source_sha256: str,
 ) -> str | None:
     """Return 'dep_audit_coverage' only when the audit was enabled, complete,
     and contains a verified receipt for this exact lockfile.
     None means the file stays in the review inventory (fail safe)."""
-    if dep_audit_evidence is None:
+    if not isinstance(dep_audit_evidence, dict):
         return None
-    if not dep_audit_evidence.get("enabled", False):
+    if dep_audit_evidence.get("enabled") is not True:
         return None
-    if not dep_audit_evidence.get("complete", False):
+    if dep_audit_evidence.get("complete") is not True:
         return None
     name = relative.rsplit("/", 1)[-1]
-    if name in ("package-lock.json", "npm-shrinkwrap.json"):
-        return _npm_lockfile_receipt(relative, dep_audit_evidence, absolute_path)
-    if name == "Cargo.lock":
-        return _cargo_lockfile_receipt(relative, dep_audit_evidence, absolute_path)
-    if name.startswith("pylock.") and len(name) > len("pylock.") and not name.endswith((".py", ".pyi", ".txt")):
-        return _pip_lockfile_receipt(relative, dep_audit_evidence, absolute_path)
+    if name in _DEP_AUDIT_LOCKFILES:
+        return _npm_lockfile_receipt(relative, dep_audit_evidence, source_sha256)
     return None
 
 
-def _npm_lockfile_receipt(relative: str, evidence: dict, absolute_path: Path | None = None) -> str | None:
-    """Verify the exact lockfile path and sha256 appear in npm_projects audits."""
-    import hashlib
-    if absolute_path is not None:
-        try:
-            raw = absolute_path.read_bytes()
-        except (OSError, PermissionError):
-            return None
-    else:
-        try:
-            raw = Path(relative).read_bytes()
-        except (OSError, PermissionError):
-            return None
-    file_hash = hashlib.sha256(raw).hexdigest()
+def _npm_lockfile_receipt(relative: str, evidence: dict, source_sha256: str) -> str | None:
+    """Verify the exact npm lockfile and completed, unchanged project audit."""
     npm_projects = evidence.get("npm_projects", {})
     audits = npm_projects.get("audits", ()) if isinstance(npm_projects, dict) else ()
+    if not isinstance(audits, (list, tuple)):
+        return None
     for entry in audits:
         if not isinstance(entry, dict):
             continue
         entry_path = entry.get("lockfile_path")
         entry_hash = entry.get("lockfile_sha256")
-        if entry_path == relative and entry_hash == file_hash:
+        if entry_path == relative and entry_hash == source_sha256:
             outcome = entry.get("outcome", {})
-            if isinstance(outcome, dict) and outcome.get("state") in ("clean", "vulnerable"):
+            if (entry.get("input_unchanged") is True
+                    and isinstance(outcome, dict)
+                    and outcome.get("ecosystem") == "npm"
+                    and outcome.get("applicable") is True
+                    and outcome.get("state") in ("clean", "vulnerable")):
                 return "dep_audit_coverage"
-            return None
-    return None
-
-
-def _cargo_lockfile_receipt(relative: str, evidence: dict, absolute_path: Path | None = None) -> str | None:
-    """Cargo.lock coverage requires a path-verified clean/vulnerable cargo outcome."""
-    if absolute_path is not None:
-        try:
-            absolute_path.read_bytes()
-        except (OSError, PermissionError):
-            return None
-    else:
-        try:
-            Path(relative).read_bytes()
-        except (OSError, PermissionError):
-            return None
-    outcomes = evidence.get("outcomes") or ()
-    if not isinstance(outcomes, (list, tuple)):
-        return None
-    for outcome in outcomes:
-        if not isinstance(outcome, dict):
-            continue
-        if outcome.get("ecosystem") != "cargo":
-            continue
-        if not outcome.get("applicable", True):
-            return None
-        if outcome.get("state") in ("clean", "vulnerable"):
-            return "dep_audit_coverage"
-    return None
-
-
-def _pip_lockfile_receipt(relative: str, evidence: dict, absolute_path: Path | None = None) -> str | None:
-    """Pylock coverage requires a path-verified clean/vulnerable pip outcome."""
-    if absolute_path is not None:
-        try:
-            absolute_path.read_bytes()
-        except (OSError, PermissionError):
-            return None
-    else:
-        try:
-            Path(relative).read_bytes()
-        except (OSError, PermissionError):
-            return None
-    outcomes = evidence.get("outcomes") or ()
-    if not isinstance(outcomes, (list, tuple)):
-        return None
-    for outcome in outcomes:
-        if not isinstance(outcome, dict):
-            continue
-        if outcome.get("ecosystem") != "pip":
-            continue
-        if not outcome.get("applicable", True):
-            return None
-        if outcome.get("state") in ("clean", "vulnerable"):
-            return "dep_audit_coverage"
     return None
 
 class TypeSafeReviewIncomplete(ValueError):
@@ -211,6 +124,7 @@ class ReviewInventory:
     source_hashes: tuple[tuple[str, str], ...]
     scan_mode: str
     policy_excluded: tuple[tuple[str, str], ...] = ()
+    excluded_source_hashes: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -294,6 +208,7 @@ def build_inventory(
     candidates: list[ReviewCandidate] = []
     hashes: list[tuple[str, str]] = []
     excluded: list[tuple[str, str]] = []
+    excluded_hashes: list[tuple[str, str]] = []
     for relative in sorted(set(changed_files)):
         path = _source_path(repo_root, relative)
         if path.stat().st_size > MAX_FILE_BYTES:
@@ -305,15 +220,16 @@ def build_inventory(
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             raise TypeSafeReviewIncomplete("unsupported_source_encoding") from None
-        if _is_dep_audit_lockfile(relative):
-            receipt = _lockfile_coverage_receipt(relative, dep_audit_evidence, absolute_path=path)
+        source_hash = _digest(raw)
+        if relative.rsplit("/", 1)[-1] in _DEP_AUDIT_LOCKFILES:
+            receipt = _lockfile_coverage_receipt(relative, dep_audit_evidence, source_hash)
             if receipt is not None:
                 excluded.append((relative, receipt))
+                excluded_hashes.append((relative, source_hash))
                 continue
         lines = text.splitlines(keepends=True)
         if not lines:
             raise TypeSafeReviewIncomplete("empty_source_scope")
-        source_hash = _digest(raw)
         hashes.append((relative, source_hash))
         for offset in range(0, len(lines), LINES_PER_CANDIDATE):
             end = min(offset + LINES_PER_CANDIDATE, len(lines))
@@ -328,18 +244,29 @@ def build_inventory(
             ))
             if len(candidates) > max_candidates:
                 raise TypeSafeReviewIncomplete("candidate_budget_exceeded")
-    return ReviewInventory(tuple(candidates), tuple(hashes), scan_mode, tuple(excluded))
+    return ReviewInventory(tuple(candidates), tuple(hashes), scan_mode,
+                           tuple(excluded), tuple(excluded_hashes))
 
 
 def verify_sources(repo_root: Path, inventory: ReviewInventory) -> None:
     expected_hashes = dict(inventory.source_hashes)
+    excluded_hashes = dict(inventory.excluded_source_hashes)
     if (
         inventory.scan_mode != "pr-diff"
         or not expected_hashes
         or len(expected_hashes) != len(inventory.source_hashes)
+        or len(excluded_hashes) != len(inventory.excluded_source_hashes)
+        or len(inventory.policy_excluded) != len(excluded_hashes)
+        or set(excluded_hashes) != {path for path, _ in inventory.policy_excluded}
+        or set(expected_hashes) & set(excluded_hashes)
         or {candidate.file_path for candidate in inventory.candidates} != set(expected_hashes)
     ):
         raise TypeSafeReviewIncomplete("incomplete_source_inventory")
+    for relative, expected in inventory.excluded_source_hashes:
+        path = _source_path(repo_root, relative)
+        raw = path.read_bytes()
+        if len(raw) > MAX_FILE_BYTES or _digest(raw) != expected:
+            raise TypeSafeReviewIncomplete("source_changed_during_review")
     for relative, expected in inventory.source_hashes:
         path = _source_path(repo_root, relative)
         if path.stat().st_size > MAX_FILE_BYTES:
@@ -525,6 +452,7 @@ async def review_inventory(
         "provider": "typesafe", "model": intent_model_reference(response.model),
         "policy_id": policy.policy_id, "calibration_id": policy.calibration_id,
         "source_hashes": dict(inventory.source_hashes),
+        "excluded_source_hashes": dict(inventory.excluded_source_hashes),
         "policy_excluded": [
             {"path": path, "reason": reason}
             for path, reason in inventory.policy_excluded

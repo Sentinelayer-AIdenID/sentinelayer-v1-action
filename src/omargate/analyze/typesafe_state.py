@@ -25,6 +25,10 @@ def build_typed_context(
     if not diff_content or len(diff_content.encode("utf-8")) > 100_000:
         raise TypeSafeReviewIncomplete("typed_diff_unavailable_or_oversize")
     expected = dict(inventory.source_hashes)
+    excluded = dict(inventory.excluded_source_hashes)
+    if set(expected) & set(excluded):
+        raise TypeSafeReviewIncomplete("incomplete_source_inventory")
+    expected.update(excluded)
     headers = {f"diff --git a/{path} b/{path}" for path in expected}
     headers.update("--- a/" + path for path in expected)
     headers.update("+++ b/" + path for path in expected)
@@ -34,12 +38,19 @@ def build_typed_context(
     current = None
     index = 0
     touched = set()
+    declared = set()
+    git_headers = set()
     while index < len(lines):
         line = lines[index]
         if line.startswith(("rename from ", "rename to ", "copy from ", "copy to ",
                             "GIT binary patch", "Binary files ")):
             raise TypeSafeReviewIncomplete("unsupported_typed_diff_path")
         if line.startswith("diff --git "):
+            if line not in headers:
+                raise TypeSafeReviewIncomplete("unsupported_typed_diff_path")
+            if line in git_headers:
+                raise TypeSafeReviewIncomplete("duplicate_typed_diff_record")
+            git_headers.add(line)
             current = None
         if line.startswith("+++ "):
             path = line[4:]
@@ -48,6 +59,9 @@ def build_typed_context(
             if not path.startswith("b/") or path[2:] not in expected:
                 raise TypeSafeReviewIncomplete("unsupported_typed_diff_path")
             current = path[2:]
+            if current in declared:
+                raise TypeSafeReviewIncomplete("duplicate_typed_diff_record")
+            declared.add(current)
         match = _HUNK.match(line)
         if not match:
             # Generator context includes the complete original patch. Arbitrary
@@ -98,6 +112,10 @@ def build_typed_context(
         if old_seen != old_count or new_seen != new_count:
             raise TypeSafeReviewIncomplete("incomplete_typed_diff_hunk")
         touched.add(current)
+        if current in excluded:
+            # Verify the complete patch record, but do not send audited lock
+            # bytes (including removed lines) to the model.
+            continue
         text = "\n".join(hunk)
         # Patch '+'/'-' markers are not identifier bytes. Inspect the source
         # payload so a removed '-SECRET_KEY=...' cannot evade the field scanner.

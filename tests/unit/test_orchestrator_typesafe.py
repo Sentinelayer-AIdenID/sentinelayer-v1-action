@@ -1881,7 +1881,8 @@ async def test_pr_with_tests_and_lockfile_reaches_client_and_routes_exclusion(tm
         "npm_projects": {"audits": [{
             "lockfile_path": "package-lock.json",
             "lockfile_sha256": real_hash,
-            "outcome": {"state": "clean"},
+            "input_unchanged": True,
+            "outcome": {"ecosystem": "npm", "applicable": True, "state": "clean"},
         }]},
     }
 
@@ -1903,6 +1904,12 @@ async def test_pr_with_tests_and_lockfile_reaches_client_and_routes_exclusion(tm
             "+++ b/tests/test_main.py\n"
             "@@ -0,0 +1 @@\n"
             "+def test_x(): assert True\n"
+            "diff --git a/package-lock.json b/package-lock.json\n"
+            "--- a/package-lock.json\n"
+            "+++ b/package-lock.json\n"
+            "@@ -1 +1 @@\n"
+            '-{"lockfileVersion": 2}\n'
+            '+{"lockfileVersion": 3}\n'
         ),
     )
 
@@ -1915,6 +1922,7 @@ async def test_pr_with_tests_and_lockfile_reaches_client_and_routes_exclusion(tm
     assert len(excluded) == 1, f"expected 1 policy_excluded entry, got {len(excluded)}"
     assert excluded[0]["path"] == "package-lock.json"
     assert excluded[0]["reason"] == "dep_audit_coverage"
+    assert assessment["excluded_source_hashes"] == {"package-lock.json": real_hash}
 
     candidate_paths = {
         c["file_path"] for c in assessment.get("candidates", [])

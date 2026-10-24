@@ -1,5 +1,6 @@
 from policy_fixture import FAKE_POLICY_JSON, FAKE_POLICY
 
+import hashlib
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -18,6 +19,7 @@ from omargate.analyze.llm.providers.openai_provider import OpenAIProvider
 from omargate.config import OmarGateConfig
 from omargate.logging import OmarLogger
 from omargate.analyze.typesafe_review import TypedReview, review_inventory as real_review_inventory
+from omargate.harness.suites.dep_audit import DependencyAuditEvidence, DependencyAuditOutcome
 
 pytestmark = pytest.mark.anyio
 
@@ -279,6 +281,45 @@ async def test_real_orchestrator_low_route_requires_generator_and_writes_separat
     sent = rate.call_args_list[0].kwargs["state"]
     assert sent["diff_head_lines_verified"] is True
     assert sent["candidate_context"][sent["candidates"][0]["candidate_id"]]["diff_hunks"]
+
+
+async def test_cascade_accepts_complete_patch_with_audited_npm_lock(configured, monkeypatch):
+    lockfile = configured.repo_root / "package-lock.json"
+    lockfile.write_text('{"lockfileVersion": 3, "marker": "audited-lock-only"}\n')
+    evidence = DependencyAuditEvidence(
+        outcomes=(DependencyAuditOutcome.clean("npm"),
+                  DependencyAuditOutcome.not_applicable("pip"),
+                  DependencyAuditOutcome.not_applicable("cargo")),
+        npm_projects=({
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": hashlib.sha256(lockfile.read_bytes()).hexdigest(),
+            "input_unchanged": True,
+            "outcome": DependencyAuditOutcome.clean("npm").to_dict(),
+        },),
+    ).to_dict()
+    rate = AsyncMock(return_value=triage())
+    monkeypatch.setattr("omargate.analyze.orchestrator.TypeSafeClient.rate", rate)
+    configured._run_llm_analysis = AsyncMock(return_value=generator_result(LOW))
+    result = await configured._run_cascade_analysis(
+        ingest={"files": [{"path": "x.py"}]},
+        changed_files=["x.py", "package-lock.json"], scan_mode="pr-diff",
+        deterministic_findings=[], quick_learn=None, spec_context=None, run_dir=None,
+        dep_audit_evidence=evidence,
+        diff_content=(
+            "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+            "@@ -0,0 +1 @@\n+value = 1\n"
+            "diff --git a/package-lock.json b/package-lock.json\n"
+            "--- a/package-lock.json\n+++ b/package-lock.json\n"
+            "@@ -1 +1 @@\n"
+            '-{"lockfileVersion": 2}\n'
+            '+{"lockfileVersion": 3, "marker": "audited-lock-only"}\n'
+        ),
+    )
+    assert result.success, result.usage.get("policy_assessment")
+    rate.assert_awaited()
+    state = rate.call_args.kwargs["state"]
+    assert {row["file_path"] for row in state["candidates"]} == {"x.py"}
+    assert "audited-lock-only" not in json.dumps(state)
 
 
 async def test_low_defect_escalates_and_later_clean_cannot_erase(configured, monkeypatch):

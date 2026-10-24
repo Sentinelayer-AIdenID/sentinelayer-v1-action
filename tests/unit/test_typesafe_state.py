@@ -163,6 +163,41 @@ def test_complete_two_file_scope_and_new_file_addition(tmp_path: Path) -> None:
     assert result["candidate_context"][added.candidate_id]["language"] == "txt"
 
 
+def test_audited_npm_lockfile_patch_is_bound_but_withheld_from_model(tmp_path: Path) -> None:
+    source = "answer = 2\n"
+    lock = '{"lockfileVersion": 3, "private_marker": "lock-bytes-must-stay-out"}\n'
+    (tmp_path / "source.py").write_text(source, encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text(lock, encoding="utf-8")
+    receipt = {
+        "enabled": True, "complete": True,
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": hashlib.sha256((tmp_path / "package-lock.json").read_bytes()).hexdigest(),
+            "input_unchanged": True,
+            "outcome": {"ecosystem": "npm", "applicable": True, "state": "clean"},
+        }]},
+    }
+    ingest = {"files": [{"path": "source.py"}]}
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest=ingest,
+        changed_files=["source.py", "package-lock.json"],
+        scan_mode="pr-diff", max_candidates=50, dep_audit_evidence=receipt,
+    )
+    assert inventory.policy_excluded == (("package-lock.json", "dep_audit_coverage"),)
+    diff = patch("source.py", "answer = 1\n", source) + patch(
+        "package-lock.json", '{"lockfileVersion": 2}\n', lock,
+    )
+    context = context_for(tmp_path, inventory, ingest, diff)
+    assert set(context["candidate_context"]) == {inventory.candidates[0].candidate_id}
+    assert "lock-bytes-must-stay-out" not in json.dumps(context)
+    assert context["diff_head_lines_verified"] is True
+
+    with pytest.raises(TypeSafeReviewIncomplete, match="incomplete_typed_diff_file_coverage"):
+        context_for(tmp_path, inventory, ingest, patch("source.py", "answer = 1\n", source))
+    with pytest.raises(TypeSafeReviewIncomplete, match="duplicate_typed_diff_record"):
+        context_for(tmp_path, inventory, ingest, diff + patch("package-lock.json", '{"lockfileVersion": 2}\n', lock))
+
+
 @pytest.mark.parametrize(
     "diff", [None, "", "x" * 100_001, "😀" * 25_001],
     ids=["missing", "empty", "oversize-ascii", "oversize-utf8"],
