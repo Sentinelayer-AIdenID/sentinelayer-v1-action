@@ -66,7 +66,7 @@ from .utils import ensure_writable_dir, json_dumps
 ACTION_VERSION = "1.3.11"
 # Rotate this whenever a security-control contract changes so dedupe cannot
 # mirror a successful check produced under weaker semantics on the same head.
-ACTION_IDEMPOTENCY_VERSION = "4:dependency-audit-v1.2:complete-discovery:workspace-root:private-policy:review-config:verified-model:root-declared-peer-edges:isolated-npm-config:verified-scope-findings:failed-call-provenance"
+ACTION_IDEMPOTENCY_VERSION = "4:dependency-audit-v1.2:complete-discovery:workspace-root:private-policy:review-config:verified-model:root-declared-peer-edges:isolated-npm-config:verified-scope-findings:failed-call-provenance:route-attempt-provenance"
 DEPENDENCY_AUDIT_CONTRACT_VERSION = "dependency-audit-evidence-v1.2:workspace-root:complete-discovery:root-declared-peer-edges:isolated-npm-config"
 CHECK_NAME_BASE = "Omar Gate"
 __all__ = [
@@ -99,25 +99,76 @@ def _llm_fallback_used(llm_usage: dict, model_fallback: str) -> bool:
     )
 
 
-def _llm_display_identity(analysis) -> tuple[str, str]:
-    """Display observed execution identity, without substituting request config."""
+def _llm_display_identity(analysis, **kwargs) -> tuple[str, str]:
+    """Return the display identity (engine, model) for the LLM review.
+
+    States: COMPLETE (returned model shown), ATTEMPTED-FAILED (unknown
+    returned model / usage stays 'unknown'), NOT_ATTEMPTED (reason code from
+    source_failure_reason / failure_class), DISABLED (only when the config
+    truly disables the LLM).
+
+    Accepts an optional `routing` kwarg (REVIEW_ROUTING data) to read the
+    triage's source_failure_reason when the review was not attempted.
+    """
+    routing = kwargs.get("routing") if kwargs else None
+    llm_enabled = kwargs.get("llm_enabled", True) if kwargs else True
+
     if not analysis.llm_attempted and not analysis.llm_success:
-        return "disabled", "n/a"
+        if not llm_enabled:
+            return "disabled", "n/a"
+        reason = ""
+        if isinstance(routing, dict):
+            raw = routing.get("source_failure_reason", "")
+            reason = str(raw).strip() if raw else ""
+        if not reason:
+            raw = getattr(analysis, "llm_failure_class", None)
+            reason = str(raw).strip() if raw else ""
+        if reason:
+            return "NOT_ATTEMPTED", reason
+        return "NOT_ATTEMPTED", "unknown"
+    if analysis.llm_attempted and not analysis.llm_success:
+        usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
+        engine = str(usage.get("engine") or usage.get("provider") or "llm").strip() or "llm"
+        return engine, "unknown"
     usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
     engine = str(usage.get("engine") or usage.get("provider") or "llm").strip() or "llm"
     model = str(usage.get("model") or "").strip() or "unknown"
     return engine, model
 
+def _llm_enabled_for_display(orchestrator: AnalysisOrchestrator) -> bool:
+    """Use the configured routes, including Codex and managed proxy, for display."""
+    if not orchestrator.allow_llm:
+        return False
+    return bool(
+        orchestrator.config.use_codex
+        or orchestrator.config.llm_provider == "typesafe"
+        or orchestrator._should_run_llm()
+    )
 
-def _llm_display_cost(analysis) -> Optional[float]:
-    """Keep an attempted review's unreported cost unknown, including failures."""
+
+def _llm_display_cost(analysis) -> tuple[Optional[float], bool]:
+    """Return (cost_usd, complete) for the LLM review.
+
+    When cost_ledger is present but incomplete (estimated_total_usd is None),
+    the cost is the known subtotal and complete is False — the caller must
+    label the displayed amount as a known subtotal, not a total.
+
+    An unrefined refused review with a cost ledger also returns (known, False)
+    rather than (None, False). When there is no cost information at all,
+    returns (None, False).
+    """
     usage = analysis.llm_usage if isinstance(analysis.llm_usage, dict) else {}
     if isinstance(usage.get("cost_ledger"), dict):
-        return usage["cost_ledger"].get("estimated_total_usd")
+        ledger = usage["cost_ledger"]
+        if ledger.get("complete"):
+            total = ledger.get("estimated_total_usd")
+            return (float(total) if total is not None else None, True)
+        known = ledger.get("known_estimated_usd")
+        return (float(known) if known is not None else None, False)
     if not analysis.llm_attempted and not analysis.llm_success:
-        return 0.0
+        return (None, False)
     cost = usage.get("cost_usd")
-    return float(cost) if cost is not None else None
+    return (float(cost) if cost is not None else None, True)
 
 
 def _build_llm_evidence(analysis, config: OmarGateConfig) -> dict:
@@ -837,7 +888,7 @@ async def async_main() -> int:
             with logger.stage("publish"):
                 publish_github = _github_publish_enabled(config)
                 # An unsuccessful attempt can still incur an unreported cost.
-                cost_usd = _llm_display_cost(analysis)
+                cost_usd, cost_complete = _llm_display_cost(analysis)
 
                 if not publish_github:
                     logger.info("GitHub PR comment publish disabled by input")
@@ -849,7 +900,11 @@ async def async_main() -> int:
                     analysis.warnings.append(message)
                 elif ctx.pr_number:
                     try:
-                        llm_engine_used, llm_model_used = _llm_display_identity(analysis)
+                        llm_engine_used, llm_model_used = _llm_display_identity(
+                            analysis,
+                            llm_enabled=_llm_enabled_for_display(orchestrator),
+                            routing=(analysis.llm_usage or {}).get("review_routing"),
+                        )
 
                         review_brief_md = None
                         try:
@@ -887,10 +942,13 @@ async def async_main() -> int:
                             dedupe_key=gate_result.dedupe_key or idem_key,
                             llm_model=llm_model_used,
                             actual_cost_usd=cost_usd,
+                            cost_ledger_complete=cost_complete,
                             review_cost_ledger=(analysis.llm_usage or {}).get("cost_ledger"),
                             head_sha=ctx.head_sha,
                             server_url=server_url,
                             comment_tag=config.comment_tag,
+                            llm_evidence=_build_llm_evidence(analysis, config),
+                            review_routing=(analysis.llm_usage or {}).get("review_routing"),
                         )
                         comment_url = gh.create_or_update_pr_comment(
                             ctx.pr_number,
@@ -979,7 +1037,7 @@ async def async_main() -> int:
 
         # === OUTPUTS ===
         try:
-            estimated_cost_usd = _llm_display_cost(analysis)
+            estimated_cost_usd, _ = _llm_display_cost(analysis)
             audit_report_path = run_dir / "AUDIT_REPORT.md"
             _write_github_outputs(
                 run_id=run_id,

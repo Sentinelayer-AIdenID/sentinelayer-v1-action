@@ -1184,14 +1184,17 @@ class AnalysisOrchestrator:
                 )
             raw_usage = (result.usage or {}).get("raw_usage")
             reported_model = (result.usage or {}).get("model")
-            actual_model = reported_model if isinstance(reported_model, str) else ""
+            actual_model = reported_model.strip() if isinstance(reported_model, str) else ""
+            # A requested model or the client's "unknown" placeholder is not
+            # evidence that a response returned a model identity.
+            observed_model = actual_model if result.attempted and actual_model != "unknown" else ""
             if result.attempted:
                 records.append({**estimate_usage("openai", actual_model, raw_usage),
                                 "stage": "generator-" + route.tier, "effort": route.effort})
-            identity_matches = result.attempted and response_model_matches(actual_model, route.model)
+            identity_matches = response_model_matches(observed_model, route.model) if observed_model else None
             # Only a returned answer can carry a wrong identity; a failed call
             # (for example HTTP 429) returned no model and keeps its own class.
-            unexpected_model = result.success and result.attempted and not identity_matches
+            unexpected_model = result.success and result.attempted and identity_matches is not True
             if unexpected_model:
                 result = self._llm_failure_result(
                     deterministic_findings=deterministic_findings, attempted=True,
@@ -1199,7 +1202,7 @@ class AnalysisOrchestrator:
                     public_error="Review response did not match the selected model",
                     usage=result.usage,
                 )
-            routes[-1].update(reported_model=(actual_model if identity_matches else "unknown"),
+            routes[-1].update(attempted=bool(result.attempted), reported_model=observed_model,
                               identity_matches=identity_matches, success=result.success)
             if result.success and result.attempted:
                 for finding in result.findings:
@@ -1249,6 +1252,9 @@ class AnalysisOrchestrator:
             usage["policy_assessment"] = policy_assessment
             usage["excellence"] = excellence_coverage(self.config.review_policy, triage.answers if triage else None)
             result.usage = usage
+            # The last route can refuse locally after an earlier paid attempt.
+            # Preserve the whole cascade's attempt state in the summary.
+            result.attempted = any(row["attempted"] for row in routes)
             if run_dir is not None:
                 try:
                     run_dir.mkdir(parents=True, exist_ok=True)

@@ -7,9 +7,12 @@ from types import SimpleNamespace
 import pytest
 
 from omargate.config import OmarGateConfig
+from omargate.analyze.orchestrator import AnalysisOrchestrator
+from omargate.logging import OmarLogger
 from omargate.main import (
     _build_llm_evidence,
     _llm_display_cost,
+    _llm_enabled_for_display,
     _llm_display_identity,
     _llm_fallback_used,
 )
@@ -17,24 +20,26 @@ from omargate.models import Counts, GateResult, GateStatus
 from omargate.telemetry_runtime import _write_github_outputs
 
 
-@pytest.mark.parametrize("usage", [
-    None,
-    {},
-    {"provider": "typesafe", "model": None, "requested_model": "model-under-test-1.13.0"},
-    {"provider": "typesafe", "model": "gpt-5.3-codex"},
+@pytest.mark.parametrize("usage,expected_identity", [
+    (None, ("NOT_ATTEMPTED", "unknown")),
+    ({}, ("NOT_ATTEMPTED", "unknown")),
+    ({"provider": "typesafe", "model": None, "requested_model": "model-under-test-1.13.0"}, ("NOT_ATTEMPTED", "unknown")),
+    ({"provider": "typesafe", "model": "gpt-5.3-codex"}, ("NOT_ATTEMPTED", "unknown")),
 ])
-def test_llm_display_no_attempt_is_disabled_even_with_preflight_usage(usage) -> None:
+def test_llm_display_no_attempt_is_not_attempted(usage, expected_identity) -> None:
     analysis = SimpleNamespace(llm_attempted=False, llm_success=False, llm_usage=usage)
 
-    assert _llm_display_identity(analysis) == ("disabled", "n/a")
-    assert _llm_display_cost(analysis) == 0.0
+    assert _llm_display_identity(analysis) == expected_identity
+    # Not attempted, not successful, no cost ledger → cost unknown (None, never 0.0)
+    cost, complete = _llm_display_cost(analysis)
+    assert cost is None
 
 
 @pytest.mark.parametrize(("success", "usage", "expected"), [
     (True, {"provider": "typesafe", "model": "model-under-test-1.13.0"}, ("typesafe", "model-under-test-1.13.0")),
     (False, {"provider": "typesafe", "model": None, "requested_model": "model-under-test-1.13.0"}, ("typesafe", "unknown")),
     (True, {"provider": "openai", "engine": "codex", "model": "reported-model"}, ("codex", "reported-model")),
-    (False, {"provider": "openai", "model": "reported-model"}, ("openai", "reported-model")),
+    (False, {"provider": "openai", "model": "reported-model"}, ("openai", "unknown")),
     (True, None, ("llm", "unknown")),
     (False, None, ("llm", "unknown")),
     (True, {"provider": "openai", "model": "  "}, ("openai", "unknown")),
@@ -57,14 +62,16 @@ def test_llm_display_attempt_uses_only_observed_model(success, usage, expected) 
 def test_llm_display_attempt_cost_is_unknown_unless_reported(success, usage, expected) -> None:
     analysis = SimpleNamespace(llm_attempted=True, llm_success=success, llm_usage=usage)
 
-    assert _llm_display_cost(analysis) == expected
+    cost, complete = _llm_display_cost(analysis)
+    assert cost == expected
 
 
 def test_llm_display_success_without_attempt_flag_does_not_invent_identity_or_free_cost() -> None:
     analysis = SimpleNamespace(llm_attempted=False, llm_success=True, llm_usage=None)
 
     assert _llm_display_identity(analysis) == ("llm", "unknown")
-    assert _llm_display_cost(analysis) is None
+    cost, complete = _llm_display_cost(analysis)
+    assert cost is None
 
 
 def test_preflight_failure_evidence_stays_failed_while_comment_identity_is_disabled() -> None:
@@ -86,7 +93,7 @@ def test_preflight_failure_evidence_stays_failed_while_comment_identity_is_disab
 
     evidence = _build_llm_evidence(analysis, config)
 
-    assert _llm_display_identity(analysis) == ("disabled", "n/a")
+    assert _llm_display_identity(analysis) == ("NOT_ATTEMPTED", "typesafe_policy_unavailable")
     assert evidence["attempted"] is False and evidence["success"] is False
     assert evidence["output_valid"] is False and evidence["model"] == ""
     assert evidence["provider"] == "typesafe" and evidence["usage_recorded"] is True
@@ -237,3 +244,88 @@ def test_github_outputs_expose_live_llm_evidence(tmp_path, monkeypatch) -> None:
     assert "llm_findings_count=0\n" in output
     assert "llm_parse_error_count=2\n" in output
     assert "llm_failure_class=invalid_output\n" in output
+
+
+def test_not_attempted_review_reports_not_attempted_with_routing_reason() -> None:
+    """PR #660 scenario: attempted=False, success=False, routing has source_failure_reason.
+    Should report 'NOT_ATTEMPTED' with the routing reason, not failure_class."""
+    usage = {
+        "provider": "typesafe", "model": None, "requested_model": "model-under-test-1.13.0",
+        "tokens_in": None, "tokens_out": None, "cost_usd": None,
+        "review_routing": {
+            "triage_status": "source_scope_incomplete",
+            "source_failure_reason": "candidate_budget_exceeded",
+            "routes": [{"tier": "deep", "model": "gpt-6-sol", "effort": "max",
+                         "success": False, "reported_model": "", "identity_matches": False}],
+        },
+    }
+    analysis = SimpleNamespace(
+        llm_usage=usage, llm_attempted=False, llm_success=False,
+        llm_output_valid=False, llm_failure_class="cascade_source_scope_incomplete",
+    )
+
+    # With routing data: uses source_failure_reason
+    assert _llm_display_identity(analysis, routing=usage["review_routing"]) == ("NOT_ATTEMPTED", "candidate_budget_exceeded")
+    # Without routing data: falls back to failure_class
+    assert _llm_display_identity(analysis) == ("NOT_ATTEMPTED", "cascade_source_scope_incomplete")
+    # Cost unknown (not $0.00) when the review was refused
+    cost, complete = _llm_display_cost(analysis)
+    assert cost is None
+
+
+def test_refused_review_with_cost_ledger_reports_known_cost() -> None:
+    """Refused review with partial cost ledger: report known cost as subtotal."""
+    usage = {
+        "provider": "typesafe",
+        "cost_ledger": {"complete": False, "known_estimated_usd": 0.042,
+                        "estimated_total_usd": None, "calls": [
+                            {"estimated_usd": 0.042, "stage": "triage", "model": "intent-model:abc123",
+                             "provider": "typesafe"},
+                        ]},
+        "review_routing": {
+            "triage_status": "source_scope_incomplete",
+            "source_failure_reason": "candidate_budget_exceeded",
+        },
+    }
+    analysis = SimpleNamespace(
+        llm_usage=usage, llm_attempted=False, llm_success=False,
+        llm_output_valid=False, llm_failure_class="cascade_source_scope_incomplete",
+    )
+
+    assert _llm_display_identity(analysis) == ("NOT_ATTEMPTED", "cascade_source_scope_incomplete")
+    cost, complete = _llm_display_cost(analysis)
+    assert cost == 0.042
+    assert complete is False  # Incomplete ledger — subtotal only
+
+
+def test_disabled_llm_returns_disabled_state() -> None:
+    """When llm_enabled=False, returns ('disabled', 'n/a')."""
+    analysis = SimpleNamespace(
+        llm_usage=None, llm_attempted=False, llm_success=False,
+        llm_failure_class=None,
+    )
+    assert _llm_display_identity(analysis, llm_enabled=False) == ("disabled", "n/a")
+
+
+def test_managed_only_route_is_enabled_in_published_identity(tmp_path) -> None:
+    config = OmarGateConfig(
+        llm_provider="openai", sentinelayer_token="fixture-managed-token", use_codex=False,
+    )
+    orchestrator = AnalysisOrchestrator(config, OmarLogger("managed-display-test"), tmp_path)
+    assert config.use_managed_llm_proxy()
+    assert orchestrator._should_run_llm()
+    assert _llm_enabled_for_display(orchestrator)
+
+    refused = SimpleNamespace(
+        llm_usage=None, llm_attempted=False, llm_success=False,
+        llm_failure_class="preflight_refused",
+    )
+    assert _llm_display_identity(refused, llm_enabled=_llm_enabled_for_display(orchestrator)) == (
+        "NOT_ATTEMPTED", "preflight_refused",
+    )
+
+    orchestrator.allow_llm = False
+    assert not _llm_enabled_for_display(orchestrator)
+    assert _llm_display_identity(refused, llm_enabled=_llm_enabled_for_display(orchestrator)) == (
+        "disabled", "n/a",
+    )

@@ -205,6 +205,92 @@ def _top_findings_section(
 
     return "\n".join(lines)
 
+def _review_chain_section(llm_evidence, review_routing, llm_engine, llm_model):
+    """Render the review chain: triage, route, reviewer, and call outcome.
+
+    Shows what the intent cascade decided and what actually happened, so a reader
+    can see at a glance whether a review was refused, attempted, or completed —
+    and never mistakes a refused review for a disabled one.
+    """
+    evidence = llm_evidence or {}
+    routing = review_routing or {}
+
+    lines = ["", "### Review chain", ""]
+
+    # Triage row
+    triage_status = routing.get("triage_status", "")
+    failure_reason = routing.get("source_failure_reason", "")
+    if triage_status:
+        status_display = triage_status.replace("_", " ")
+        lines.append("- **Triage:** `" + status_display + "`")
+        if failure_reason:
+            lines.append("  - Reason: `" + failure_reason + "`")
+    elif evidence.get("failure_class"):
+        lines.append("- **Triage:** not reached (`" + str(evidence["failure_class"]) + "`)")
+    else:
+        lines.append("- **Triage:** not available")
+
+    # Route + reviewer row
+    routes = routing.get("routes", [])
+    if routes:
+        lines.append("- **Route:**")
+        for i, r in enumerate(routes):
+            tier = r.get("tier", "?")
+            req_model = r.get("model", "?")
+            effort = r.get("effort", "?")
+            success = r.get("success")
+            reported = r.get("reported_model", "")
+            has_reported = isinstance(reported, str) and reported not in {"", "unknown"}
+            identity_matches = r.get("identity_matches")
+            # An aggregate attempt bit cannot identify which route made a call.
+            route_attempted = r.get("attempted")
+            if isinstance(route_attempted, bool):
+                attempted = route_attempted
+            elif success is True or has_reported or identity_matches is True:
+                attempted = True
+            else:
+                attempted = None
+            lines.append("  " + str(i + 1) + ". `" + tier + "` \u2192 `" + req_model + "` / `" + effort + "`")
+            if attempted is True:
+                status_mark = "passed" if success else "failed"
+                returned_display = "returned `" + reported + "`" if has_reported else "no model returned"
+                lines.append("     - Attempted: yes, " + returned_display + " \u2014 **" + status_mark + "**")
+                # Show identity verification
+                if not has_reported:
+                    lines.append("     - Identity: unavailable (no model returned)")
+                elif identity_matches is True:
+                    lines.append("     - Identity: verified")
+                elif identity_matches is False:
+                    lines.append("     - Identity: mismatched")
+                else:
+                    lines.append("     - Identity: unknown")
+            elif attempted is False:
+                lines.append("     - Attempted: no")
+            else:
+                lines.append("     - Attempted: unknown (missing per-route evidence)")
+    else:
+        if llm_engine == "NOT_ATTEMPTED":
+            lines.append("- **Route:** not attempted (`" + llm_model + "`)")
+        elif llm_engine == "ATTEMPTED-FAILED":
+            lines.append("- **Route:** attempted, failed (unknown model)")
+        elif llm_engine == "disabled":
+            lines.append("- **Route:** LLM not configured")
+        else:
+            lines.append("- **Route:** `" + llm_engine + "` / `" + llm_model + "`")
+
+    # Evidence row
+    ev_attempted = evidence.get("attempted")
+    ev_success = evidence.get("success")
+    ev_failure_class = evidence.get("failure_class")
+    if ev_attempted is not None:
+        lines.append("- **Attempted:** " + str(ev_attempted))
+    if ev_success is not None:
+        lines.append("- **Success:** " + str(ev_success))
+    if ev_failure_class:
+        lines.append("- **Failure class:** `" + str(ev_failure_class) + "`")
+
+    return "\n".join(lines) + "\n"
+
 def _codebase_snapshot_section(codebase_snapshot: Optional[dict]) -> str:
     if not codebase_snapshot:
         return ""
@@ -224,6 +310,32 @@ def _codebase_snapshot_section(codebase_snapshot: Optional[dict]) -> str:
     lines = ["<details>", "<summary>Codebase Snapshot (Deterministic)</summary>", ""]
     lines.extend([snapshot_md, "", "</details>"])
     return "\n".join(lines)
+
+def _cost_header(estimated_cost_value: str, actual_cost_usd: float | None,
+                 cost_ledger_complete: bool, llm_engine: str) -> str:
+    """Build the cost portion of the report header line.
+
+    Separates preflight estimate from usage-based cost so a reader can
+    tell the difference at a glance.  When the review was refused
+    (NOT_ATTEMPTED) the cost is reported only when the cost ledger is
+    complete; otherwise it remains unknown (subtotal) because triage
+    may have incurred unrecorded cost.
+    """
+    parts: list[str] = [f" • **Cost (est.):** `{estimated_cost_value}`"]
+    if actual_cost_usd is not None:
+        parts.append(f" • **Cost (usage):** `{format_usd(actual_cost_usd)}`")
+        if not cost_ledger_complete:
+            parts[-1] += " (subtotal)"
+    elif llm_engine == "NOT_ATTEMPTED":
+        if cost_ledger_complete:
+            parts.append(" • **Cost (usage):** none (no inference call)")
+        else:
+            parts.append(" • **Cost (usage):** unknown (subtotal)")
+    else:
+        parts.append(" • **Cost (usage):** unknown")
+        if not cost_ledger_complete:
+            parts[-1] += " (subtotal)"
+    return "".join(parts)
 
 
 def render_pr_comment(
@@ -247,6 +359,7 @@ def render_pr_comment(
     llm_engine: str = "disabled",
     llm_model: str = "n/a",
     actual_cost_usd: Optional[float] = None,
+    cost_ledger_complete: bool = True,
     review_cost_ledger: Optional[dict] = None,
     deterministic_count: int = 0,
     llm_count: int = 0,
@@ -256,6 +369,8 @@ def render_pr_comment(
     codebase_snapshot: Optional[dict] = None,
     codebase_synopsis: Optional[str] = None,
     comment_tag: str = "",
+    llm_evidence: Optional[dict] = None,
+    review_routing: Optional[dict] = None,
 ) -> str:
     """
     Render the PR comment for Omar Gate.
@@ -270,7 +385,6 @@ def render_pr_comment(
 
     duration_value = humanize_duration_ms(duration_ms)
     estimated_cost_value = format_usd(estimated_cost_usd)
-    actual_cost_value = format_usd(actual_cost_usd)
     from .analyze.review_costs import render_cost_ledger
     model_cost_section = "\n".join(render_cost_ledger(review_cost_ledger))
 
@@ -336,6 +450,11 @@ def render_pr_comment(
         )
 
     # Counts table with explicit blocking semantics.
+    review_chain_section = _review_chain_section(
+        llm_evidence=llm_evidence, review_routing=review_routing,
+        llm_engine=llm_engine, llm_model=llm_model,
+    )
+
     lines = [
         f"## 🛡️ Omar Gate: {status_badge}",
         "",
@@ -344,9 +463,9 @@ def render_pr_comment(
         f"**Duration:** `{duration_value}`"
         + (f" • **Files:** `{format_int(int(files_scanned))}`" if files_scanned is not None else "")
         + f" • **LLM:** `{llm_engine}` (`{llm_model}`)"
-        + f" • **Cost (est.):** `{estimated_cost_value}`"
-        + (f" • **Cost (usage estimate):** `{actual_cost_value}`" if actual_cost_usd is not None else ""),
+        + _cost_header(estimated_cost_value, actual_cost_usd, cost_ledger_complete, llm_engine),
         model_cost_section,
+        review_chain_section,
         "",
         f"**Result:** {result.reason}",
         "",
