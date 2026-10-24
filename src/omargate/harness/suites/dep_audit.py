@@ -821,6 +821,41 @@ def _dependency_mapping(
     return result
 
 
+def _workspace_paths(payload: Mapping[str, object]) -> tuple[str, ...] | None:
+    """Accept only explicit, bounded workspace paths, never npm glob expansion."""
+    if "workspaces" not in payload:
+        return ()
+    raw = payload["workspaces"]
+    if not isinstance(raw, list) or not 0 < len(raw) <= 32:
+        return None
+    paths: list[str] = []
+    seen: set[str] = set()
+    for value in raw:
+        if (not isinstance(value, str) or not value or "\\" in value
+                or ":" in value or "\0" in value or any(char in value for char in "*?[]{}")
+                or any(part in {"", ".", "..", "node_modules"} for part in value.split("/"))
+                or value.casefold() in seen):
+            return None
+        seen.add(value.casefold())
+        paths.append(value)
+    if any(left.startswith(f"{right}/") for left in paths for right in paths if left != right):
+        return None
+    return tuple(paths)
+
+
+def _safe_workspace_manifest(root: Path, relative: str) -> Path | None:
+    current = root
+    for part in relative.split("/"):
+        current = current / part
+        if current.is_symlink() or (hasattr(current, "is_junction") and current.is_junction()):
+            return None
+    manifest = current / "package.json"
+    if (not _is_safe_project_file(current, manifest)
+            or not _is_within(manifest.resolve(strict=True), root.resolve(strict=True))):
+        return None
+    return manifest
+
+
 def _registry_origin(resolved_url: object) -> str | None:
     if (
         not isinstance(resolved_url, str)
@@ -864,7 +899,8 @@ def _load_npm_audit_input(
     lock_payload = _load_bounded_json_file(lockfile, _MAX_NPM_INPUT_BYTES)
     if not isinstance(package_payload, dict) or not isinstance(lock_payload, dict):
         return None
-    if "workspaces" in package_payload or any(
+    workspace_paths = _workspace_paths(package_payload)
+    if workspace_paths is None or any(
         key in package_payload for key in ("bundleDependencies", "bundledDependencies")
     ):
         return None
@@ -875,6 +911,37 @@ def _load_npm_audit_input(
     if not isinstance(packages, dict) or not isinstance(packages.get(""), dict):
         return None
     root_record = packages[""]
+    if workspace_paths:
+        if lock_version != 3 or root_record.get("workspaces") != list(workspace_paths):
+            return None
+    elif "workspaces" in root_record:
+        return None
+    workspace_names: dict[str, str] = {}
+    for relative in workspace_paths:
+        manifest = _safe_workspace_manifest(package_json.parent, relative)
+        if manifest is None:
+            return None
+        member = _load_bounded_json_file(manifest, _MAX_NPM_INPUT_BYTES)
+        locked = packages.get(relative)
+        if (not isinstance(member, dict) or not isinstance(locked, dict)
+                or any(key in member for key in ("workspaces", "bundleDependencies", "bundledDependencies"))
+                or "link" in locked or "resolved" in locked):
+            return None
+        name, version = member.get("name"), member.get("version")
+        if (not isinstance(name, str)
+                or re.fullmatch(r"(?:@[A-Za-z0-9._-]+/)?[A-Za-z0-9._-]+", name) is None
+                or not isinstance(version, str) or not version
+                or locked.get("name") != name or locked.get("version") != version
+                or name.casefold() in {item.casefold() for item in workspace_names}):
+            return None
+        for section in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+            declared = _dependency_mapping(member, section)
+            pinned = _dependency_mapping(locked, section)
+            if declared is None or declared != pinned:
+                return None
+        if member.get("peerDependenciesMeta", {}) != locked.get("peerDependenciesMeta", {}):
+            return None
+        workspace_names[name] = relative
     package_peers = _dependency_mapping(package_payload, "peerDependencies")
     lock_peers = _dependency_mapping(root_record, "peerDependencies")
     package_peer_metadata = package_payload.get("peerDependenciesMeta", {})
@@ -949,6 +1016,8 @@ def _load_npm_audit_input(
     dependency_count = 0
     peer_count = 0
     peer_optional_count = 0
+    found_members: set[str] = set()
+    found_links: set[str] = set()
     for package_path, record in packages.items():
         if package_path == "":
             continue
@@ -964,14 +1033,33 @@ def _load_npm_audit_input(
         )
         if (
             not isinstance(package_path, str)
-            or not package_path.startswith("node_modules/")
             or "\\" in package_path
             or any(part in {"", ".", ".."} for part in package_path.split("/"))
             or not isinstance(record, dict)
             or peer_dependencies is None
             or not isinstance(peer_metadata, dict)
-            or record.get("link") is True
         ):
+            return None
+        if package_path in workspace_paths:
+            if record.get("peer") is True or record.get("peerOptional") is True:
+                return None
+            found_members.add(package_path)
+            dependency_count += 1
+            continue
+        if record.get("link") is True:
+            name = package_path.removeprefix("node_modules/")
+            if (package_path != f"node_modules/{name}"
+                    or workspace_names.get(name) != record.get("resolved")
+                    or set(record) != {"resolved", "link"}):
+                return None
+            found_links.add(name)
+            package_paths.add(package_path)
+            dependency_count += 1
+            continue
+        if not (package_path.startswith("node_modules/") or any(
+                package_path.startswith(f"{relative}/node_modules/") for relative in workspace_paths)):
+            return None
+        if "link" in record:
             return None
         if (
             not isinstance(record.get("version"), str)
@@ -1016,10 +1104,22 @@ def _load_npm_audit_input(
         package_paths.add(package_path)
         origins.add(origin)
         dependency_count += 1
-    if dependency_count == 0 or len(origins) != 1:
+    if (dependency_count == 0 or len(origins) > 1
+            or found_members != set(workspace_paths)
+            or found_links != set(workspace_names)):
         return None
     if any(f"node_modules/{name}" not in package_paths for name in declared_names):
         return None
+    for name, relative in workspace_names.items():
+        member = packages[relative]
+        for section in ("dependencies", "devDependencies", "optionalDependencies"):
+            dependencies = _dependency_mapping(member, section)
+            if dependencies is None or any(
+                f"{relative}/node_modules/{dependency}" not in packages
+                and f"node_modules/{dependency}" not in packages
+                for dependency in dependencies
+            ):
+                return None
     # lockfileVersion 3: peer:true entries are accepted as valid.
     # npm 10+ produces peer:true records for transitive peer dependency
     # chains that may not have a direct peerDependencies reference from
@@ -1080,7 +1180,7 @@ def _load_npm_audit_input(
                     return None
     return _NpmAuditInput(
         dependency_count=dependency_count,
-        registry_origin=next(iter(origins)),
+        registry_origin=next(iter(origins), _NPM_AUDIT_REGISTRY),
         peer_count=peer_count,
         peer_optional_count=peer_optional_count,
     )
@@ -1252,11 +1352,57 @@ class DepAuditSuite(SecuritySuite):
         root = discovery.root
         records = project_records if project_records is not None else []
         fingerprint = partial(_npm_input_fingerprint, root)
+        discovered = set(discovery.npm)
+        member_roots: dict[Path, Path] = {}
+        conflicted_roots: set[Path] = set()
+        for manifest in discovery.npm:
+            payload = _load_bounded_json_file(manifest, _MAX_NPM_INPUT_BYTES)
+            paths = _workspace_paths(payload) if isinstance(payload, dict) else None
+            if not paths:
+                continue
+            for relative in paths:
+                member = manifest.parent / relative / "package.json"
+                if member not in discovered:
+                    continue
+                previous = member_roots.setdefault(member, manifest)
+                if previous != manifest or member == manifest:
+                    conflicted_roots.update((previous, manifest))
+        def selected_lock(manifest: Path) -> Path | None:
+            return next((path for path in (manifest.parent / "npm-shrinkwrap.json",
+                                           manifest.parent / "package-lock.json")
+                         if _path_declared(path)), None)
+
+        # Capture every member before the first npm process. Otherwise a member
+        # changed while its root audit runs could be recorded only afterward.
+        original_inputs = {
+            manifest: (fingerprint(manifest), selected_lock(manifest))
+            for manifest in discovery.npm
+        }
+        original_lock_hashes = {
+            manifest: fingerprint(lock) for manifest, (_, lock) in original_inputs.items()
+        }
+        audited_roots: dict[Path, DependencyAuditOutcome] = {}
+
+        async def audit_root(manifest: Path) -> DependencyAuditOutcome:
+            if manifest in audited_roots:
+                return audited_roots[manifest]
+            if manifest in conflicted_roots:
+                outcome = DependencyAuditOutcome.indeterminate("npm", "unsafe_manifest")
+            else:
+                _, outcome = await self._npm_audit_project(
+                    manifest.parent,
+                    _ManifestDiscovery(manifest.parent, True, (manifest,), (), ()),
+                    workspace_root=root,
+                )
+            audited_roots[manifest] = outcome
+            return outcome
+
         outcomes = []
         for manifest in sorted(discovery.npm, key=lambda path: path.relative_to(root).as_posix()):
-            lock = next((path for path in (manifest.parent / "npm-shrinkwrap.json", manifest.parent / "package-lock.json")
-                         if _path_declared(path)), None)
-            manifest_hash, lock_hash = fingerprint(manifest), fingerprint(lock)
+            owner = member_roots.get(manifest, manifest)
+            manifest_hash = original_inputs[manifest][0]
+            lock = original_inputs[owner][1]
+            lock_hash = original_lock_hashes[owner]
             payload = _load_bounded_json_file(manifest, _MAX_NPM_INPUT_BYTES) if manifest_hash else None
             empty = (isinstance(payload, dict)
                      and not any(key in payload for key in ("workspaces", "bundleDependencies", "bundledDependencies"))
@@ -1264,7 +1410,17 @@ class DepAuditSuite(SecuritySuite):
                              ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"))
                      and payload.get("peerDependenciesMeta", {}) == {})
             mode = "registry_graph"
-            if not isinstance(payload, dict):
+            if owner != manifest:
+                root_outcome = await audit_root(owner)
+                if (root_outcome.state == "indeterminate" or not isinstance(payload, dict)
+                        or any(_path_declared(manifest.parent / name) for name in
+                               ("package-lock.json", "npm-shrinkwrap.json"))):
+                    outcome = DependencyAuditOutcome.indeterminate("npm", "unsafe_lockfile")
+                    mode = "incomplete"
+                else:
+                    outcome = DependencyAuditOutcome.clean("npm")
+                    mode = "workspace_member"
+            elif not isinstance(payload, dict):
                 outcome = DependencyAuditOutcome.indeterminate("npm", "unsafe_manifest")
                 mode = "incomplete"
             elif lock is None and empty:
@@ -1273,9 +1429,11 @@ class DepAuditSuite(SecuritySuite):
                 outcome = DependencyAuditOutcome.clean("npm")
                 mode = "empty_declared_graph"
             else:
-                _, outcome = await self._npm_audit_project(manifest.parent,
-                    _ManifestDiscovery(manifest.parent, True, (manifest,), (), ()), workspace_root=root)
-            unchanged = fingerprint(manifest) == manifest_hash and fingerprint(lock) == lock_hash
+                outcome = await audit_root(manifest)
+            unchanged = (fingerprint(manifest) == manifest_hash
+                         and fingerprint(lock) == lock_hash
+                         and selected_lock(manifest) == original_inputs[manifest][1]
+                         and fingerprint(original_inputs[manifest][1]) == original_lock_hashes[manifest])
             if outcome.state == "indeterminate":
                 mode = "incomplete"
             records.append({"manifest_path": manifest.relative_to(root).as_posix(),
@@ -1289,6 +1447,11 @@ class DepAuditSuite(SecuritySuite):
             row["input_unchanged"] = (row["input_unchanged"]
                 and fingerprint(root / row["manifest_path"]) == row["manifest_sha256"]
                 and fingerprint(root / row["lockfile_path"] if row["lockfile_path"] else None) == row["lockfile_sha256"])
+        if any(selected_lock(manifest) != original_inputs[manifest][1]
+               or fingerprint(original_inputs[manifest][1]) != original_lock_hashes[manifest]
+               for manifest in discovery.npm):
+            for row in records:
+                row["input_unchanged"] = False
         changed = any(not row["input_unchanged"] for row in records)
         if changed:
             outcome = DependencyAuditOutcome.indeterminate("npm", "unsafe_manifest")
@@ -1325,6 +1488,20 @@ class DepAuditSuite(SecuritySuite):
             outcome = DependencyAuditOutcome.indeterminate("npm", "unsafe_lockfile")
             return _outcome_finding(outcome), outcome
 
+        package_payload = _load_bounded_json_file(root / "package.json", _MAX_NPM_INPUT_BYTES)
+        workspace_paths = _workspace_paths(package_payload) if isinstance(package_payload, dict) else None
+        if workspace_paths is None:
+            outcome = DependencyAuditOutcome.indeterminate("npm", "unsafe_lockfile")
+            return _outcome_finding(outcome), outcome
+        members: list[tuple[str, Path]] = []
+        for relative in workspace_paths:
+            member = _safe_workspace_manifest(root, relative)
+            if (member is None or any(_path_declared(member.parent / name)
+                                      for name in ("package-lock.json", "npm-shrinkwrap.json"))):
+                outcome = DependencyAuditOutcome.indeterminate("npm", "unsafe_lockfile")
+                return _outcome_finding(outcome), outcome
+            members.append((relative, member))
+
         try:
             # The input directory can be nested. Process tools, PATH, CA files
             # and scratch must still exclude the entire untrusted checkout.
@@ -1357,11 +1534,22 @@ class DepAuditSuite(SecuritySuite):
                         "npm", "unsafe_lockfile"
                     )
                 else:
+                    copied_members = True
+                    for relative, member in members:
+                        destination = audit_cwd / relative / "package.json"
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        if not _copy_safe_project_file(
+                                member.parent, member, destination,
+                                max_bytes=_MAX_NPM_INPUT_BYTES):
+                            copied_members = False
+                            break
                     audit_input = _load_npm_audit_input(
                         audit_cwd / "package.json",
                         audit_cwd / lockfile.name,
-                    )
-                    if audit_input is None:
+                    ) if copied_members else None
+                    if not copied_members:
+                        outcome = DependencyAuditOutcome.indeterminate("npm", "unsafe_manifest")
+                    elif audit_input is None:
                         outcome = DependencyAuditOutcome.indeterminate(
                             "npm", "unsafe_lockfile"
                         )
