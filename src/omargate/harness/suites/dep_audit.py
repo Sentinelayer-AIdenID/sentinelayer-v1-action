@@ -301,6 +301,8 @@ def _parse_npm_vulnerability_count(
     payload: Any,
     *,
     expected_dependency_count: int,
+    expected_peer_count: int = 0,
+    expected_peer_optional_count: int = 0,
 ) -> Optional[int]:
     if not isinstance(payload, dict) or "error" in payload:
         return None
@@ -342,9 +344,11 @@ def _parse_npm_vulnerability_count(
         for counter in required_dependency_counters
     ):
         return None
-    if dependency_counts["peer"] != 0 or dependency_counts["peerOptional"] != 0:
+    if dependency_counts["total"] - dependency_counts["peer"] - dependency_counts["peerOptional"] != expected_dependency_count:
         return None
-    if dependency_counts["total"] != expected_dependency_count:
+    if dependency_counts["peer"] != expected_peer_count:
+        return None
+    if dependency_counts.get("peerOptional", 0) != expected_peer_optional_count:
         return None
 
     records = payload.get("vulnerabilities")
@@ -828,6 +832,10 @@ def _registry_origin(resolved_url: object) -> str | None:
 class _NpmAuditInput:
     dependency_count: int
     registry_origin: str
+    peer_count: int
+    peer_optional_count: int
+
+
 
 
 def _load_npm_audit_input(
@@ -855,14 +863,43 @@ def _load_npm_audit_input(
     if (
         package_peers is None
         or lock_peers is None
-        or package_peers
-        or lock_peers
         or not isinstance(package_peer_metadata, dict)
         or not isinstance(lock_peer_metadata, dict)
+    ):
+        return None
+    # lockfileVersion 2: root must not declare peerDependencies or
+    # peerDependenciesMeta.  npm 10+ (lockfileVersion 3) routinely
+    # emits peerDependenciesMeta on the root record (e.g. for workspace
+    # catalogs or install-time peer resolution hints) and may carry
+    # root peerDependencies; neither signals an unsafe lockfile.
+    if lock_version == 2 and (
+        package_peers
+        or lock_peers
         or package_peer_metadata
         or lock_peer_metadata
     ):
         return None
+    # lockfileVersion 3: root peer declarations and metadata in the
+    # lockfile must match what package.json declares.  npm 10+ may
+    # emit peerDependenciesMeta on the root record for legitimate
+    # reasons (workspace catalogs, install-time resolution hints),
+    # but entries that appear only in the lockfile root and not in
+    # package.json signal a tampered or regenerated lockfile.
+    if lock_version == 3:
+        if package_peers != lock_peers:
+            return None
+        # package_peer_metadata keys must be a superset of lock_peer_metadata
+        # keys: package.json is the authority for declared optional peers.
+        extra_lock_meta = set(lock_peer_metadata) - set(package_peer_metadata)
+        if extra_lock_meta:
+            return None
+        # For keys present in both, package.json values must match
+        # the lockfile root record.  A conflicting optional flag
+        # (e.g. package.json says optional but the lockfile does not)
+        # signals a tampered or regenerated lockfile.
+        for key in set(package_peer_metadata) & set(lock_peer_metadata):
+            if package_peer_metadata.get(key) != lock_peer_metadata.get(key):
+                return None
     dependency_sections = (
         "dependencies",
         "devDependencies",
@@ -891,6 +928,8 @@ def _load_npm_audit_input(
     package_paths: set[str] = set()
     origins: set[str] = set()
     dependency_count = 0
+    peer_count = 0
+    peer_optional_count = 0
     for package_path, record in packages.items():
         if package_path == "":
             continue
@@ -911,22 +950,49 @@ def _load_npm_audit_input(
             or any(part in {"", ".", ".."} for part in package_path.split("/"))
             or not isinstance(record, dict)
             or peer_dependencies is None
-            # A declaration can refer to a package already in the regular
-            # root graph. Its concrete registry record is still required and
-            # counted below; peer-only/optional records remain unsupported.
-            # This audits locked versions, not peer semver compatibility.
-            or not set(peer_dependencies).issubset(declared_names)
             or not isinstance(peer_metadata, dict)
-            or bool(peer_metadata)
             or record.get("link") is True
-            or record.get("peer") is True
-            or record.get("peerOptional") is True
-            or not isinstance(record.get("version"), str)
+        ):
+            return None
+        if (
+            not isinstance(record.get("version"), str)
             or not record.get("version")
         ):
             return None
         origin = _registry_origin(record.get("resolved"))
         if origin is None:
+            return None
+        # lockfileVersion 3 marks peer dependency entries with peer:true.
+        # These are not independently resolved; validate provenance above
+        # (resolved URL must be registry-origin), then track them in
+        # package_paths but exclude from the dependency count — npm audit
+        # includes peer records in its bulk payload but does not report
+        # vulnerabilities on them independently.
+        # Gate on version: peer:true is a v3+ feature; reject in v2.
+        if record.get("peer") is True or record.get("peerOptional") is True:
+            if lock_version < 3:
+                return None
+            package_paths.add(package_path)
+            # npm counts a record as peerOptional only when the record
+            # itself carries peerOptional:true — never from consumer
+            # peerDependenciesMeta.  All other peer records (including
+            # optional peers marked by consumers) are counted as peer.
+            if record.get("peerOptional") is True:
+                peer_optional_count += 1
+            else:
+                peer_count += 1
+            origins.add(origin)
+            continue
+
+        # lockfileVersion 2 strict checks: transitive peer dependency
+        # names must be a subset of root declared dependencies, and
+        # peerDependenciesMeta must be empty. npm 10+ (lockfileVersion 3)
+        # emits peer metadata on all entries as standard behaviour, so
+        # these checks are version-gated.
+        if lock_version == 2 and (
+            not set(peer_dependencies).issubset(declared_names)
+            or bool(peer_metadata)
+        ):
             return None
         package_paths.add(package_path)
         origins.add(origin)
@@ -935,7 +1001,70 @@ def _load_npm_audit_input(
         return None
     if any(f"node_modules/{name}" not in package_paths for name in declared_names):
         return None
-    return _NpmAuditInput(dependency_count, next(iter(origins)))
+    # lockfileVersion 3: peer:true entries are accepted as valid.
+    # npm 10+ produces peer:true records for transitive peer dependency
+    # chains that may not have a direct peerDependencies reference from
+    # any single package in the lockfile.  The peer count is still validated
+    # against npm audit's reported counters, and every entry's resolved
+    # URL is checked for registry origin, preserving the fail-closed
+    # security model.
+
+    # lockfileVersion 3: every non-optional transitive peer must resolve
+    # to a locked package entry.  Peer deps marked optional via
+    # peerDependenciesMeta are allowed to be absent.
+    for package_path, record in packages.items():
+        if package_path == "":
+            continue
+        peer_deps = _dependency_mapping(record, "peerDependencies")
+        if not peer_deps:
+            continue
+        peer_meta = record.get("peerDependenciesMeta", {})
+        for peer_name in peer_deps:
+            optional = peer_meta.get(peer_name, {})
+            if isinstance(optional, dict) and optional.get("optional") is True:
+                continue
+            # Resolve peer from ancestor node_modules paths.
+            # Standard flat layout: node_modules/{peer_name}
+            # Nested layout: node_modules/<consumer>/node_modules/{peer_name}
+            if f"node_modules/{peer_name}" in packages:
+                continue
+            nested_path = f"{package_path}/node_modules/{peer_name}"
+            if nested_path in packages:
+                continue
+            consumer_dir = "/".join(package_path.split("/")[:-1])
+            resolved = False
+            # Walk up ancestor paths
+            parts = consumer_dir.split("/")
+            for i in range(len(parts), -1, -1):
+                ancestor = "/".join(parts[:i])
+                ancestor_nm = f"{ancestor}/node_modules/{peer_name}" if ancestor else f"node_modules/{peer_name}"
+                if ancestor_nm in packages:
+                    resolved = True
+                    break
+            if not resolved:
+                return None
+    # lockfileVersion 3: validate root peerDependencies too.
+    # The loop above skips the root record (package_path == ""),
+    # so required root peers can escape the coverage check.
+    # Root peers declared in both package.json and the lockfile
+    # root record must resolve to a validated lock entry; only
+    # optional peers (per peerDependenciesMeta) may be absent.
+    if lock_version == 3:
+        root_peers = _dependency_mapping(root_record, "peerDependencies")
+        if root_peers:
+            root_peer_meta = root_record.get("peerDependenciesMeta", {})
+            for peer_name in root_peers:
+                optional = root_peer_meta.get(peer_name, {})
+                if isinstance(optional, dict) and optional.get("optional") is True:
+                    continue
+                if f"node_modules/{peer_name}" not in packages:
+                    return None
+    return _NpmAuditInput(
+        dependency_count=dependency_count,
+        registry_origin=next(iter(origins)),
+        peer_count=peer_count,
+        peer_optional_count=peer_optional_count,
+    )
 
 
 def _load_cargo_dependency_count(root: Path, lockfile: Path) -> int | None:
@@ -1236,6 +1365,12 @@ class DepAuditSuite(SecuritySuite):
                                 _parse_npm_vulnerability_count,
                                 expected_dependency_count=(
                                     audit_input.dependency_count
+                                ),
+                                expected_peer_count=(
+                                    audit_input.peer_count
+                                ),
+                                expected_peer_optional_count=(
+                                    audit_input.peer_optional_count
                                 ),
                             ),
                         )
