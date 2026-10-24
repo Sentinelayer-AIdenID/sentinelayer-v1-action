@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 from omargate.analyze.llm.context_builder import ContextBuilder
 
@@ -318,3 +319,24 @@ def test_quality_scan_infra_extras_never_follow_symlinks(tmp_path: Path) -> None
 
     assert ".env" not in files
     assert files.get("Dockerfile") == "FROM scratch\n"
+
+
+def test_plain_repo_file_refuses_git_dir_in_any_case(tmp_path: Path) -> None:
+    from omargate.repo_paths import plain_repo_file
+
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    (repo_root / ".git" / "config").write_text("CANARY_GIT_CASE\n", encoding="utf-8")
+    (repo_root / "pkg" / ".Git").mkdir(parents=True)
+    (repo_root / "pkg" / ".Git" / "HEAD").write_text("ref\n", encoding="utf-8")
+
+    for rel in (".git/config", ".GIT/config", ".Git/config", "pkg/.Git/HEAD", "pkg/.GIT/HEAD"):
+        assert plain_repo_file(repo_root, rel) is None, rel
+    if sys.platform == "win32":
+        # NTFS strips a trailing dot or space, so these name the real .git directory
+        for rel in (".git./config", ".git /config"):
+            assert plain_repo_file(repo_root, rel) is None, rel
+
+    result = _pr_diff_context(repo_root, [".GIT/config"], ingest_files=[])
+    assert result.files_included == []
+    assert "CANARY_GIT_CASE" not in result.content

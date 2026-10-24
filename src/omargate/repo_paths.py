@@ -21,7 +21,8 @@ def plain_repo_file(repo_root: Optional[Path], rel_path: object) -> Optional[Pat
     if "\\" in rel_path or ":" in rel_path or rel_path.startswith("/"):
         return None
     parts = rel_path.split("/")
-    if any(part in {"", ".", "..", ".git"} for part in parts):
+    # casefold: on a case-insensitive filesystem (Windows, default macOS) ".GIT" is .git
+    if any(part in {"", ".", ".."} or part.casefold() == ".git" for part in parts):
         return None
     current = Path(repo_root)
     for part in parts:
@@ -34,5 +35,7 @@ def plain_repo_file(repo_root: Optional[Path], rel_path: object) -> Optional[Pat
     except OSError:
         return None
     if not resolved.is_relative_to(root) or not resolved.is_file():
+        return None
+    if any(part.casefold() == ".git" for part in resolved.relative_to(root).parts):
         return None
     return current
