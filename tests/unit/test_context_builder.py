@@ -181,3 +181,80 @@ def test_context_includes_spec_context_before_pr_diff(tmp_path: Path) -> None:
     assert spec_idx != -1
     assert diff_idx != -1
     assert spec_idx < diff_idx
+
+
+def _pr_diff_context(repo_root: Path, changed_files: list[str], ingest_files: list[str]):
+    builder = ContextBuilder(max_tokens=100000)
+    return builder.build_context(
+        _make_ingest(ingest_files, hotspots={}),
+        [],
+        repo_root,
+        scan_mode="pr-diff",
+        diff_content="diff",
+        changed_files=changed_files,
+    )
+
+
+def test_pr_diff_reads_changed_file_outside_ingest(tmp_path: Path) -> None:
+    """A changed regular file that ingest skipped (a test, a lockfile) is still reviewed."""
+    repo_root = tmp_path / "repo"
+    (repo_root / "tests").mkdir(parents=True)
+    (repo_root / "tests" / "test_new.py").write_text("assert True\n", encoding="utf-8")
+
+    result = _pr_diff_context(repo_root, ["tests/test_new.py"], ingest_files=[])
+
+    assert "tests/test_new.py" in result.files_included
+
+
+def test_pr_diff_never_follows_changed_symlink_outside_repo(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / "ok.py").write_text("print('ok')\n", encoding="utf-8")
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("CANARY_OUTSIDE_REPO\n", encoding="utf-8")
+    (repo_root / "link.md").symlink_to(outside)
+
+    result = _pr_diff_context(repo_root, ["ok.py", "link.md"], ingest_files=["ok.py"])
+
+    assert "link.md" not in result.files_included
+    assert "CANARY_OUTSIDE_REPO" not in result.content
+
+
+def test_pr_diff_never_follows_changed_symlink_into_git_dir(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    (repo_root / ".git" / "config").write_text("CANARY_GIT_CONFIG\n", encoding="utf-8")
+    (repo_root / "docs").mkdir()
+    (repo_root / "docs" / "config.md").symlink_to(repo_root / ".git" / "config")
+
+    result = _pr_diff_context(repo_root, ["docs/config.md", ".git/config"], ingest_files=[])
+
+    assert result.files_included == []
+    assert "CANARY_GIT_CONFIG" not in result.content
+
+
+def test_pr_diff_never_follows_symlinked_parent_directory(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "env").write_text("CANARY_PARENT_DIR\n", encoding="utf-8")
+    (repo_root / "vendor").symlink_to(outside_dir, target_is_directory=True)
+
+    result = _pr_diff_context(repo_root, ["vendor/env"], ingest_files=[])
+
+    assert result.files_included == []
+    assert "CANARY_PARENT_DIR" not in result.content
+
+
+def test_pr_diff_rejects_traversal_and_absolute_changed_paths(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (tmp_path / "secret.txt").write_text("CANARY_TRAVERSAL\n", encoding="utf-8")
+
+    result = _pr_diff_context(
+        repo_root, ["../secret.txt", str(tmp_path / "secret.txt")], ingest_files=[]
+    )
+
+    assert result.files_included == []
+    assert "CANARY_TRAVERSAL" not in result.content

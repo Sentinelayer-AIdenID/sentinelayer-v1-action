@@ -8,6 +8,29 @@ from ...ingest.codebase_snapshot import build_codebase_snapshot
 from ...ingest.quick_learn import QuickLearnSummary
 
 
+def _is_plain_repo_file(repo_root: Optional[Path], rel_path: object) -> bool:
+    """True only for a relative path to a regular file inside repo_root, outside .git/,
+    with no symlink anywhere along it (a symlinked parent directory escapes too)."""
+    if repo_root is None or not isinstance(rel_path, str) or not rel_path:
+        return False
+    if "\\" in rel_path or ":" in rel_path or rel_path.startswith("/"):
+        return False
+    parts = rel_path.split("/")
+    if any(part in {"", ".", "..", ".git"} for part in parts):
+        return False
+    current = repo_root
+    for part in parts:
+        current = current / part
+        if current.is_symlink():
+            return False
+    try:
+        resolved = current.resolve(strict=True)
+        root = repo_root.resolve(strict=True)
+    except OSError:
+        return False
+    return resolved.is_relative_to(root) and resolved.is_file()
+
+
 TRUNCATION_MARKER = "... (truncated)"
 
 
@@ -117,7 +140,7 @@ class ContextBuilder:
             diff_section = f"## PR Diff\n{diff_content.strip()}\n"
             add_section("diff", diff_section, allow_truncate=True)
 
-        priority_files = self._prioritize_files(ingest, changed_files, scan_mode)
+        priority_files = self._prioritize_files(ingest, changed_files, scan_mode, repo_root)
         hotspot_set = set()
         for files in ingest.get("hotspots", {}).values():
             hotspot_set.update(files)
@@ -322,7 +345,8 @@ class ContextBuilder:
         return bounded
 
     def _prioritize_files(
-        self, ingest: dict, changed_files: Optional[List[str]], scan_mode: str
+        self, ingest: dict, changed_files: Optional[List[str]], scan_mode: str,
+        repo_root: Optional[Path] = None,
     ) -> List[str]:
         """Return files in priority order for context inclusion."""
         priority: List[str] = []
@@ -334,6 +358,11 @@ class ContextBuilder:
 
         if scan_mode == "pr-diff" and changed_files:
             for rel_path in changed_files:
+                # Ingest already vetted its own paths (it skips symlinks). A changed
+                # path ingest did not list (a test, a lockfile) is read only when it
+                # is a regular file reached without any symlink and outside .git/.
+                if rel_path not in ingest_paths and not _is_plain_repo_file(repo_root, rel_path):
+                    continue
                 if rel_path not in priority:
                     priority.append(rel_path)
 
