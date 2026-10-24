@@ -97,8 +97,9 @@ jobs:
           sentinelayer_managed_llm: true
           scan_mode: ${{ github.event_name == 'workflow_dispatch' && inputs.scan_mode || 'deep' }}
           severity_gate: ${{ github.event_name == 'workflow_dispatch' && inputs.severity_gate || 'P1' }}
-          model: ${{ vars.OMAR_MODEL || 'gpt-5.3-codex' }}
-          codex_model: ${{ vars.OMAR_CODEX_MODEL || 'gpt-5.3-codex' }}
+          model: ${{ vars.OMAR_MODEL || 'gpt-6-sol' }}
+          codex_model: ${{ vars.OMAR_CODEX_MODEL || 'gpt-6-sol' }}
+          reasoning_effort: ${{ vars.OMAR_REASONING_EFFORT || 'max' }}
           model_fallback: ${{ vars.OMAR_MODEL_FALLBACK || 'gemini-2.5-flash' }}
           use_codex: true
           codex_only: false

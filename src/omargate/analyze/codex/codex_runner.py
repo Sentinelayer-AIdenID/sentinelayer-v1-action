@@ -176,9 +176,12 @@ def extract_codex_cli_failure(stdout: str) -> Optional[str]:
 
 
 class CodexRunner:
-    def __init__(self, api_key: str, model: str = "gpt-5.3-codex") -> None:
+    def __init__(self, api_key: str, model: str = "gpt-5.3-codex", reasoning_effort: str = "") -> None:
         self.api_key = api_key
         self.model = model
+        # The pinned Codex CLI (0.98.0) rejects `max` ("expected one of none, minimal, low, medium, high, xhigh"),
+        # so its highest effort stands in; the API path receives `max` unchanged.
+        self.cli_reasoning_effort = "xhigh" if reasoning_effort == "max" else reasoning_effort
 
     def _resolve_codex_bin(self, working_dir: Path) -> Optional[str]:
         path = shutil.which("codex")
@@ -224,6 +227,7 @@ class CodexRunner:
         cmd = [
             codex_bin,
             "exec",
+            *(["-c", f"model_reasoning_effort={self.cli_reasoning_effort}"] if self.cli_reasoning_effort else []),
             "--json",
             "--sandbox",
             sandbox,
