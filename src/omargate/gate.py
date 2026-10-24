@@ -177,6 +177,7 @@ def _validate_npm_project_evidence(evidence: dict, aggregate: dict) -> bool:
         return False
     observed = []
     total = 0
+    workspace_members = []
     for audit in audits:
         if not isinstance(audit, dict) or set(audit) != {"manifest_path", "manifest_sha256", "lockfile_path", "lockfile_sha256", "mode", "input_unchanged", "outcome"}:
             return False
@@ -200,10 +201,30 @@ def _validate_npm_project_evidence(evidence: dict, aggregate: dict) -> bool:
                     or PurePosixPath(lock).parent != PurePosixPath(path).parent
                     or PurePosixPath(lock).name not in {"package-lock.json", "npm-shrinkwrap.json"}):
                 return False
+        elif audit["mode"] == "workspace_member":
+            lock = audit["lockfile_path"]
+            if (not path_ok(lock) or not digest_ok(audit["lockfile_sha256"])
+                    or PurePosixPath(lock).name not in {"package-lock.json", "npm-shrinkwrap.json"}
+                    or count != 0):
+                return False
+            workspace_members.append(audit)
         else:
             return False
         observed.append(path)
         total += count
+    roots = {row["manifest_path"]: row for row in audits if row["mode"] == "registry_graph"}
+    for member in workspace_members:
+        lock = PurePosixPath(member["lockfile_path"])
+        root_path = str(lock.parent / "package.json")
+        if root_path == "package.json" or root_path in roots:
+            root_row = roots.get(root_path)
+        else:
+            return False
+        if (root_row is None or root_row["lockfile_path"] != member["lockfile_path"]
+                or root_row["lockfile_sha256"] != member["lockfile_sha256"]
+                or not PurePosixPath(member["manifest_path"]).is_relative_to(lock.parent)
+                or PurePosixPath(member["manifest_path"]).parent == lock.parent):
+            return False
     return (observed == declared and aggregate["vulnerability_count"] == total
             and aggregate["state"] == ("vulnerable" if total else "clean"))
 
