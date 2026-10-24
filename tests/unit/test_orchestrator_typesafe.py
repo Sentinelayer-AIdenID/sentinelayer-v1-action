@@ -5,6 +5,7 @@ from policy_fixture import FAKE_POLICY_JSON
 from omargate.intent_identity import intent_model_reference
 
 import copy
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -372,6 +373,40 @@ async def test_allowed_fallback_uses_codex_first_and_keeps_actual_returned_prove
     assert result.llm_usage["fallback_chain"] == f"typesafe/{intent_model_reference(PIN)} -> openai/{GENERATOR}"
     assert synopsis == []
     assert_deterministic_retained(result)
+
+
+@pytest.mark.anyio
+async def test_legacy_typesafe_fallback_withholds_audited_lock_bytes(tmp_path, monkeypatch):
+    instance, _, _ = orchestrator(tmp_path, monkeypatch, run_harness=True)
+    marker = "audited-lock-private-marker"
+    lockfile = tmp_path / "package-lock.json"
+    lockfile.write_text('{"lockfileVersion":3,"marker":"' + marker + '"}\n', encoding="utf-8")
+    evidence = {
+        "enabled": True, "complete": True,
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": hashlib.sha256(lockfile.read_bytes()).hexdigest(),
+            "input_unchanged": True,
+            "outcome": {"ecosystem": "npm", "applicable": True, "state": "clean"},
+        }]},
+    }
+
+    class FixtureHarness:
+        async def run_with_evidence(self):
+            return SimpleNamespace(findings=[], dependency_audit_evidence=evidence)
+
+    monkeypatch.setattr(module, "HarnessRunner", lambda **_kwargs: FixtureHarness())
+    typed, cli, api = stages(instance, monkeypatch, typed=outcome(success=False))
+    result = await instance.run(
+        scan_mode="pr-diff", changed_files=["source.py", "package-lock.json"],
+        diff_content=(DIFF + "diff --git a/package-lock.json b/package-lock.json\n"
+                      "--- a/package-lock.json\n+++ b/package-lock.json\n"
+                      "@@ -1 +1 @@\n-{}\n+" + lockfile.read_text(encoding="utf-8")),
+    )
+    assert typed.await_count == 1
+    assert cli.await_count == api.await_count == 0
+    assert not result.llm_success
+    assert any("audited lockfile" in warning.lower() for warning in result.warnings)
 
 
 @pytest.mark.anyio

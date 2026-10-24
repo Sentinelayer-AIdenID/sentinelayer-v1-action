@@ -745,6 +745,46 @@ def test_excluded_lockfile_stays_byte_bound_after_inventory(tmp_path: Path, chan
         verify_sources(tmp_path, inventory)
 
 
+def test_receipt_backed_large_npm_lock_is_excluded_and_byte_bound(tmp_path: Path):
+    lockfile = tmp_path / "package-lock.json"
+    lockfile.write_text('{"lockfileVersion":3,"pad":"' + "x" * 1_200_000 + '"}\n', encoding="utf-8")
+    evidence = {
+        "enabled": True, "complete": True,
+        "npm_projects": {"audits": [{
+            "lockfile_path": "package-lock.json",
+            "lockfile_sha256": hashlib.sha256(lockfile.read_bytes()).hexdigest(),
+            "input_unchanged": True,
+            "outcome": {"ecosystem": "npm", "applicable": True, "state": "clean"},
+        }]},
+    }
+    inventory = build_inventory(
+        repo_root=tmp_path, ingest={"files": []}, changed_files=["package-lock.json"],
+        scan_mode="pr-diff", max_candidates=50, dep_audit_evidence=evidence,
+    )
+    assert inventory.candidates == ()
+    assert inventory.policy_excluded == (("package-lock.json", "dep_audit_coverage"),)
+    verify_sources(tmp_path, inventory)
+    context = build_typed_context(
+        repo_root=tmp_path, inventory=inventory, ingest={"files": []},
+        deterministic_findings=[],
+        diff_content=(
+            "diff --git a/package-lock.json b/package-lock.json\n"
+            "--- a/package-lock.json\n+++ b/package-lock.json\n"
+            "@@ -1 +1 @@\n-{}\n+" + lockfile.read_text(encoding="utf-8")
+        ),
+    )
+    assert context["candidate_context"] == {}
+    assert context["diff_head_lines_verified"] is True
+    lockfile.write_text('{"lockfileVersion":3,"pad":"' + "y" * 1_200_000 + '"}\n', encoding="utf-8")
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_changed_during_review"):
+        verify_sources(tmp_path, inventory)
+    with pytest.raises(TypeSafeReviewIncomplete, match="source_budget_exceeded"):
+        build_inventory(
+            repo_root=tmp_path, ingest={"files": []}, changed_files=["package-lock.json"],
+            scan_mode="pr-diff", max_candidates=50,
+        )
+
+
 def test_lockfile_stays_candidate_without_dep_audit(tmp_path: Path):
     """Without dep_audit_evidence, a lockfile stays as an ordinary candidate.
     This is the fail-safe: no evidence means no exclusion."""

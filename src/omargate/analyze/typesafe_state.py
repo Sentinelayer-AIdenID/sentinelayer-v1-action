@@ -6,13 +6,13 @@ from pathlib import Path
 import re
 
 from ..redaction import redact_secret_source, sanitize_public_error
-from .typesafe_review import ReviewInventory, TypeSafeReviewIncomplete
+from .typesafe_review import MAX_AUDITED_LOCK_BYTES, ReviewInventory, TypeSafeReviewIncomplete
 
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _DIFF_METADATA = re.compile(r"(?:index [a-fA-F0-9]{4,64}\.\.[a-fA-F0-9]{4,64}(?: [0-7]{6})?|(?:old|new|new file|deleted file) mode [0-7]{6})")
 MAX_REVIEW_DIFF_BYTES = 100_000
-MAX_BOUND_DIFF_BYTES = 10 * 1024 * 1024
+MAX_BOUND_DIFF_BYTES = MAX_AUDITED_LOCK_BYTES
 
 
 def build_typed_context(

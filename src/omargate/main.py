@@ -16,6 +16,7 @@ from .config import OmarGateConfig
 from .context import GitHubContext
 from .gate import evaluate_gate
 from .github import GitHubClient, findings_to_annotations
+from .pr_diff import attest_pr_diff
 from .idempotency import (
     compute_idempotency_key,
     dependency_audit_freshness_epoch,
@@ -529,6 +530,11 @@ async def async_main() -> int:
                 with logger.stage("fetch_diff"):
                     diff_content = await gh.get_pr_diff(ctx.pr_number)
                     changed_files = await gh.get_pr_changed_files(ctx.pr_number)
+                    if config.llm_provider == "typesafe" and not limited_mode:
+                        diff_content = attest_pr_diff(
+                            repo_root, base_sha=ctx.base_sha, head_sha=ctx.head_sha,
+                            supplied_diff=diff_content,
+                        )
             except Exception as exc:
                 collector.record_error("fetch_diff", str(exc))
                 collector.stage_end("fetch_diff", success=False)

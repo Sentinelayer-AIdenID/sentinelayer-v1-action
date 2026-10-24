@@ -48,6 +48,7 @@ from .review_cascade import DEEP, MID, ReviewRoute, choose_route, excellence_cov
 from .review_costs import CASCADE_MAX_OUTPUT_TOKENS, cost_ledger, estimate_usage, partition_cost_reservation
 from .deterministic.workflow_scanner import scan_workflow_files
 from .typesafe_review import (
+    _DEP_AUDIT_LOCKFILES,
     TypedReview,
     TypeSafeReviewIncomplete,
     build_inventory,
@@ -820,6 +821,25 @@ class AnalysisOrchestrator:
         run_generator = not cascade and (self.config.llm_provider != "typesafe" or (
             not llm_success and self.config.typesafe_fallback
         ))
+        if run_generator and self.config.llm_provider == "typesafe" and scan_mode == "pr-diff":
+            assessment = (typed_result.usage or {}).get("typesafe_assessment", {}) if typed_result else {}
+            exclusions = assessment.get("policy_excluded") if isinstance(assessment, dict) else None
+            audited_lock_excluded = isinstance(exclusions, list) and any(
+                isinstance(row, dict) and row.get("reason") == "dep_audit_coverage"
+                for row in exclusions
+            )
+            coverage_unknown = (
+                exclusions is None and isinstance(dependency_audit_evidence, dict)
+                and dependency_audit_evidence.get("enabled") is True
+                and dependency_audit_evidence.get("complete") is True
+                and any(isinstance(path, str) and path.rsplit("/", 1)[-1] in _DEP_AUDIT_LOCKFILES
+                        for path in changed_files or [])
+            )
+            if audited_lock_excluded or coverage_unknown:
+                # Legacy fallback builds a whole-file context and cannot retain
+                # an audited-lock exclusion. Keep the typed result as a hold.
+                run_generator = False
+                warnings.append("Generator fallback withheld for audited lockfile source")
         if run_generator and self.allow_llm and self.config.use_codex:
             generator_result_recorded = True
             with self.logger.stage("deep_scan"):
@@ -1499,6 +1519,10 @@ class AnalysisOrchestrator:
                 scan_mode=scan_mode, max_candidates=self.config.typesafe_max_candidates,
                 dep_audit_evidence=dep_audit_evidence,
             )
+            metadata["policy_excluded"] = [
+                {"path": path, "reason": reason} for path, reason in inventory.policy_excluded
+            ]
+            metadata["excluded_source_hashes"] = dict(inventory.excluded_source_hashes)
             policy = load_policy(self.config.intent_policy.get_secret_value())
             context = build_typed_context(
                 repo_root=self.repo_root, inventory=inventory, ingest=ingest,

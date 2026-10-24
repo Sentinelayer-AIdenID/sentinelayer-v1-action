@@ -24,6 +24,7 @@ from .typesafe_client import (
 )
 
 MAX_FILE_BYTES = 1_000_000
+MAX_AUDITED_LOCK_BYTES = 10 * 1024 * 1024
 MAX_STATE_BYTES = 24_000
 LINES_PER_CANDIDATE = 40
 
@@ -211,22 +212,26 @@ def build_inventory(
     excluded_hashes: list[tuple[str, str]] = []
     for relative in sorted(set(changed_files)):
         path = _source_path(repo_root, relative)
-        if path.stat().st_size > MAX_FILE_BYTES:
+        is_npm_lock = relative.rsplit("/", 1)[-1] in _DEP_AUDIT_LOCKFILES
+        file_limit = MAX_AUDITED_LOCK_BYTES if is_npm_lock else MAX_FILE_BYTES
+        if path.stat().st_size > file_limit:
             raise TypeSafeReviewIncomplete("source_budget_exceeded")
         raw = path.read_bytes()
-        if len(raw) > MAX_FILE_BYTES or b"\0" in raw:
+        if len(raw) > file_limit or b"\0" in raw:
             raise TypeSafeReviewIncomplete("unsupported_source_bytes")
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             raise TypeSafeReviewIncomplete("unsupported_source_encoding") from None
         source_hash = _digest(raw)
-        if relative.rsplit("/", 1)[-1] in _DEP_AUDIT_LOCKFILES:
+        if is_npm_lock:
             receipt = _lockfile_coverage_receipt(relative, dep_audit_evidence, source_hash)
             if receipt is not None:
                 excluded.append((relative, receipt))
                 excluded_hashes.append((relative, source_hash))
                 continue
+        if len(raw) > MAX_FILE_BYTES:
+            raise TypeSafeReviewIncomplete("source_budget_exceeded")
         lines = text.splitlines(keepends=True)
         if not lines:
             raise TypeSafeReviewIncomplete("empty_source_scope")
@@ -264,8 +269,10 @@ def verify_sources(repo_root: Path, inventory: ReviewInventory) -> None:
         raise TypeSafeReviewIncomplete("incomplete_source_inventory")
     for relative, expected in inventory.excluded_source_hashes:
         path = _source_path(repo_root, relative)
+        if path.stat().st_size > MAX_AUDITED_LOCK_BYTES:
+            raise TypeSafeReviewIncomplete("source_changed_during_review")
         raw = path.read_bytes()
-        if len(raw) > MAX_FILE_BYTES or _digest(raw) != expected:
+        if len(raw) > MAX_AUDITED_LOCK_BYTES or _digest(raw) != expected:
             raise TypeSafeReviewIncomplete("source_changed_during_review")
     for relative, expected in inventory.source_hashes:
         path = _source_path(repo_root, relative)
