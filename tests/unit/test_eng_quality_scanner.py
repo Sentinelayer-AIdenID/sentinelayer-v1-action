@@ -771,3 +771,33 @@ def test_eq009_dynamic_namespace_writes_and_class_bodies_disable_constant_trust(
     assert _eq009_lines(exec_write) == [3]
     assert _eq009_lines(module_dict_write) == [4]
     assert _eq009_lines(class_body) == [3]
+
+
+def test_eq009_aliased_namespace_capabilities_disable_constant_trust() -> None:
+    via_module = (
+        "import builtins\n"
+        'TABLE = "accounts"\n'
+        'builtins.globals()["TABLE"] = input()\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    via_alias = (
+        'TABLE = "accounts"\n'
+        "g = globals\n"
+        'g()["TABLE"] = input()\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    via_import_alias = (
+        "from builtins import globals as g\n"
+        'TABLE = "accounts"\n'
+        'g()["TABLE"] = input()\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    via_getattr = (
+        'TABLE = "accounts"\n'
+        'getattr(__builtins__, "glob" + "als")()["TABLE"] = input()\n'
+        'SQL = f"DELETE FROM {TABLE} WHERE id = 1"\n'
+    )
+    assert _eq009_lines(via_module) == [4]
+    assert _eq009_lines(via_alias) == [4]
+    assert _eq009_lines(via_import_alias) == [4]
+    assert _eq009_lines(via_getattr) == [3]

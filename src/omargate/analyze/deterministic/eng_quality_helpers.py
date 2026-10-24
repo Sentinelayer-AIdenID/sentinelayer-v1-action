@@ -385,17 +385,27 @@ def _module_string_constants(tree: ast.AST) -> dict[str, str]:
     return constants
 
 
-_DYNAMIC_NAMESPACE_CALLS = frozenset({"globals", "locals", "vars", "exec", "eval", "setattr", "delattr", "__import__"})
+# Names whose mere REFERENCE can lead to a run-time namespace write. A reference, not just a direct
+# call, is enough: `g = globals; g()[...]`, `builtins.globals()[...]` and
+# `from builtins import globals as g` are the same capability under another name.
+_DYNAMIC_NAMESPACE_NAMES = frozenset({
+    "globals", "locals", "vars", "exec", "eval", "compile", "setattr", "delattr", "getattr",
+    "__import__", "__builtins__", "builtins", "importlib", "__dict__", "modules",
+})
 
 
 def _rebinds_names_dynamically(node: ast.AST) -> bool:
-    """A wildcard import, or any call/attribute that can write a module namespace at run time."""
+    """A wildcard import, or any reference to a capability that can write a namespace at run time."""
     if isinstance(node, ast.ImportFrom):
-        return any(alias.name == "*" for alias in node.names)
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-        return node.func.id in _DYNAMIC_NAMESPACE_CALLS
+        return any(alias.name == "*" or alias.name in _DYNAMIC_NAMESPACE_NAMES for alias in node.names) or (
+            (node.module or "").split(".")[0] in _DYNAMIC_NAMESPACE_NAMES
+        )
+    if isinstance(node, ast.Import):
+        return any(alias.name.split(".")[0] in _DYNAMIC_NAMESPACE_NAMES for alias in node.names)
+    if isinstance(node, ast.Name):
+        return node.id in _DYNAMIC_NAMESPACE_NAMES
     if isinstance(node, ast.Attribute):
-        return node.attr in {"__dict__", "modules"}  # obj.__dict__[...] / sys.modules[__name__]
+        return node.attr in _DYNAMIC_NAMESPACE_NAMES
     return False
 
 
