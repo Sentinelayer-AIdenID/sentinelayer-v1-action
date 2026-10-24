@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       intent_canary:
-        description: Run the bounded paid synthetic cascade trial
+        description: Legacy synthetic cascade is disabled under the Sol 6.1-only policy
         type: boolean
         default: false
 
@@ -190,8 +190,6 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       PYTHONPATH: src
-      CODEX_CLI_VERSION: "0.98.0"
-      CLAUDE_CLI_VERSION: "2.1.39"
     permissions:
       contents: read
       pull-requests: write
@@ -223,99 +221,14 @@ jobs:
         run: |
           python -m pip install --require-hashes -r requirements.lock.txt
 
-      - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: "24"
-
-      - name: Prepare global npm bin path
-        run: |
-          mkdir -p "$HOME/.npm-global/bin"
-          npm config set prefix "$HOME/.npm-global"
-          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
-
-      - name: Cache LLM CLI packages
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
-        with:
-          path: |
-            ~/.npm
-            ~/.npm-global
-          key: ${{ runner.os }}-llm-cli-${{ env.CODEX_CLI_VERSION }}-${{ env.CLAUDE_CLI_VERSION }}
-          restore-keys: |
-            ${{ runner.os }}-llm-cli-
-
-      - name: Install LLM CLIs
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          verify_and_install_cli() {
-            local package="$1"
-            local version="$2"
-            local expected_integrity=""
-            local tmpdir=""
-            local tarball=""
-            local actual_integrity=""
-
-            expected_integrity="$(npm view "${package}@${version}" dist.integrity --json | tr -d '"')"
-            if [[ -z "${expected_integrity}" ]]; then
-              echo "Unable to resolve integrity for ${package}@${version}" >&2
-              return 1
-            fi
-
-            tmpdir="$(mktemp -d)"
-            npm pack "${package}@${version}" --pack-destination "${tmpdir}" >/dev/null
-            tarball="$(ls "${tmpdir}"/*.tgz)"
-            actual_integrity="sha512-$(openssl dgst -sha512 -binary "${tarball}" | openssl base64 -A)"
-
-            if [[ "${actual_integrity}" != "${expected_integrity}" ]]; then
-              echo "Integrity mismatch for ${package}@${version}" >&2
-              echo "expected=${expected_integrity} actual=${actual_integrity}" >&2
-              return 1
-            fi
-
-            npm install -g "${tarball}"
-            rm -rf "${tmpdir}"
-          }
-
-          install_pinned_cli() {
-            local binary="$1"
-            local package="$2"
-            local version="$3"
-            local current=""
-
-            if command -v "${binary}" >/dev/null 2>&1; then
-              current="$(${binary} --version 2>/dev/null || true)"
-            fi
-
-            if [[ -n "${current}" ]] && grep -Fq "${version}" <<<"${current}"; then
-              echo "${binary} already cached (${current})"
-              return 0
-            fi
-
-            echo "Installing ${package}@${version} with integrity verification"
-            verify_and_install_cli "${package}" "${version}"
-          }
-
-          install_pinned_cli codex @openai/codex "${CODEX_CLI_VERSION}"
-          install_pinned_cli claude @anthropic-ai/claude-code "${CLAUDE_CLI_VERSION}"
-
-      - name: Verify LLM CLIs
-        run: |
-          set -euo pipefail
-          echo "codex:  $(command -v codex)"
-          echo "claude: $(command -v claude)"
-          codex --version
-          claude --version
-
-      - name: Require OPENAI_API_KEY for Codex scan
+      - name: Require OPENAI_API_KEY for OpenAI review
         shell: bash
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${OPENAI_API_KEY}" ]; then
-            echo "::error::OPENAI_API_KEY is required so security-review runs with your Codex/OpenAI LLM path."
+            echo "::error::OPENAI_API_KEY is required for the pinned OpenAI security review."
             exit 1
           fi
 
@@ -326,16 +239,15 @@ jobs:
           INPUT_GITHUB_TOKEN: ${{ github.token }}
           INPUT_SENTINELAYER_TOKEN: ${{ secrets.SENTINELAYER_TOKEN }}
           INPUT_SENTINELAYER_MANAGED_LLM: 'false'
-          INPUT_LLM_PROVIDER: ${{ vars.OMAR_LLM_PROVIDER || 'openai' }}
+          INPUT_LLM_PROVIDER: openai
+          INPUT_REVIEW_ROUTING: legacy
           INPUT_OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          INPUT_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          INPUT_GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          INPUT_XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
-          INPUT_MODEL: ${{ vars.OMAR_MODEL || 'gpt-5.3-codex' }}
-          INPUT_MODEL_FALLBACK: ${{ vars.OMAR_MODEL_FALLBACK || 'gpt-5.2-codex' }}
-          INPUT_USE_CODEX: 'true'
-          INPUT_CODEX_ONLY: 'true'
-          INPUT_CODEX_MODEL: ${{ vars.OMAR_CODEX_MODEL || 'gpt-5.3-codex' }}
+          INPUT_MODEL: gpt-6.1-sol
+          INPUT_MODEL_FALLBACK: gpt-6.1-sol
+          INPUT_USE_CODEX: 'false'
+          INPUT_CODEX_ONLY: 'false'
+          INPUT_CODEX_MODEL: gpt-6.1-sol
+          INPUT_LLM_FAILURE_POLICY: block
           INPUT_SEVERITY_GATE: P1
           INPUT_SCAN_MODE: deep
           INPUT_SHARE_METADATA: 'true'
@@ -361,36 +273,15 @@ jobs:
           if-no-files-found: warn
 
   intent-canary:
-    name: Synthetic intent cascade trial
+    name: Legacy intent cascade disabled
     if: github.event_name == 'workflow_dispatch' && inputs.intent_canary
     needs: [quality-gates, secret-scanning]
     runs-on: ubuntu-22.04
-    timeout-minutes: 50
-    env:
-      PYTHONPATH: src
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: '3.11'
-      - name: Install pinned dependencies
-        run: python -P -m pip install --require-hashes -r requirements.lock.txt
-      - name: Run synthetic trial
-        env:
-          INPUT_OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          INPUT_TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
-          INPUT_INTENT_MODEL_PIN: ${{ secrets.INTENT_MODEL_PIN }}
-          INPUT_INTENT_POLICY: ${{ secrets.INTENT_POLICY_CANARY }}
-          INPUT_INTENT_PRICE_PROFILE: typesafe-input-20261020
-        run: python -P scripts/intent_canary.py
-      - name: Upload bounded synthetic evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: intent-canary-${{ github.sha }}
-          path: canary-evidence/intent-canary.json
-          if-no-files-found: error
-          retention-days: 14
+      - name: Reject legacy synthetic cascade
+        run: |
+          echo "::error::The legacy intent cascade is disabled under the GPT-6.1 Sol-only policy."
+          exit 1
 
   deploy:
     name: Deploy Artifact
