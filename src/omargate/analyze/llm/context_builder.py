@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 
 from ...ingest.codebase_snapshot import build_codebase_snapshot
 from ...ingest.quick_learn import QuickLearnSummary
+from ...repo_paths import plain_repo_file
 
 
 TRUNCATION_MARKER = "... (truncated)"
@@ -117,7 +118,7 @@ class ContextBuilder:
             diff_section = f"## PR Diff\n{diff_content.strip()}\n"
             add_section("diff", diff_section, allow_truncate=True)
 
-        priority_files = self._prioritize_files(ingest, changed_files, scan_mode)
+        priority_files = self._prioritize_files(ingest, changed_files, scan_mode, repo_root)
         hotspot_set = set()
         for files in ingest.get("hotspots", {}).values():
             hotspot_set.update(files)
@@ -322,7 +323,8 @@ class ContextBuilder:
         return bounded
 
     def _prioritize_files(
-        self, ingest: dict, changed_files: Optional[List[str]], scan_mode: str
+        self, ingest: dict, changed_files: Optional[List[str]], scan_mode: str,
+        repo_root: Optional[Path] = None,
     ) -> List[str]:
         """Return files in priority order for context inclusion."""
         priority: List[str] = []
@@ -334,6 +336,11 @@ class ContextBuilder:
 
         if scan_mode == "pr-diff" and changed_files:
             for rel_path in changed_files:
+                # Ingest already vetted its own paths (it skips symlinks). A changed
+                # path ingest did not list (a test, a lockfile) is read only when it
+                # is a regular file reached without any symlink and outside .git/.
+                if rel_path not in ingest_paths and plain_repo_file(repo_root, rel_path) is None:
+                    continue
                 if rel_path not in priority:
                     priority.append(rel_path)
 

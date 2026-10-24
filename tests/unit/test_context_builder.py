@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 from omargate.analyze.llm.context_builder import ContextBuilder
 
@@ -181,3 +182,161 @@ def test_context_includes_spec_context_before_pr_diff(tmp_path: Path) -> None:
     assert spec_idx != -1
     assert diff_idx != -1
     assert spec_idx < diff_idx
+
+
+def _pr_diff_context(repo_root: Path, changed_files: list[str], ingest_files: list[str]):
+    builder = ContextBuilder(max_tokens=100000)
+    return builder.build_context(
+        _make_ingest(ingest_files, hotspots={}),
+        [],
+        repo_root,
+        scan_mode="pr-diff",
+        diff_content="diff",
+        changed_files=changed_files,
+    )
+
+
+def test_pr_diff_reads_changed_file_outside_ingest(tmp_path: Path) -> None:
+    """A changed regular file that ingest skipped (a test, a lockfile) is still reviewed."""
+    repo_root = tmp_path / "repo"
+    (repo_root / "tests").mkdir(parents=True)
+    (repo_root / "tests" / "test_new.py").write_text("assert True\n", encoding="utf-8")
+
+    result = _pr_diff_context(repo_root, ["tests/test_new.py"], ingest_files=[])
+
+    assert "tests/test_new.py" in result.files_included
+
+
+def test_pr_diff_never_follows_changed_symlink_outside_repo(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / "ok.py").write_text("print('ok')\n", encoding="utf-8")
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("CANARY_OUTSIDE_REPO\n", encoding="utf-8")
+    (repo_root / "link.md").symlink_to(outside)
+
+    result = _pr_diff_context(repo_root, ["ok.py", "link.md"], ingest_files=["ok.py"])
+
+    assert "link.md" not in result.files_included
+    assert "CANARY_OUTSIDE_REPO" not in result.content
+
+
+def test_pr_diff_never_follows_changed_symlink_into_git_dir(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    (repo_root / ".git" / "config").write_text("CANARY_GIT_CONFIG\n", encoding="utf-8")
+    (repo_root / "docs").mkdir()
+    (repo_root / "docs" / "config.md").symlink_to(repo_root / ".git" / "config")
+
+    result = _pr_diff_context(repo_root, ["docs/config.md", ".git/config"], ingest_files=[])
+
+    assert result.files_included == []
+    assert "CANARY_GIT_CONFIG" not in result.content
+
+
+def test_pr_diff_never_follows_symlinked_parent_directory(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "env").write_text("CANARY_PARENT_DIR\n", encoding="utf-8")
+    (repo_root / "vendor").symlink_to(outside_dir, target_is_directory=True)
+
+    result = _pr_diff_context(repo_root, ["vendor/env"], ingest_files=[])
+
+    assert result.files_included == []
+    assert "CANARY_PARENT_DIR" not in result.content
+
+
+def test_pr_diff_rejects_traversal_and_absolute_changed_paths(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (tmp_path / "secret.txt").write_text("CANARY_TRAVERSAL\n", encoding="utf-8")
+
+    result = _pr_diff_context(
+        repo_root, ["../secret.txt", str(tmp_path / "secret.txt")], ingest_files=[]
+    )
+
+    assert result.files_included == []
+    assert "CANARY_TRAVERSAL" not in result.content
+
+
+def test_quick_learn_never_follows_symlinked_readme_outside_repo(tmp_path: Path) -> None:
+    from omargate.ingest.quick_learn import extract_quick_learn_summary
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    outside = tmp_path / "private.txt"
+    outside.write_text("# CANARY_QUICK_LEARN\nsecret project notes\n", encoding="utf-8")
+    (repo_root / "README.md").symlink_to(outside)
+    (repo_root / "pyproject.toml").write_text('[project]\nname = "plain"\n', encoding="utf-8")
+
+    summary = extract_quick_learn_summary(repo_root)
+    context = ContextBuilder(max_tokens=100000).build_context(
+        _make_ingest([], hotspots={}), [], repo_root, quick_learn=summary, scan_mode="deep"
+    )
+
+    assert summary.source_doc == "pyproject.toml"
+    assert "CANARY_QUICK_LEARN" not in summary.raw_excerpt
+    assert "CANARY_QUICK_LEARN" not in context.content
+
+
+def test_quick_learn_never_follows_symlinked_docs_dir_or_manifest(tmp_path: Path) -> None:
+    from omargate.ingest.quick_learn import extract_quick_learn_summary
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "README.md").write_text("# CANARY_DOCS_DIR\n", encoding="utf-8")
+    (outside_dir / "package.json").write_text('{"name": "CANARY_MANIFEST", "workspaces": ["x"]}', encoding="utf-8")
+    (repo_root / "docs").symlink_to(outside_dir, target_is_directory=True)
+    (repo_root / "package.json").symlink_to(outside_dir / "package.json")
+
+    summary = extract_quick_learn_summary(repo_root)
+
+    assert summary.source_doc == ""
+    assert "CANARY" not in summary.raw_excerpt
+    assert "CANARY" not in summary.project_name
+    assert summary.architecture != "monorepo"
+
+
+def test_quality_scan_infra_extras_never_follow_symlinks(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from omargate.analyze.orchestrator import AnalysisOrchestrator
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    outside = tmp_path / "runner.env"
+    outside.write_text("CANARY_ENV=1\n", encoding="utf-8")
+    (repo_root / ".env").symlink_to(outside)
+    (repo_root / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+
+    files = AnalysisOrchestrator._load_files_for_quality_scans(
+        SimpleNamespace(repo_root=repo_root), {"files": []}
+    )
+
+    assert ".env" not in files
+    assert files.get("Dockerfile") == "FROM scratch\n"
+
+
+def test_plain_repo_file_refuses_git_dir_in_any_case(tmp_path: Path) -> None:
+    from omargate.repo_paths import plain_repo_file
+
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+    (repo_root / ".git" / "config").write_text("CANARY_GIT_CASE\n", encoding="utf-8")
+    (repo_root / "pkg" / ".Git").mkdir(parents=True)
+    (repo_root / "pkg" / ".Git" / "HEAD").write_text("ref\n", encoding="utf-8")
+
+    for rel in (".git/config", ".GIT/config", ".Git/config", "pkg/.Git/HEAD", "pkg/.GIT/HEAD"):
+        assert plain_repo_file(repo_root, rel) is None, rel
+    if sys.platform == "win32":
+        # NTFS strips a trailing dot or space, so these name the real .git directory
+        for rel in (".git./config", ".git /config"):
+            assert plain_repo_file(repo_root, rel) is None, rel
+
+    result = _pr_diff_context(repo_root, [".GIT/config"], ingest_files=[])
+    assert result.files_included == []
+    assert "CANARY_GIT_CASE" not in result.content

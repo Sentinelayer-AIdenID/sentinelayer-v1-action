@@ -25,6 +25,7 @@ from ..logging import OmarLogger
 from ..package.fingerprint import add_fingerprints_to_findings
 from ..fix_plan import ensure_fix_plan
 from ..redaction import contains_credential_material, sanitize_public_error
+from ..repo_paths import plain_repo_file
 from .codex import CodexPromptBuilder, CodexRunner
 from .deterministic import (
     ConfigScanner,
@@ -1828,8 +1829,8 @@ class AnalysisOrchestrator:
             if rel_path in files:
                 continue
             try:
-                p = self.repo_root / rel_path
-                if p.is_file():
+                p = plain_repo_file(self.repo_root, rel_path)
+                if p is not None:
                     files[rel_path] = p.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 pass
