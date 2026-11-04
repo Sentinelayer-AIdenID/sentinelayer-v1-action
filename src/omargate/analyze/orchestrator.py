@@ -45,7 +45,7 @@ from .llm import (
 from .llm.providers import detect_provider_from_model
 from .llm.response_parser import ParsedFinding
 from .typesafe_client import TypeSafeClient, TypeSafeError
-from .review_cascade import DEEP, MID, ReviewRoute, cascade_generator_system_prompt, choose_route, excellence_coverage, triage_questions, response_model_matches
+from .review_cascade import DEEP, MID, SHADOW, ReviewRoute, cascade_generator_system_prompt, choose_route, excellence_coverage, triage_questions, response_model_matches
 from .review_costs import CASCADE_CONTEXT_BYTES_PER_BUDGET_TOKEN, CASCADE_MAX_OUTPUT_TOKENS, cost_ledger, estimate_usage, partition_cost_reservation
 from .deterministic.workflow_scanner import scan_workflow_files
 from .typesafe_review import (
@@ -792,7 +792,7 @@ class AnalysisOrchestrator:
 
         typed_result: Optional[LLMAnalysisResult] = None
         verified_scope: SourceScope | None = None
-        cascade = self.config.review_routing == "intent-cascade-v1"
+        cascade = self.config.review_routing in {"intent-cascade-v1", "intent-shadow-v1"}
         if cascade and self.allow_llm:
             generator_result_recorded = True
             result = await self._run_cascade_analysis(
@@ -1113,13 +1113,16 @@ class AnalysisOrchestrator:
             )
 
         records: list[dict] = []
+        shadow = self.config.review_routing == "intent-shadow-v1"
         route = DEEP
+        proposed_route = None
         triage = None
         inventory = None
         client = None
         source_verified = False
         source_failure_reason = None
         triage_status = "source_scope_incomplete"
+        triage_failure_reason = None
         review_diff = diff_content
         reviewed_files = changed_files
         def verify(inventory):
@@ -1199,6 +1202,7 @@ class AnalysisOrchestrator:
             records.append({**estimate_usage("typesafe", triage.model, triage.usage, intent_price_profile=self.config.intent_price_profile), "stage": "triage"})
             verify(inventory)
             route = choose_route(self.config.review_policy, triage, paths=changed_files or [], findings=deterministic_findings)
+            proposed_route = route
             triage_status = "complete"
         except Exception as exc:
             # Never expose source/provider exception bodies. A failed request may
@@ -1207,19 +1211,33 @@ class AnalysisOrchestrator:
                 records.append({**estimate_usage("typesafe", self.config.intent_model_pin.get_secret_value(),
                     client.observed_usage, intent_price_profile=self.config.intent_price_profile), "stage": "triage"})
             triage_status = "incomplete_requires_deep_review"
+            code = exc.reason_code if isinstance(exc, TypeSafeError) else "triage_invalid_or_unavailable"
+            triage_failure_reason = code if re.fullmatch(r"[a-z][a-z0-9_]{0,95}", code) else "triage_invalid_or_unavailable"
+            triage = None  # Invalid answers are not routing/quality evidence.
             if not source_verified:
                 code = str(exc) if isinstance(exc, TypeSafeReviewIncomplete) else "source_scope_incomplete"
                 source_failure_reason = code if re.fullmatch(r"[a-z][a-z0-9_]{0,95}", code) else "source_scope_incomplete"
                 triage_status = "source_scope_incomplete"
 
-        policy_findings, policy_assessment = await self._assess_cascade_policy(
-            inventory=inventory if source_verified else None, ingest=ingest, diff_content=diff_content,
-            deterministic_findings=deterministic_findings, records=records,
-            source_scope=_source_scope, typed_context=_typed_context,
-        )
+        if shadow:
+            # Routing is advisory in this explicit calibration mode. Do not call
+            # the independent intent security adjudicator or invent its success.
+            policy_findings = []
+            policy_assessment = {"complete": False, "status": "not_run",
+                                 "reason_code": "shadow_router_only",
+                                 "required_for_gate": False}
+            route = SHADOW
+            if triage_status == "incomplete_requires_deep_review":
+                triage_status = "unavailable_fixed_reviewer"
+        else:
+            policy_findings, policy_assessment = await self._assess_cascade_policy(
+                inventory=inventory if source_verified else None, ingest=ingest, diff_content=diff_content,
+                deterministic_findings=deterministic_findings, records=records,
+                source_scope=_source_scope, typed_context=_typed_context,
+            )
         if not source_verified:
             policy_assessment.update(status="incomplete", reason_code=source_failure_reason)
-        if not policy_assessment["complete"] or any(f.get("severity") in {"P0", "P1"} for f in policy_findings):
+        if not shadow and (not policy_assessment["complete"] or any(f.get("severity") in {"P0", "P1"} for f in policy_findings)):
             route = DEEP
         elif route.tier == "low" and any(f.get("severity") == "P2" for f in policy_findings):
             route = MID
@@ -1303,7 +1321,7 @@ class AnalysisOrchestrator:
                 # deep review's findings decide (P0/P1 block downstream, clean passes).
                 policy_assessment["resolution"] = "deep_review_decided"
                 policy_assessment["uncertain_candidate_count"] = len(policy_assessment["unresolved_candidates"])
-            elif not policy_assessment["complete"] and source_verified:
+            elif not shadow and not policy_assessment["complete"] and source_verified:
                 if result.success or not result.failure_class:
                     # A failed generator keeps its own class; the policy gap stays in policy_assessment.
                     result.failure_class = "cascade_policy_incomplete"
@@ -1320,6 +1338,12 @@ class AnalysisOrchestrator:
                                                    for key, value in triage.answers.items()} if triage else {},
                                        "source_hashes": dict(inventory.source_hashes) if inventory else {},
                                        "excluded_source_hashes": dict(inventory.excluded_source_hashes) if inventory else {}}
+            if shadow:
+                usage["review_routing"].update(
+                    mode="intent-shadow-v1", decision_authority="fixed_reviewer_and_native_gates",
+                    triage_failure_reason=triage_failure_reason,
+                    proposed_route=proposed_route.evidence(self.config.review_policy.reference) if proposed_route else None,
+                )
             usage["policy_assessment"] = policy_assessment
             usage["excellence"] = excellence_coverage(self.config.review_policy, triage.answers if triage else None)
             result.usage = usage
@@ -1441,6 +1465,11 @@ class AnalysisOrchestrator:
         result.usage = {**(result.usage or {}), "cost_ledger": evidence["cost_ledger"],
                         "source_scope": evidence,
                         "policy_assessment": {"complete": complete, "status": "complete" if complete else "incomplete"}}
+        if self.config.review_routing == "intent-shadow-v1":
+            result.usage["policy_assessment"] = {
+                "complete": False, "status": "not_run", "reason_code": "shadow_router_only",
+                "required_for_gate": False,
+            }
         if run_dir:
             try:
                 run_dir.mkdir(parents=True, exist_ok=True)
@@ -2449,10 +2478,10 @@ class AnalysisOrchestrator:
                         "reason": corroboration_reason,
                         "canonical_category": canonical_category,
                     }
-                    if self.config.review_routing != "intent-cascade-v1":
+                    if self.config.review_routing not in {"intent-cascade-v1", "intent-shadow-v1"}:
                         severity = "P2"
                         confidence = min(confidence, 0.75)
-                    if message and self.config.review_routing != "intent-cascade-v1":
+                    if message and self.config.review_routing not in {"intent-cascade-v1", "intent-shadow-v1"}:
                         message = (
                             f"{message} (LLM-only, needs deterministic corroboration)"
                         )

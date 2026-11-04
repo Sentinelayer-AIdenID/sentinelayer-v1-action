@@ -13,7 +13,7 @@ def review_config_digest(config) -> str:
     from pydantic import SecretStr
     values = config.model_dump(mode="json")
     # A same-head receipt predating the outbound privacy boundary is not reusable.
-    if config.review_routing == "intent-cascade-v1":
+    if config.review_routing in {"intent-cascade-v1", "intent-shadow-v1"}:
         values["_source_boundary_contract"] = GENERATOR_SOURCE_BOUNDARY_VERSION
     for name in type(config).model_fields:
         value = getattr(config, name)

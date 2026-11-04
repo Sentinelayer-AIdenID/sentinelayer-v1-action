@@ -92,6 +92,11 @@ def _check_name(comment_tag: str = "") -> str:
 
 
 def _llm_fallback_used(llm_usage: dict, model_fallback: str) -> bool:
+    routing = llm_usage.get("review_routing")
+    if isinstance(routing, dict) and routing.get("mode") == "intent-shadow-v1":
+        # The fixed reviewer is the only generator route, even when its model
+        # equals the configured fallback name. Advisory triage is not a fallback.
+        return False
     model_used = str(llm_usage.get("model") or "").strip()
     route_used = str(llm_usage.get("route") or "").strip()
     return bool(
@@ -290,7 +295,7 @@ def _write_configuration_failure_evidence(run_dir: Path, run_id: str) -> None:
     from .analyze.review_costs import cost_ledger
     required = ("TYPESAFE_API_KEY", "OPENAI_API_KEY", "INTENT_MODEL_PIN", "INTENT_POLICY")
     typed = (os.environ.get("INPUT_LLM_PROVIDER", "").strip().lower() == "typesafe"
-             or os.environ.get("INPUT_REVIEW_ROUTING", "").strip().lower() == "intent-cascade-v1")
+             or os.environ.get("INPUT_REVIEW_ROUTING", "").strip().lower() in {"intent-cascade-v1", "intent-shadow-v1"})
     missing = [name for name in required if not os.environ.get("INPUT_" + name, "").strip()] if typed else []
     reason = "private_config_missing" if missing else "configuration_invalid"
     findings = run_dir / "FINDINGS.jsonl"
@@ -958,7 +963,7 @@ async def async_main() -> int:
                             comment_tag=config.comment_tag,
                             llm_evidence=_build_llm_evidence(analysis, config),
                             review_routing=(analysis.llm_usage or {}).get("review_routing"),
-                            cascade_cost_envelope=config.review_routing == "intent-cascade-v1",
+                            cascade_cost_envelope=config.review_routing in {"intent-cascade-v1", "intent-shadow-v1"},
                         )
                         comment_url = gh.create_or_update_pr_comment(
                             ctx.pr_number,

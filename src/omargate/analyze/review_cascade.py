@@ -28,6 +28,9 @@ class ReviewRoute:
                 "policy_reference": policy_reference, "calibration": CALIBRATION}
 
 
+SHADOW = ReviewRoute("shadow", "gpt-6.1-sol", "xhigh", "fixed_reviewer_intent_is_advisory")
+
+
 LOW = ReviewRoute("low", "gpt-6-luna", "max", "complete_low_risk")
 MID = ReviewRoute("mid", "gpt-6.1-sol", "xhigh", "uncertain_or_complex")
 DEEP = ReviewRoute("deep", "gpt-6-sol", "max", "critical_or_incomplete")

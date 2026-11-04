@@ -230,6 +230,16 @@ def _review_chain_section(llm_evidence, review_routing, llm_engine, llm_model):
     else:
         lines.append("- **Triage:** not available")
 
+    if routing.get("mode") == "intent-shadow-v1":
+        lines.append("- **Intent mode:** shadow; advice does not select the reviewer or decide the gate")
+        lines.append("  - Intent security policy: **not run**; the fixed reviewer and native severity gates decide the result")
+        proposal = routing.get("proposed_route")
+        if isinstance(proposal, dict):
+            lines.append("  - Proposed route (not executed): `" + str(proposal.get("tier", "?"))
+                         + "` / `" + str(proposal.get("model", "?")) + "`")
+        else:
+            lines.append("  - Proposed route: unavailable")
+
     # Route + reviewer row
     routes = routing.get("routes", [])
     if routes:
@@ -515,7 +525,21 @@ def render_pr_comment(
 
     lines.extend(["### Next Steps", "", next_steps, ""])
 
-    # False-positive defense explainer — always shown so users understand trust model.
+    # Keep the existing section, but describe the actual shadow gate authority.
+    shadow_review = (review_routing or {}).get("mode") == "intent-shadow-v1"
+    llm_defense = (
+        ["**Layer 3 — Source-Bound Review**",
+         "- The fixed Sol reviewer retains source-bound P0/P1 findings without a corroboration downgrade.",
+         "- Jev routing advice cannot suppress a finding or approve a merge; its independent security policy is not run.",
+         "- The native severity gate applies to the combined deterministic and reviewer findings."]
+        if shadow_review else
+        ["**Layer 3 — LLM Guardrails (Corroboration Required)**",
+         "- LLM-sourced P0/P1 findings are automatically downgraded to P2 "
+         "unless a deterministic finding in the *same file*, *same category*, "
+         "and within *5 lines* corroborates them.",
+         "- Findings referencing files not in the scanned diff are dropped entirely.",
+         "- Line numbers are clamped to valid ranges; hallucinated locations are discarded."]
+    )
     fp_defense = "\n".join(
         [
             "<details>",
@@ -536,13 +560,9 @@ def render_pr_comment(
             "- Entropy matches in doc files (`.md`, `.rst`, `.txt`) and historical "
             "commits are auto-downgraded to P3.",
             "",
-            "**Layer 3 — LLM Guardrails (Corroboration Required)**",
-            "- LLM-sourced P0/P1 findings are automatically downgraded to P2 "
-            "unless a deterministic finding in the *same file*, *same category*, "
-            "and within *5 lines* corroborates them.",
-            "- Findings referencing files not in the scanned diff are dropped entirely.",
-            "- Line numbers are clamped to valid ranges; hallucinated locations are discarded.",
+            *llm_defense,
             "",
+            "Source completeness, the fixed review and native gates remain required." if shadow_review else
             "This layered approach ensures that blocking findings are backed by "
             "deterministic evidence — LLM analysis enriches results but cannot "
             "unilaterally block a merge.",
