@@ -73,7 +73,7 @@ class OmarGateConfig(BaseSettings):
     )
     intent_price_profile: Literal["", "typesafe-input-20261020"] = Field(default="")
     intent_policy: SecretStr = Field(default="", description="Private review policy JSON; no packaged rubric default")
-    review_routing: Literal["legacy", "intent-cascade-v1"] = Field(default="legacy")
+    review_routing: Literal["legacy", "intent-cascade-v1", "intent-shadow-v1"] = Field(default="legacy")
 
     # Codex CLI path (OpenAI-only); wiring added later.
     use_codex: bool = Field(default=True, description="Use Codex CLI for deep audit (falls back to API)")
@@ -193,12 +193,16 @@ class OmarGateConfig(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_review_routing(self) -> "OmarGateConfig":
-        if self.review_routing == "intent-cascade-v1":
+        if self.uses_intent_router:
             if self.llm_provider != "typesafe":
-                raise ValueError("intent-cascade-v1 requires llm_provider=typesafe")
+                raise ValueError(f"{self.review_routing} requires llm_provider=typesafe")
             if self.llm_failure_policy != "block":
-                raise ValueError("intent-cascade-v1 requires llm_failure_policy=block")
+                raise ValueError(f"{self.review_routing} requires llm_failure_policy=block")
         return self
+
+    @property
+    def uses_intent_router(self) -> bool:
+        return self.review_routing in {"intent-cascade-v1", "intent-shadow-v1"}
 
     @field_validator("severity_gate", mode="before")
     @classmethod
@@ -302,6 +306,14 @@ class OmarGateConfig(BaseSettings):
             self.review_policy  # validate the private policy before any provider call
             if self.codex_only:
                 raise ValueError("codex_only cannot be true when llm_provider=typesafe")
+            if self.review_routing == "intent-shadow-v1":
+                if self.sentinelayer_managed_llm:
+                    raise ValueError("intent-shadow-v1 requires direct provider keys, not sentinelayer_managed_llm")
+                for name in ("model", "model_fallback", "codex_model"):
+                    if name in self.model_fields_set and getattr(self, name) not in {"", "gpt-6.1-sol"}:
+                        raise ValueError("intent-shadow-v1 requires the fixed gpt-6.1-sol reviewer")
+                    object.__setattr__(self, name, "gpt-6.1-sol")
+                return self
             if self.review_routing == "intent-cascade-v1":
                 for name in ("model", "model_fallback", "codex_model"):
                     if name in self.model_fields_set and getattr(self, name) not in {"", "gpt-6-sol"}:

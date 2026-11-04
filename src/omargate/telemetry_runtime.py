@@ -395,7 +395,7 @@ def _estimate_cost(
     gh: GitHubClient,
     config: OmarGateConfig,
 ) -> float | None:
-    if config.review_routing == "intent-cascade-v1":
+    if config.review_routing in {"intent-cascade-v1", "intent-shadow-v1"}:
         # The line-count heuristic below excludes the typed stages and may
         # choose a model that is cheaper than the eventual escalation route.
         # Whole-source partitions are built later, but their aggregate

@@ -58,7 +58,7 @@ inputs:
     default: ''
 
   review_routing:
-    description: 'Review routing policy: legacy or intent-cascade-v1 (requires TypeSafe and OpenAI keys)'
+    description: 'Review routing policy: legacy, intent-cascade-v1, or intent-shadow-v1 (fixed Sol reviewer; typed intent advice only)'
     required: false
     default: 'legacy'
 
@@ -392,7 +392,7 @@ runs:
         python -P -m pip install --no-cache-dir --require-hashes -r "${GITHUB_ACTION_PATH}/requirements.lock.txt"
 
     - name: Install Codex CLI
-      if: inputs.review_routing != 'intent-cascade-v1' && (inputs.use_codex != 'false' || inputs.codex_only == 'true')
+      if: inputs.review_routing == 'legacy' && (inputs.use_codex != 'false' || inputs.codex_only == 'true')
       shell: bash
       run: |
         set -euo pipefail
